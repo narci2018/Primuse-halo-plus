@@ -19,7 +19,13 @@ jobs:
 
       - name: Select Xcode Version
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.0.app || sudo xcode-select -s /Applications/Xcode_16.1.app || sudo xcode-select -s /Applications/Xcode_16.2.app || true
+          for xcode in /Applications/Xcode_16.2.app /Applications/Xcode_16.1.app /Applications/Xcode.app /Applications/Xcode_16.0.app; do
+            if [ -d "$xcode" ]; then
+              echo "Selecting $xcode"
+              sudo xcode-select -s "$xcode"
+              break
+            fi
+          done
           xcodebuild -version
 
       - name: Install XcodeGen
