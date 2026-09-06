@@ -1,0 +1,77 @@
+{
+  "name": "halo-music",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "HALO Music desktop client",
+  "author": "HALO Music",
+  "scripts": {
+    "dev": "wrangler pages dev .",
+    "deploy": "wrangler pages deploy .",
+    "test": "node --test tests/*.test.js",
+    "desktop:dev": "electron .",
+    "desktop:dist": "npm run desktop:electron",
+    "desktop:electron": "electron-builder --win nsis",
+    "desktop:portable": "electron-builder --win portable",
+    "desktop:all": "npm run desktop:electron"
+  },
+  "devDependencies": {
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.halomusic.desktop",
+    "productName": "HALO Music",
+    "forceCodeSigning": true,
+    "publish": {
+      "provider": "github",
+      "owner": "zhoujungis",
+      "repo": "halo_music",
+      "releaseType": "release"
+    },
+    "icon": "icon.svg",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "index.html",
+      "major.js",
+      "styles.css",
+      "admin/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "signExecutable": true,
+      "signAndEditExecutable": true,
+      "legalTrademarks": "HALO Music"
+    },
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
+    "nsis": {
+      "artifactName": "HALO-Music-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "HALO Music",
+      "runAfterFinish": true,
+      "include": "build/installer.nsh",
+      "script": "build/custom-installer.nsi"
+    },
+    "portable": {
+      "artifactName": "HALO-Music-Portable-${version}-${arch}.${ext}"
+    }
+  }
+}

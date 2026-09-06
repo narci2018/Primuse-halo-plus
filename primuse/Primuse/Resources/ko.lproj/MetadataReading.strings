@@ -1,0 +1,14 @@
+"title" = "태그 읽기 속도";
+"automatic" = "자동";
+"fast" = "최대 속도";
+"energySaving" = "에너지 절약";
+"playback" = "재생 우선";
+"lowPower" = "저전력 모드";
+"thermal" = "기기를 식히기 위해 속도 제한 중";
+"cooling" = "기기가 식을 때까지 일시 정지";
+"background" = "백그라운드 읽기";
+"rate" = "분당 %.1f곡";
+"fastWarningTitle" = "최대 속도 읽기를 켤까요?";
+"fastWarningMessage" = "태그를 더 빨리 읽지만 발열, 배터리 사용량, 화면 끊김이 증가할 수 있습니다. 기기가 따뜻해지거나 저전력 모드 또는 음악 재생 중에는 속도를 낮추고 필요하면 일시 중지합니다. 모드는 언제든 변경할 수 있습니다.";
+"fastWarningConfirm" = "실행";
+"cancel" = "취소";

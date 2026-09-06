@@ -1,0 +1,10 @@
+// Deutsch: Überschreibungen für App-Metadaten. Fehlt ein Schlüssel hier,
+// fällt das System auf den englischen Standard (Info.plist) zurück.
+"CFBundleDisplayName" = "Primuse";
+
+// Texte der System-Berechtigungsdialoge. Apple verlangt eine klare, zur
+// Funktion passende Formulierung.
+"NSSiriUsageDescription" = "Wird verwendet, um die Wiedergabe zu starten und Primuse per Siri-Sprachbefehl zu steuern.";
+"NSAppleMusicUsageDescription" = "Primuse benötigt Zugriff auf deine Apple Music-/iTunes-Mediathek, um lokale Titel als Wiedergabequelle zu importieren.";
+"NSLocalNetworkUsageDescription" = "Primuse benötigt Zugriff auf das lokale Netzwerk, um deine NAS-Geräte, Medienserver und andere Musikquellen zu finden und sich mit ihnen zu verbinden.";
+"NSMotionUsageDescription" = "Primuse nutzt die Bewegungsdaten deiner Kopfhörer, damit Spatial Audio beim Drehen des Kopfes stabil ausgerichtet bleibt.";

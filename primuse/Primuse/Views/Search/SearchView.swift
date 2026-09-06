@@ -1,0 +1,2425 @@
+import SwiftUI
+import MusicKit
+import PrimuseKit
+
+struct LibrarySearchScope: Equatable {
+    let title: String
+    let songIDs: Set<String>
+    var includesSubfolders = false
+
+    func songs(in visibleSongs: [PrimuseKit.Song]) -> [PrimuseKit.Song] {
+        visibleSongs.filter { songIDs.contains($0.id) }
+    }
+}
+
+#if os(iOS)
+@MainActor
+final class LibrarySearchNavigation {
+    private struct Entry {
+        let owner: UUID
+        let tab: Int
+        let resolve: @MainActor () -> LibrarySearchScope?
+    }
+
+    private var entries: [Entry] = []
+
+    func register(owner: UUID, tab: Int, resolve: @escaping @MainActor () -> LibrarySearchScope?) {
+        remove(owner: owner)
+        entries.append(Entry(owner: owner, tab: tab, resolve: resolve))
+    }
+
+    func remove(owner: UUID) {
+        entries.removeAll { $0.owner == owner }
+    }
+
+    func scope(for tab: Int) -> LibrarySearchScope? {
+        entries.last { $0.tab == tab }?.resolve()
+    }
+}
+
+private struct LibrarySearchNavigationKey: EnvironmentKey {
+    static let defaultValue: LibrarySearchNavigation? = nil
+}
+
+private struct LibrarySearchTabKey: EnvironmentKey {
+    static let defaultValue = 0
+}
+
+extension EnvironmentValues {
+    var librarySearchNavigation: LibrarySearchNavigation? {
+        get { self[LibrarySearchNavigationKey.self] }
+        set { self[LibrarySearchNavigationKey.self] = newValue }
+    }
+
+    var librarySearchTab: Int {
+        get { self[LibrarySearchTabKey.self] }
+        set { self[LibrarySearchTabKey.self] = newValue }
+    }
+}
+
+private struct LibrarySearchContextModifier: ViewModifier {
+    @Environment(\.librarySearchNavigation) private var navigation
+    @Environment(\.librarySearchTab) private var tab
+    @State private var owner = UUID()
+    let resolve: @MainActor () -> LibrarySearchScope?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { navigation?.register(owner: owner, tab: tab, resolve: resolve) }
+            .onDisappear { navigation?.remove(owner: owner) }
+    }
+}
+
+extension View {
+    func librarySearchContext(_ resolve: @escaping @MainActor () -> LibrarySearchScope?) -> some View {
+        modifier(LibrarySearchContextModifier(resolve: resolve))
+    }
+}
+#endif
+
+struct SearchScopeSwitchButton: View {
+    @Binding var scope: LibrarySearchScope?
+    let context: LibrarySearchScope
+
+    var body: some View {
+        Button {
+            scope = scope == nil ? context : nil
+        } label: {
+            Label(
+                scope == nil ? String(localized: "search_current_scope") : String(localized: "search_global"),
+                systemImage: scope == nil ? (context.includesSubfolders ? "folder" : "music.note.list") : "globe"
+            )
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .accessibilityValue(Text(scope?.title ?? String(localized: "search_global")))
+        .accessibilityIdentifier("search.scope.toggle")
+    }
+}
+
+enum SearchCatalogPolicy {
+    static func albums(
+        query: String,
+        visibleAlbums: [PrimuseKit.Album],
+        relatedAlbums: [PrimuseKit.Album]
+    ) -> [PrimuseKit.Album] {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        let directMatches = LibrarySearchWorker.compute(
+            query: query,
+            songs: [],
+            albums: visibleAlbums,
+            cache: LibrarySearchCache(),
+            includeLyrics: false,
+            songLimit: 0,
+            albumLimit: visibleAlbums.count
+        ).albumResults
+        let visibleIDs = Set(visibleAlbums.map(\.id))
+        var seen = Set(directMatches.map(\.id))
+        return directMatches + relatedAlbums.filter {
+            visibleIDs.contains($0.id) && seen.insert($0.id).inserted
+        }
+    }
+}
+
+@MainActor
+private final class SearchWorkCoordinator {
+    var searchTask: Task<Void, Never>?
+    var intelligenceTask: Task<Void, Never>?
+    var lyricsCache = LibrarySearchCache()
+    var generation = 0
+
+    func cancelSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        intelligenceTask?.cancel()
+        intelligenceTask = nil
+    }
+}
+
+#if os(iOS)
+private enum SearchCatalogDestination: Hashable {
+    case albums, artists
+}
+
+private struct SearchAlbumResultsView: View {
+    let albums: [PrimuseKit.Album]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 22) {
+                ForEach(albums) { album in
+                    NavigationLink(value: album) {
+                        AlbumCardView(album: album)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(20)
+        }
+        .navigationTitle(Text("tab_albums"))
+        .minimalNavigationDetail()
+    }
+}
+#endif
+
+private struct SemanticLibrarySearchResult: Identifiable, Sendable {
+    let song: PrimuseKit.Song
+    let relatedConcept: String
+
+    var id: String { song.id }
+}
+
+private enum SemanticSearchFeedback: Equatable {
+    case idle
+    case loading
+    case success(provider: String, resultCount: Int, fallbackDepth: Int)
+    case noMatches(provider: String, fallbackDepth: Int)
+    case failed
+
+    var isVisible: Bool { self != .idle }
+}
+
+#if os(macOS)
+private enum MacSearchResultFilter: Hashable {
+    case all
+    case songs
+    case albums
+    case artists
+    case lyrics
+    case appleMusic
+}
+#endif
+
+private struct SearchLibraryRevisionObserver: View {
+    @Environment(MusicLibrary.self) private var library
+    let onRevisionChange: () -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onChange(of: library.searchRevision) { _, _ in onRevisionChange() }
+            .onChange(of: library.lyricsSearchRevision) { _, _ in onRevisionChange() }
+    }
+}
+
+@MainActor
+enum SearchHistoryStore {
+    static let key = CloudKVSKey.recentSearches
+    static let didChangeNotification = Notification.Name("primuse.searchHistory.didChange")
+    private static let limit = 12
+
+    static func load() -> [String] {
+        UserDefaults.standard.stringArray(forKey: key) ?? []
+    }
+
+    static func record(_ query: String) {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return }
+
+        var queries = load()
+        queries.removeAll { $0.caseInsensitiveCompare(trimmedQuery) == .orderedSame }
+        queries.insert(trimmedQuery, at: 0)
+        save(Array(queries.prefix(limit)))
+    }
+
+    static func save(_ queries: [String]) {
+        UserDefaults.standard.set(queries, forKey: key)
+        CloudKVSSync.shared.markChanged(key: key)
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
+    }
+}
+
+struct SearchView: View {
+    @Environment(AudioPlayerService.self) private var player
+    @Environment(MusicLibrary.self) private var library
+    @Environment(SourcesStore.self) private var sourcesStore
+    @Environment(MetadataBackfillService.self) private var backfill
+    @Environment(AppleMusicService.self) private var appleMusic
+    @Environment(MusicIntelligenceService.self) private var intelligence
+    @Environment(AggregatedMusicService.self) private var aggregatedMusic
+    @AppStorage(AppleMusicFeatureSettings.catalogSearchEnabledKey)
+    private var appleMusicCatalogSearchEnabled = true
+    #if os(iOS)
+    @Environment(\.appNavigationMode) private var appNavigationMode
+    #endif
+    @Binding var searchText: String
+    @Binding private var scope: LibrarySearchScope?
+    private let contextualScope: LibrarySearchScope?
+    private let showsMacQuerySummary: Bool
+    let onShowInLibrary: (PrimuseKit.Song) -> Void
+    @State private var searchResults: [LibrarySearchResult] = []
+    @State private var matchingAlbums: [PrimuseKit.Album] = []
+    @State private var semanticResults: [SemanticLibrarySearchResult] = []
+    @State private var recentSearches: [String] = []
+    /// Task handles, generation tokens and the reusable lyrics index are
+    /// operational state. Keeping them outside SwiftUI rendering state avoids
+    /// extra full-page evaluations on every debounce/cancellation/cache fill.
+    @State private var workCoordinator = SearchWorkCoordinator()
+    /// 是否正在跑一次搜索 (含 debounce + detached worker)。用来在结果还没
+    /// 出来时显示 loading 占位, 避免 200ms+ 窗口里先闪一下 "无匹配" 再
+    /// 跳到结果。
+    @State private var isSearching: Bool = false
+    @State private var isIntelligenceSearching: Bool = false
+    @State private var semanticSearchFeedback: SemanticSearchFeedback = .idle
+    /// 当前已经渲染的结果对应的 query。如果它与 searchText 不一致, 说明
+    /// 屏幕上还是上一轮的旧结果, ContentUnavailableView 不该出来。
+    @State private var renderedQuery: String = ""
+    @State private var intelligenceRenderedQuery: String = ""
+    @State private var selection = SongSelectionModel()
+    #if os(macOS)
+    @State private var macResultFilter: MacSearchResultFilter = .all
+    #endif
+
+    init(
+        searchText: Binding<String>,
+        scope: Binding<LibrarySearchScope?> = .constant(nil),
+        contextualScope: LibrarySearchScope? = nil,
+        showsMacQuerySummary: Bool = true,
+        onShowInLibrary: @escaping (PrimuseKit.Song) -> Void = { _ in }
+    ) {
+        self._searchText = searchText
+        self._scope = scope
+        self.contextualScope = contextualScope
+        self.showsMacQuerySummary = showsMacQuerySummary
+        self.onShowInLibrary = onShowInLibrary
+    }
+
+    private var usesMinimalNavigation: Bool {
+        #if os(iOS)
+        appNavigationMode == .minimal
+        #else
+        false
+        #endif
+    }
+
+    private var visibleSemanticResults: [SemanticLibrarySearchResult] {
+        guard intelligenceRenderedQuery == searchText,
+              renderedQuery == searchText else { return [] }
+        let composition = LibrarySearchCompositionPolicy.compose(
+            primaryResultIDs: searchResults.map(\.song.id),
+            intelligentResultIDs: semanticResults.map(\.song.id),
+            intelligentAvailable: hasUsableIntelligentResponse
+        )
+        let supplementIDs = Set(composition.intelligentSupplementIDs)
+        return semanticResults.filter { supplementIDs.contains($0.song.id) }
+    }
+
+    private var hasUsableIntelligentResponse: Bool {
+        switch semanticSearchFeedback {
+        case .success, .noMatches:
+            return true
+        case .loading:
+            return !semanticResults.isEmpty
+        case .idle, .failed:
+            return false
+        }
+    }
+
+    private var appleMusicSearchEnabled: Bool {
+        scope == nil && AppleMusicCatalogSearchAvailabilityPolicy.isEnabled(
+            catalogSearchEnabled: appleMusicCatalogSearchEnabled,
+            disabledSourceIDs: library.disabledSourceIDs
+        )
+    }
+
+    private var visibleAppleMusicSearchResults: [MusicKit.Song] {
+        appleMusicSearchEnabled ? appleMusic.searchResults : []
+    }
+
+    /// “全选”只圈用户在当前筛选下真正看得到的本地歌曲。Apple Music 在线结果
+    /// 不是本地曲库条目，不参与多选。
+    private var selectableSongIDs: [String] {
+        let kinds: [LibrarySearchMatchKind] = [.metadata, .path, .lyrics, .fuzzy]
+        #if os(macOS)
+        switch macResultFilter {
+        case .albums, .artists, .appleMusic:
+            return []
+        case .lyrics:
+            return searchResults
+                .filter { $0.matchKind == .lyrics }
+                .map(\.song.id)
+        case .songs:
+            let directIDs = kinds.flatMap { kind in
+                searchResults
+                    .filter { $0.matchKind == kind }
+                    .map(\.song.id)
+            }
+            return directIDs + visibleSemanticResults.prefix(40).map(\.song.id)
+        case .all:
+            let directIDs = kinds.flatMap { kind -> [String] in
+                let bucket = searchResults.filter { $0.matchKind == kind }
+                return bucket.prefix(kind == .lyrics ? 3 : 6).map(\.song.id)
+            }
+            return directIDs + visibleSemanticResults.prefix(6).map(\.song.id)
+        }
+        #else
+        let directIDs = kinds.flatMap { kind -> [String] in
+            let bucket = searchResults.filter { $0.matchKind == kind }
+            return bucket.prefix(scope == nil ? 40 : bucket.count).map(\.song.id)
+        }
+        let semanticIDs = visibleSemanticResults.prefix(40).map(\.song.id)
+        return directIDs + semanticIDs
+        #endif
+    }
+
+    var body: some View {
+        // macOS: 不再自带 NavigationStack —— SearchView 已经渲染在
+        // MacDetailContainer 的栈里, 点专辑/艺术家结果时直接 push 到主栈,
+        // 跟从专辑网格点进去走同一条导航 (返回按钮 / 路由复位都一致), 不会
+        // 被困在搜索页自己的嵌套栈里。iOS 仍需要自己的 NavigationStack。
+        Group {
+            #if os(macOS)
+            macBody
+            #else
+            NavigationStack {
+                iosBody
+            }
+            #endif
+        }
+        .songBatchActions(
+            selection: selection,
+            orderedIDs: { selectableSongIDs },
+            resolve: { library.song(id: $0) }
+        )
+        .onChange(of: renderedQuery) { _, _ in
+            // 换了一轮结果，之前选中的歌多半已经不在屏幕上了。
+            selection.prune(to: Set(selectableSongIDs))
+        }
+        .onChange(of: semanticResults.map(\.id)) { _, _ in
+            selection.prune(to: Set(selectableSongIDs))
+        }
+        .onAppear {
+            loadRecentSearches()
+            resumeSearchIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CloudKVSSync.externalChangeNotification)) { note in
+            guard let key = note.userInfo?["key"] as? String,
+                  key == SearchHistoryStore.key else { return }
+            loadRecentSearches()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: SearchHistoryStore.didChangeNotification)) { _ in
+            loadRecentSearches()
+        }
+        .onChange(of: scope) { _, _ in
+            selection.deactivate()
+            searchResults = []
+            matchingAlbums = []
+            semanticResults = []
+            renderedQuery = ""
+            workCoordinator.lyricsCache = LibrarySearchCache()
+            performSearch(query: searchText)
+            performAppleMusicSearch(query: searchText)
+            performAggregatedMusicSearch(query: searchText)
+        }
+        .onChange(of: searchText) { _, newValue in
+            performSearch(query: newValue)
+            performAppleMusicSearch(query: newValue)
+            performAggregatedMusicSearch(query: newValue)
+        }
+        .onChange(of: appleMusicSearchEnabled) { _, isEnabled in
+            if isEnabled {
+                performAppleMusicSearch(query: searchText)
+            } else {
+                appleMusic.clearCatalogSearchResults()
+            }
+        }
+        .background {
+            SearchLibraryRevisionObserver {
+                workCoordinator.lyricsCache = LibrarySearchCache()
+                if !searchText.isEmpty {
+                    performSearch(query: searchText)
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseLibrarySearchIndexDidChange)) { _ in
+            guard !searchText.isEmpty else { return }
+            performSearch(query: searchText)
+        }
+        .onDisappear { workCoordinator.cancelSearch() }
+    }
+
+    @ViewBuilder
+    private var iosBody: some View {
+        if usesMinimalNavigation {
+            iosSearchContent
+        } else {
+            iosSearchContent
+                .searchable(text: $searchText, prompt: Text(searchPrompt))
+                .onSubmit(of: .search) { addRecentSearch(searchText) }
+        }
+    }
+
+    private var iosSearchContent: some View {
+        Group {
+            if searchText.isEmpty {
+                if library.visibleSongs.isEmpty {
+                    EmptyStateView(
+                        titleKey: "search_empty_library",
+                        descriptionKey: "search_empty_library_desc",
+                        systemImage: "magnifyingglass"
+                    )
+                } else {
+                    recentSearchView
+                }
+            } else if isSearching && renderedQuery != searchText {
+                searchingPlaceholder
+            } else if searchResults.isEmpty
+                        && matchingAlbums.isEmpty
+                        && matchingArtists.isEmpty
+                        && visibleSemanticResults.isEmpty
+                        && visibleAppleMusicSearchResults.isEmpty
+                        && !semanticSearchFeedback.isVisible {
+                if isSearching || renderedQuery != searchText {
+                    searchingPlaceholder
+                } else {
+                    ContentUnavailableView.search(text: searchText)
+                }
+            } else {
+                searchResultsView
+            }
+        }
+        .navigationTitle(usesMinimalNavigation ? Text("") : Text("search_title"))
+        .toolbarTitleDisplayMode(usesMinimalNavigation ? .inline : .inlineLarge)
+        #if os(iOS)
+        .minimalNavigationRoot()
+        .toolbar {
+            if !usesMinimalNavigation, let contextualScope {
+                ToolbarItem(placement: .topBarTrailing) {
+                    SearchScopeSwitchButton(scope: $scope, context: contextualScope)
+                        .labelStyle(.titleOnly)
+                }
+            }
+        }
+        #endif
+        .navigationDestination(for: PrimuseKit.Album.self) { AlbumDetailView(album: $0) }
+        .navigationDestination(for: PrimuseKit.Artist.self) { ArtistDetailView(artist: $0) }
+        #if os(iOS)
+        .navigationDestination(for: SearchCatalogDestination.self) { destination in
+            switch destination {
+            case .albums:
+                SearchAlbumResultsView(albums: matchingAlbums)
+            case .artists:
+                ArtistListView(artists: matchingArtists)
+                    .navigationTitle(Text("tab_artists"))
+                    .minimalNavigationDetail()
+            }
+        }
+        #endif
+    }
+
+    private var searchPrompt: String {
+        guard let scope else { return String(localized: "search_prompt") }
+        return String(format: String(localized: "search_scope_prompt_format"), scope.title)
+    }
+
+    #if os(macOS)
+    private var macBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            macSearchHeader
+            macSearchContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .background(PMColor.bg.ignoresSafeArea())
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                NotificationCenter.default.post(name: .primuseDismissSearchFocus, object: nil)
+            }
+        )
+        .onSubmit(of: .search) { addRecentSearch(searchText) }
+        .onChange(of: macResultFilter) { _, _ in
+            selection.prune(to: Set(selectableSongIDs))
+        }
+        .onChange(of: appleMusicSearchEnabled) { _, isEnabled in
+            if !isEnabled, macResultFilter == .appleMusic {
+                macResultFilter = .all
+            }
+        }
+        // 注意: Album/Artist 的 navigationDestination 由 MacDetailContainer 的
+        // NavigationStack 统一注册, 这里不再重复声明 (否则会重复 destination)。
+    }
+
+    /// 顶部 48pt 圆角搜索框 + 过滤芯片。搜索框其实绑在主窗口 PMTitleBar 上, 这里
+    /// 仅展示当前查询并提供快速清除入口, 视觉上跟设计稿 S-01 对齐。
+    private var macSearchHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if showsMacQuerySummary {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(PMColor.brand)
+
+                    if searchText.isEmpty {
+                        Text(appleMusicSearchEnabled
+                             ? String(localized: "search_placeholder_universal")
+                             : String(localized: "search_prompt"))
+                            .font(.system(size: 14))
+                            .foregroundStyle(PMColor.textFaint)
+                    } else {
+                        Text(verbatim: searchText)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(PMColor.text)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Text(appleMusicSearchEnabled
+                         ? String(localized: "search_scope_local_apple_music")
+                         : String(localized: "search_chip_local"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PMColor.textMuted)
+                        .padding(.horizontal, 9)
+                        .frame(height: 24)
+                        .background(PMColor.glassBtn, in: Capsule())
+                        .overlay { Capsule().strokeBorder(PMColor.cardBorder, lineWidth: 0.5) }
+
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(PMColor.textFaint)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 48)
+                .pmCard(cornerRadius: 12)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    macFilterChip(
+                        .all,
+                        title: "\(String(localized: "search_chip_all")) · \(macTotalResultCount)"
+                    )
+                    macFilterChip(
+                        .songs,
+                        title: "\(String(localized: "tab_songs")) · \(macSongResultCount)"
+                    )
+                    macFilterChip(
+                        .albums,
+                        title: "\(String(localized: "tab_albums")) · \(matchingAlbums.count)"
+                    )
+                    macFilterChip(
+                        .artists,
+                        title: "\(String(localized: "tab_artists")) · \(matchingArtists.count)"
+                    )
+                    macFilterChip(.lyrics, title: String(
+                        format: String(localized: "search_lyrics_hits_format"),
+                        searchResults.filter { $0.matchKind == .lyrics }.count
+                    ))
+                    if appleMusicSearchEnabled {
+                        macFilterChip(
+                            .appleMusic,
+                            title: "Apple Music · \(visibleAppleMusicSearchResults.count)"
+                        )
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+        }
+        .padding(.horizontal, PMSpace.xxxl)
+        .padding(.top, PMSpace.l)
+        .padding(.bottom, PMSpace.m)
+    }
+
+    @ViewBuilder
+    private var macSearchContent: some View {
+        if searchText.isEmpty {
+            if library.visibleSongs.isEmpty {
+                EmptyStateView(
+                    titleKey: "search_empty_library",
+                    descriptionKey: "search_empty_library_desc",
+                    systemImage: "magnifyingglass"
+                )
+            } else {
+                macRecentSearchView
+            }
+        } else if isSearching && renderedQuery != searchText {
+            macSearchingPlaceholder
+        } else if searchResults.isEmpty
+                    && matchingAlbums.isEmpty
+                    && matchingArtists.isEmpty
+                    && visibleSemanticResults.isEmpty
+                    && visibleAppleMusicSearchResults.isEmpty
+                    && !semanticSearchFeedback.isVisible {
+            if isSearching || renderedQuery != searchText {
+                macSearchingPlaceholder
+            } else {
+                ContentUnavailableView.search(text: searchText)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        } else {
+            macSearchResultsView
+        }
+    }
+
+    private var macRecentSearchView: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    macSectionLabel("recent_searches")
+                    if recentSearches.isEmpty {
+                        Text("search_prompt")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(PMColor.textFaint)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .pmCard(cornerRadius: 10)
+                    } else {
+                        HStack(alignment: .top) {
+                            MacSearchFlowLayout(spacing: 8, rowSpacing: 8) {
+                                ForEach(recentSearches, id: \.self) { query in
+                                    macRecentSearchChip(query)
+                                }
+                            }
+                            Spacer(minLength: 16)
+                            Button("clear_all", role: .destructive, action: clearRecentSearches)
+                                .font(.system(size: 11.5))
+                                .buttonStyle(.plain)
+                                .foregroundStyle(PMColor.bad)
+                        }
+                    }
+                }
+
+                HStack(spacing: 14) {
+                    macSummaryTile(value: "\(library.visibleSongs.count)", label: "tab_songs", icon: "music.note")
+                    macSummaryTile(value: "\(library.visibleAlbums.count)", label: "tab_albums", icon: "square.stack")
+                    macSummaryTile(value: "\(library.visibleArtists.count)", label: "tab_artists", icon: "music.mic")
+                }
+            }
+            .padding(.horizontal, PMSpace.xxxl)
+            .padding(.bottom, 100)
+        }
+        .background(PMColor.bg)
+    }
+
+    @ViewBuilder
+    private var macSearchResultsView: some View {
+        if macResultFilter == .all {
+            macAllSearchResultsView
+        } else if macSelectedFilterHasContent {
+            macFilteredSearchResultsView
+        } else {
+            ContentUnavailableView.search(text: searchText)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(PMColor.bg)
+        }
+    }
+
+    private var macAllSearchResultsView: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 28) {
+                macTopMatchSection
+                    .frame(maxWidth: 680)
+                macAlbumsSection()
+                if !matchingArtists.isEmpty {
+                    macArtistsSection(showsAllResults: false)
+                }
+                VStack(alignment: .leading, spacing: 14) {
+                    macSongBucket(kind: .metadata, title: "search_section_metadata")
+                    macSongBucket(kind: .path, title: "search_section_path")
+                    macSongBucket(kind: .lyrics, title: "search_section_lyrics")
+                    macSongBucket(kind: .fuzzy, title: "search_section_fuzzy")
+                    macSemanticSection()
+                }
+                .frame(maxWidth: 900, alignment: .leading)
+                if appleMusicSearchEnabled {
+                    macAppleMusicSection()
+                        .frame(maxWidth: 900, alignment: .leading)
+                }
+                macRecentSearchInlineSection
+            }
+            .padding(.horizontal, PMSpace.xxxl)
+            .padding(.bottom, 100)
+        }
+        .background(PMColor.bg)
+    }
+
+    private var macFilteredSearchResultsView: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            Group {
+                switch macResultFilter {
+                case .songs:
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        macSongBucket(
+                            kind: .metadata,
+                            title: "search_section_metadata",
+                            showsAllResults: true
+                        )
+                        macSongBucket(
+                            kind: .path,
+                            title: "search_section_path",
+                            showsAllResults: true
+                        )
+                        macSongBucket(
+                            kind: .lyrics,
+                            title: "search_section_lyrics",
+                            showsAllResults: true
+                        )
+                        macSongBucket(
+                            kind: .fuzzy,
+                            title: "search_section_fuzzy",
+                            showsAllResults: true
+                        )
+                        macSemanticSection(limit: 40)
+                    }
+                    .frame(maxWidth: 900, alignment: .leading)
+                case .albums:
+                    macAlbumsSection(showsAllResults: true)
+                case .artists:
+                    macArtistsSection()
+                case .lyrics:
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        macSongBucket(
+                            kind: .lyrics,
+                            title: "search_section_lyrics",
+                            showsAllResults: true
+                        )
+                    }
+                    .frame(maxWidth: 900, alignment: .leading)
+                case .appleMusic:
+                    macAppleMusicSection(showsAllResults: true)
+                        .frame(maxWidth: 900, alignment: .leading)
+                case .all:
+                    EmptyView()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, PMSpace.xxxl)
+            .padding(.bottom, 100)
+        }
+        .background(PMColor.bg)
+    }
+
+    private var macSearchingPlaceholder: some View {
+        VStack(spacing: 14) {
+            ProgressView().controlSize(.large)
+            Text("search_running")
+                .font(.system(size: 13))
+                .foregroundStyle(PMColor.textMuted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(PMColor.bg)
+    }
+
+    private var macTopMatchSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            macSectionLabelText(String(localized: "search_top_match"))
+            if let album = matchingAlbums.first {
+                NavigationLink(value: album) {
+                    macTopCard(title: album.title,
+                               subtitle: "\(album.artistName ?? "") · \(String(localized: "tab_albums"))",
+                               systemImage: "square.stack",
+                               album: album)
+                }
+                .buttonStyle(.plain)
+            } else if let result = searchResults.first {
+                Button {
+                    playSong(result.song, lyricsHint: result.lyricSnippet, matchKind: result.matchKind)
+                } label: {
+                    macTopCard(title: result.song.title,
+                               subtitle: library.artistDisplayName(for: result.song) ?? "",
+                               systemImage: "music.note",
+                               song: result.song)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    showInLibraryButton(for: result.song)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func macAlbumsSection(showsAllResults: Bool = false) -> some View {
+        if !matchingAlbums.isEmpty {
+            let albums = showsAllResults
+                ? matchingAlbums
+                : Array(matchingAlbums.prefix(6))
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("tab_albums").font(.title3.weight(.bold))
+                    Spacer()
+                    if !showsAllResults && matchingAlbums.count > albums.count {
+                        Button("see_all") { macResultFilter = .albums }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(PMColor.brand)
+                    }
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 146, maximum: 210), spacing: 20)], alignment: .leading, spacing: 22) {
+                    ForEach(albums) { album in
+                        NavigationLink(value: album) {
+                            VStack(alignment: .leading, spacing: 7) {
+                                AlbumArtworkView(album: album, cornerRadius: 10)
+                                    .aspectRatio(1, contentMode: .fit)
+                                Text(album.title)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(PMColor.text)
+                                    .lineLimit(1)
+                                Text(album.artistName ?? "")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(PMColor.textFaint)
+                                    .lineLimit(1)
+                                Text(verbatim: [
+                                    album.year.map(String.init),
+                                    "\(album.songCount) \(String(localized: "songs_count"))"
+                                ].compactMap { $0 }.joined(separator: " · "))
+                                .font(.system(size: 11))
+                                .foregroundStyle(PMColor.textMuted)
+                                .lineLimit(1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func macAppleMusicSection(showsAllResults: Bool = false) -> some View {
+        let results = showsAllResults
+            ? visibleAppleMusicSearchResults
+            : Array(visibleAppleMusicSearchResults.prefix(5))
+        VStack(alignment: .leading, spacing: 10) {
+            macSectionLabel("search_apple_music_catalog_section")
+            HStack(spacing: 10) {
+                Image(systemName: "applelogo")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 20, height: 20)
+                    .background(Color(red: 0.98, green: 0.14, blue: 0.23), in: .rect(cornerRadius: 4))
+                Text(appleMusicStatusText)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(PMColor.textMuted)
+                Spacer()
+            }
+            .padding(14)
+            .pmCard(cornerRadius: 10)
+
+            if let error = appleMusic.lastPlaybackError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .pmRowBackground(cornerRadius: 6)
+            }
+
+            ForEach(results, id: \.id) { song in
+                Button {
+                    Task { await appleMusic.play(song) }
+                } label: {
+                    HStack(spacing: 10) {
+                        AsyncImage(url: song.artwork?.url(width: 64, height: 64)) { phase in
+                            if let image = phase.image {
+                                image.resizable().aspectRatio(contentMode: .fill)
+                            } else {
+                                RoundedRectangle(cornerRadius: 5).fill(PMColor.rowHover)
+                            }
+                        }
+                        .frame(width: 32, height: 32)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(song.title)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(PMColor.text)
+                                .lineLimit(1)
+                            Text(song.artistName)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(PMColor.textFaint)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .pmRowBackground(cornerRadius: 6)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var macRecentSearchInlineSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            macSectionLabel("recent_searches")
+            MacSearchFlowLayout(spacing: 8, rowSpacing: 8) {
+                ForEach(recentSearches.prefix(8), id: \.self) { query in
+                    macRecentSearchChip(query)
+                }
+            }
+        }
+    }
+
+    private func macRecentSearchChip(_ query: String) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                addRecentSearch(query)
+                searchText = query
+            } label: {
+                Text(verbatim: query)
+                    .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                removeRecentSearch(query)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(PMColor.textFaint)
+                    .frame(width: 12, height: 12)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help(Text("delete"))
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(PMColor.textMuted)
+        .padding(.leading, 10)
+        .padding(.trailing, 7)
+        .frame(height: 24)
+        .background(PMColor.glassBtn, in: Capsule())
+        .overlay { Capsule().strokeBorder(PMColor.cardBorder, lineWidth: 0.5) }
+    }
+
+    @ViewBuilder
+    private func macSongBucket(
+        kind: LibrarySearchMatchKind,
+        title: LocalizedStringKey,
+        showsAllResults: Bool = false
+    ) -> some View {
+        let matches = searchResults.filter { $0.matchKind == kind }
+        let bucket = showsAllResults
+            ? matches
+            : Array(matches.prefix(kind == .lyrics ? 3 : 6))
+        if !bucket.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                macSectionLabel(title)
+                ForEach(bucket) { result in
+                    if kind == .lyrics, let snippet = result.lyricSnippet {
+                        macLyricsResultCard(result: result, snippet: snippet)
+                            .songSelectable(
+                                songID: result.song.id,
+                                selection: selection,
+                                orderedIDs: { selectableSongIDs },
+                                defaultAction: {
+                                    playSong(result.song, lyricsHint: snippet, matchKind: result.matchKind)
+                                }
+                            )
+                    } else {
+                        macSongResultRow(result)
+                            .songSelectable(
+                                songID: result.song.id,
+                                selection: selection,
+                                orderedIDs: { selectableSongIDs },
+                                defaultAction: {
+                                    playSong(result.song, matchKind: result.matchKind)
+                                }
+                            )
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func macSemanticSection(limit: Int = 6) -> some View {
+        let results = Array(visibleSemanticResults.prefix(limit))
+        if semanticSearchFeedback.isVisible || !results.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles")
+                    macSectionLabel("search_ai_section")
+                }
+                semanticFeedbackRow
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                ForEach(results) { result in
+                    macSemanticResultRow(result)
+                        .songSelectable(
+                            songID: result.song.id,
+                            selection: selection,
+                            orderedIDs: { selectableSongIDs },
+                            defaultAction: { playSong(result.song) }
+                        )
+                }
+            }
+        }
+    }
+
+    private func macArtistsSection(showsAllResults: Bool = true) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("tab_artists").font(.title3.weight(.bold))
+                Spacer()
+                if !showsAllResults && matchingArtists.count > 6 {
+                    Button("see_all") { macResultFilter = .artists }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(PMColor.brand)
+                }
+            }
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 146, maximum: 210), spacing: 20)],
+                alignment: .leading,
+                spacing: 14
+            ) {
+                ForEach(showsAllResults ? matchingArtists : Array(matchingArtists.prefix(6))) { artist in
+                    NavigationLink(value: artist) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ArtistArtworkView(
+                                artist: artist,
+                                cornerRadius: 999
+                            )
+                            .aspectRatio(1, contentMode: .fit)
+                            Text(artist.name)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(PMColor.text)
+                                .lineLimit(1)
+                            Text("\(artist.albumCount) \(String(localized: "albums_count")) · \(artist.songCount) \(String(localized: "songs_count"))")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(PMColor.textFaint)
+                                .lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func macSemanticResultRow(_ result: SemanticLibrarySearchResult) -> some View {
+        Button {
+            playSong(result.song)
+        } label: {
+            HStack(spacing: 12) {
+                CachedArtworkView(
+                    coverRef: result.song.coverArtFileName,
+                    songID: result.song.id,
+                    size: 32,
+                    cornerRadius: 5,
+                    sourceID: result.song.sourceID,
+                    filePath: result.song.filePath,
+                    fileFormat: result.song.fileFormat
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(result.song.title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(PMColor.text)
+                        .lineLimit(1)
+                    Text(verbatim: String(
+                        format: String(localized: "search_ai_reason_format"),
+                        result.relatedConcept
+                    ))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(PMColor.textFaint)
+                        .lineLimit(1)
+                    searchResultPath(for: result.song)
+                }
+                Spacer()
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PMColor.brand)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .pmRowBackground(cornerRadius: 6)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            showInLibraryButton(for: result.song)
+        }
+    }
+
+    private func macTopCard(title: String,
+                            subtitle: String,
+                            systemImage: String,
+                            album: PrimuseKit.Album? = nil,
+                            song: PrimuseKit.Song? = nil) -> some View {
+        HStack(spacing: 16) {
+            Group {
+                if let song {
+                    CachedArtworkView(coverRef: song.coverArtFileName,
+                                      songID: song.id,
+                                      size: 80,
+                                      cornerRadius: 10,
+                                      sourceID: song.sourceID,
+                                      filePath: song.filePath,
+                                      fileFormat: song.fileFormat)
+                } else if let album {
+                    AlbumArtworkView(album: album, size: 80, cornerRadius: 10)
+                } else {
+                    Circle()
+                        .fill(PMColor.rowHover)
+                        .frame(width: 80, height: 80)
+                        .overlay { Image(systemName: systemImage).foregroundStyle(PMColor.textFaint) }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+                Text(verbatim: subtitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(PMColor.textMuted)
+                    .lineLimit(1)
+                if let song {
+                    searchResultPath(for: song)
+                }
+            }
+            Spacer()
+            Image(systemName: album == nil ? "play.fill" : "chevron.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(PMColor.brand, in: Circle())
+        }
+        .padding(16)
+        .pmCard(cornerRadius: 12)
+    }
+
+    private func macSongResultRow(_ result: LibrarySearchResult) -> some View {
+        Button {
+            playSong(result.song, lyricsHint: result.lyricSnippet, matchKind: result.matchKind)
+        } label: {
+            HStack(spacing: 12) {
+                CachedArtworkView(coverRef: result.song.coverArtFileName,
+                                  songID: result.song.id,
+                                  size: 32,
+                                  cornerRadius: 5,
+                                  sourceID: result.song.sourceID,
+                                  filePath: result.song.filePath,
+                                  fileFormat: result.song.fileFormat)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(result.song.title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(PMColor.text)
+                        .lineLimit(1)
+                    Text(library.artistDisplayName(for: result.song) ?? "")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(PMColor.textFaint)
+                        .lineLimit(1)
+                    searchResultPath(for: result.song)
+                }
+                Spacer()
+                Text(formatSearchTime(result.song.duration))
+                    .font(.system(size: 11, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(PMColor.textMuted)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .pmRowBackground(cornerRadius: 6)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            showInLibraryButton(for: result.song)
+            Divider()
+            Button {
+                selection.activate(seed: result.song.id)
+            } label: {
+                Label("batch_select", systemImage: "checkmark.circle")
+            }
+        }
+    }
+
+    private func macLyricsResultCard(result: LibrarySearchResult, snippet: String) -> some View {
+        Button {
+            playSong(result.song, lyricsHint: snippet, matchKind: .lyrics)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(result.song.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+                searchResultPath(for: result.song)
+                Text(snippet)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(PMColor.textMuted)
+                    .lineLimit(2)
+                Text("search_jump_to_lyrics_context")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(PMColor.textFaint)
+                if let timestamp = result.lyricTimestamp {
+                    Text(verbatim: String(
+                        format: String(localized: "search_match_time_format"),
+                        formatSearchTime(timestamp)
+                    ))
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(PMColor.brand)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PMColor.rowHover, in: .rect(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            showInLibraryButton(for: result.song)
+            Divider()
+            Button {
+                selection.activate(seed: result.song.id)
+            } label: {
+                Label("batch_select", systemImage: "checkmark.circle")
+            }
+        }
+    }
+
+    private func macSummaryTile(value: String, label: LocalizedStringKey, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(PMColor.brand)
+            Text(verbatim: value)
+                .font(.system(size: 28, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(PMColor.text)
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(PMColor.textMuted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .pmCard(cornerRadius: 12)
+    }
+
+    private func macSectionLabel(_ key: LocalizedStringKey) -> some View {
+        Text(key)
+            .font(.system(size: 11, weight: .semibold))
+            .tracking(0.8)
+            .textCase(.uppercase)
+            .foregroundStyle(PMColor.textFaint)
+    }
+
+    private func macSectionLabelText(_ text: String) -> some View {
+        Text(verbatim: text)
+            .font(.system(size: 11, weight: .semibold))
+            .tracking(0.8)
+            .textCase(.uppercase)
+            .foregroundStyle(PMColor.textFaint)
+    }
+
+    private func chipText(_ title: String, active: Bool) -> some View {
+        Text(verbatim: title)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(active ? .white : PMColor.textMuted)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(
+                active ? AnyShapeStyle(PMColor.brand) : AnyShapeStyle(PMColor.glassBtn),
+                in: Capsule()
+            )
+            .overlay {
+                Capsule().strokeBorder(active ? .clear : PMColor.cardBorder, lineWidth: 0.5)
+            }
+    }
+
+    private func macFilterChip(
+        _ filter: MacSearchResultFilter,
+        title: String
+    ) -> some View {
+        Button {
+            macResultFilter = filter
+        } label: {
+            chipText(title, active: macResultFilter == filter)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(macResultFilter == filter ? .isSelected : [])
+    }
+
+    private var macSelectedFilterHasContent: Bool {
+        switch macResultFilter {
+        case .all:
+            return true
+        case .songs:
+            return !searchResults.isEmpty
+                || !visibleSemanticResults.isEmpty
+                || semanticSearchFeedback.isVisible
+        case .albums:
+            return !matchingAlbums.isEmpty
+        case .artists:
+            return !matchingArtists.isEmpty
+        case .lyrics:
+            return searchResults.contains { $0.matchKind == .lyrics }
+        case .appleMusic:
+            return appleMusicSearchEnabled
+        }
+    }
+
+    private var macSongResultCount: Int {
+        searchResults.count + visibleSemanticResults.count
+    }
+
+    private var macTotalResultCount: Int {
+        macSongResultCount
+            + matchingAlbums.count
+            + matchingArtists.count
+            + visibleAppleMusicSearchResults.count
+    }
+
+    private var appleMusicStatusText: String {
+        switch appleMusic.authState {
+        case .notDetermined:
+            return String(localized: "apple_music_notice_notDetermined")
+        case .denied, .restricted:
+            return String(localized: "apple_music_notice_denied")
+        case .authorized:
+            guard appleMusicSearchEnabled else {
+                return String(localized: "search_apple_music_catalog_disabled")
+            }
+            if appleMusic.isSearching {
+                return String(localized: "search_apple_music_loading")
+            }
+            if let error = appleMusic.lastSearchError {
+                return error
+            }
+            return String(
+                format: String(localized: "search_apple_music_synced_results_format"),
+                visibleAppleMusicSearchResults.count
+            )
+        }
+    }
+
+    #endif
+
+    private var matchingArtists: [PrimuseKit.Artist] {
+        let query = renderedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard scope == nil, !query.isEmpty else { return [] }
+        var artists = library.visibleArtists.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        var seen = Set(artists.map(\.id))
+        for result in searchResults {
+            for id in library.artistIDs(for: result.song) {
+                guard seen.insert(id).inserted,
+                      let artist = library.visibleArtist(id: id) else { continue }
+                artists.append(artist)
+            }
+        }
+        return artists
+    }
+
+    @ViewBuilder
+    private var semanticFeedbackRow: some View {
+        switch semanticSearchFeedback {
+        case .idle:
+            EmptyView()
+        case .loading:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("search_ai_loading")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .success(let provider, let resultCount, let fallbackDepth):
+            Label(
+                String(
+                    format: String(localized: fallbackDepth > 0
+                                   ? "search_ai_success_fallback_format"
+                                   : "search_ai_success_format"),
+                    provider.isEmpty ? String(localized: "ai_provider_default_name") : provider,
+                    resultCount
+                ),
+                systemImage: fallbackDepth > 0 ? "arrow.trianglehead.branch" : "checkmark.circle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.green)
+        case .noMatches(let provider, let fallbackDepth):
+            Label(
+                String(
+                    format: String(localized: fallbackDepth > 0
+                                   ? "search_ai_no_matches_fallback_format"
+                                   : "search_ai_no_matches_format"),
+                    provider.isEmpty ? String(localized: "ai_provider_default_name") : provider
+                ),
+                systemImage: "sparkles"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case .failed:
+            Label("search_ai_failed", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private func formatSearchTime(_ t: TimeInterval) -> String {
+        guard t.isFinite, t >= 0 else { return "0:00" }
+        let total = Int(t)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private var recentSearchView: some View {
+        List {
+            if !recentSearches.isEmpty {
+                Section {
+                    ForEach(recentSearches, id: \.self) { query in
+                        Button {
+                            addRecentSearch(query)
+                            searchText = query
+                        } label: {
+                            Label(query, systemImage: "clock")
+                        }
+                    }
+                    .onDelete(perform: deleteRecentSearches)
+                } header: {
+                    HStack {
+                        Text("recent_searches")
+                        Spacer()
+                        Button("clear_all", role: .destructive, action: clearRecentSearches)
+                            .font(.caption)
+                    }
+                }
+            }
+
+            Section {
+                HStack {
+                    Image(systemName: "music.note.list")
+                        .foregroundStyle(.secondary)
+                    Text("\(scope?.songIDs.count ?? library.visibleSongs.count) \(String(localized: "tab_songs"))")
+                    if scope == nil {
+                        Spacer()
+                        Text("\(library.visibleAlbums.count) \(String(localized: "tab_albums"))")
+                        Text("·")
+                        Text("\(library.visibleArtists.count) \(String(localized: "tab_artists"))")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } header: {
+                Text(scope?.title ?? String(localized: "library"))
+            }
+        }
+    }
+
+    private var searchResultsView: some View {
+        List {
+            // 旧结果仍在屏上, 但新一轮搜索还在跑 — 顶部加一条细 progress,
+            // 让用户知道结果会刷新, 而不是误以为屏幕卡住。
+            if isSearching && renderedQuery != searchText {
+                Section {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("search_running")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if !matchingAlbums.isEmpty {
+                Section {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(alignment: .top, spacing: 14) {
+                            ForEach(matchingAlbums.prefix(8)) { album in
+                                NavigationLink(value: album) {
+                                    AlbumCardView(album: album).frame(width: 142)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .listRowSeparator(.hidden)
+                } header: {
+                    HStack {
+                        Text("tab_albums")
+                        Spacer()
+                        #if os(iOS)
+                        NavigationLink("see_all", value: SearchCatalogDestination.albums)
+                        .textCase(nil)
+                        #endif
+                    }
+                }
+            }
+
+            if !matchingArtists.isEmpty {
+                Section("tab_artists") {
+                    ForEach(matchingArtists.prefix(3)) { artist in
+                        NavigationLink(value: artist) {
+                            HStack(spacing: 12) {
+                                ArtistArtworkView(artist: artist, size: 44, cornerRadius: 22)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(artist.name).font(.subheadline).lineLimit(1)
+                                    Text("\(artist.songCount) \(String(localized: "songs_count"))")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    if matchingArtists.count > 3 {
+                        #if os(iOS)
+                        NavigationLink("see_all", value: SearchCatalogDestination.artists)
+                        #endif
+                    }
+                }
+            }
+
+            // Songs grouped by match kind — 用户能一眼区分"标题/艺术家命中"、
+            // "路径命中"、"歌词命中"和"拼音/模糊命中"。
+            // 每组限 40 条 (worker 整体也限 120), 防止单组撑满屏。
+            songSection(kind: .metadata, titleKey: "search_section_metadata")
+            songSection(kind: .path, titleKey: "search_section_path")
+            songSection(kind: .lyrics, titleKey: "search_section_lyrics")
+            songSection(kind: .fuzzy, titleKey: "search_section_fuzzy")
+            semanticSongSection
+
+            // Apple Music 启用时即使没结果也显示 section 标题, 让用户一眼看到
+            // "为什么没有 Apple Music 推荐" (未授权 / 搜索失败 / 真没结果)。
+            if appleMusicSearchEnabled {
+                appleMusicSection
+            }
+
+            if !aggregatedMusic.searchResults.isEmpty || aggregatedMusic.isSearching {
+                aggregatedMusicSection
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var aggregatedMusicSection: some View {
+        Section {
+            if aggregatedMusic.isSearching {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在搜索全网聚合音源...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let error = aggregatedMusic.lastSearchError, aggregatedMusic.searchResults.isEmpty {
+                Label(error, systemImage: "magnifyingglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(aggregatedMusic.searchResults) { song in
+                    aggregatedMusicRow(song)
+                }
+            }
+        } header: {
+            HStack {
+                Image(systemName: "sparkles.rectangle.stack")
+                Text("全网聚合音乐")
+                if !aggregatedMusic.searchResults.isEmpty {
+                    Text("(\(aggregatedMusic.searchResults.count))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func aggregatedMusicRow(_ songItem: AggregatedSongItem) -> some View {
+        let primuseSong = songItem.toPrimuseSong(systemSourceID: AggregatedMusicService.systemSourceID)
+        let isPlaying = player.currentSong?.id == primuseSong.id
+
+        return Button {
+            player.play(song: primuseSong)
+        } label: {
+            HStack(spacing: 12) {
+                if let urlString = songItem.coverURLString, let url = URL(string: urlString) {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } else {
+                            Color.secondary.opacity(0.15)
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.secondary.opacity(0.15))
+                        .frame(width: 44, height: 44)
+                        .overlay {
+                            Image(systemName: "music.note")
+                                .foregroundStyle(.secondary)
+                        }
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(songItem.title)
+                            .font(.subheadline)
+                            .lineLimit(1)
+                            .foregroundStyle(isPlaying ? Color.accentColor : Color.primary)
+
+                        Text(songItem.platform.badgeLabel)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(songItem.platform == .qq ? Color.green : (songItem.platform == .netease ? Color.red : Color.blue), in: Capsule())
+                    }
+
+                    Text("\(songItem.artist) · \(songItem.album.isEmpty ? "在线" : songItem.album)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                if isPlaying {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                player.insertNextInQueue([primuseSong])
+            } label: {
+                Label("下一首播放", systemImage: "text.line.first.and.arrowtriangle.forward")
+            }
+
+            Button {
+                player.appendToQueue([primuseSong])
+            } label: {
+                Label("添加到播放列表", systemImage: "text.line.last.and.arrowtriangle.forward")
+            }
+
+            Button {
+                Task {
+                    try? await library.save(song: primuseSong)
+                }
+            } label: {
+                Label("收藏到本地曲库", systemImage: "star")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var appleMusicSection: some View {
+        Section {
+            switch appleMusic.authState {
+            case .notDetermined:
+                Label("apple_music_notice_notDetermined", systemImage: "person.crop.circle.badge.exclamationmark")
+                    .font(.caption).foregroundStyle(.secondary)
+            case .denied, .restricted:
+                Label("apple_music_notice_denied", systemImage: "lock.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            case .authorized:
+                if appleMusic.isSearching {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("search_apple_music_loading").font(.caption).foregroundStyle(.secondary)
+                    }
+                } else if let err = appleMusic.lastSearchError {
+                    Label(err, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.red)
+                } else if visibleAppleMusicSearchResults.isEmpty {
+                    if appleMusic.lastSearchHitCount == 0 {
+                        Label("apple_music_notice_no_results", systemImage: "magnifyingglass")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    // hitCount == -1 表示还没搜过, 不显示状态 (避免空 section)
+                } else {
+                    ForEach(visibleAppleMusicSearchResults, id: \.id) { song in
+                        appleMusicRow(song)
+                    }
+                }
+                if let err = appleMusic.lastPlaybackError {
+                    Text(err).font(.caption).foregroundStyle(.red)
+                }
+            }
+        } header: {
+            HStack {
+                Image(systemName: "applelogo")
+                Text("search_section_apple_music")
+            }
+        }
+    }
+
+    /// 一组按 matchKind 过滤的歌曲 Section。空组直接 noop, 不显示标题。
+    @ViewBuilder
+    private func songSection(kind: LibrarySearchMatchKind, titleKey: LocalizedStringKey) -> some View {
+        let matches = searchResults.filter { $0.matchKind == kind }
+        let bucket = matches.prefix(scope == nil ? 40 : matches.count)
+        if !bucket.isEmpty {
+            Section {
+                ForEach(Array(bucket)) { result in
+                    VStack(alignment: .leading, spacing: 4) {
+                        SongRowView(
+                            song: result.song,
+                            isPlaying: player.currentSong?.id == result.song.id,
+                            selection: selection,
+                            queueSwipeActionsEnabled: false,
+                            context: SongRowView.context(for: result.song, sourcesStore: sourcesStore, backfill: backfill)
+                        )
+                        // Keep playback taps on the view that owns the context menu.
+                        // An ancestor gesture otherwise becomes the List cell's
+                        // competing hit target and prevents the row's long press.
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            playSong(result.song, lyricsHint: result.lyricSnippet, matchKind: result.matchKind)
+                        }
+                        searchResultPath(for: result.song, leadingPadding: 54)
+                        if result.matchKind == .lyrics, let snippet = result.lyricSnippet {
+                            // 歌词命中: 把命中的句子(含上下文)展开, 让用户一眼看到为什么命中。
+                            VStack(alignment: .leading, spacing: 3) {
+                                if let timestamp = result.lyricTimestamp {
+                                    Text(verbatim: String(
+                                        format: String(localized: "search_match_time_format"),
+                                        formatSearchTime(timestamp)
+                                    ))
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.tint)
+                                }
+                                Text(snippet)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.leading, 54)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                playSong(result.song, lyricsHint: snippet, matchKind: result.matchKind)
+                            }
+                        }
+                    }
+                    .songSelectable(
+                        songID: result.song.id,
+                        selection: selection,
+                        orderedIDs: { selectableSongIDs }
+                    )
+                    .searchResultSwipeActions(
+                        queueActionsEnabled: result.song.isPlayable
+                            && !selection.isActive,
+                        onInsertNext: { player.insertNextInQueue([result.song]) },
+                        onAppendToQueue: { player.appendToQueue([result.song]) }
+                    ) {
+                        showInLibraryButton(for: result.song)
+                    }
+                    .accessibilityAction(named: Text("show_in_library")) {
+                        onShowInLibrary(result.song)
+                    }
+                }
+            } header: {
+                Text(titleKey)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var semanticSongSection: some View {
+        let results = Array(visibleSemanticResults.prefix(40))
+        if semanticSearchFeedback.isVisible || !results.isEmpty {
+            Section {
+                semanticFeedbackRow
+                ForEach(results) { result in
+                    VStack(alignment: .leading, spacing: 3) {
+                        SongRowView(
+                            song: result.song,
+                            isPlaying: player.currentSong?.id == result.song.id,
+                            selection: selection,
+                            queueSwipeActionsEnabled: false,
+                            context: SongRowView.context(
+                                for: result.song,
+                                sourcesStore: sourcesStore,
+                                backfill: backfill
+                            )
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture { playSong(result.song) }
+
+                        Text(verbatim: String(
+                            format: String(localized: "search_ai_reason_format"),
+                            result.relatedConcept
+                        ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 54)
+                        searchResultPath(for: result.song, leadingPadding: 54)
+                    }
+                    .songSelectable(
+                        songID: result.song.id,
+                        selection: selection,
+                        orderedIDs: { selectableSongIDs }
+                    )
+                    .searchResultSwipeActions(
+                        queueActionsEnabled: result.song.isPlayable
+                            && !selection.isActive,
+                        onInsertNext: { player.insertNextInQueue([result.song]) },
+                        onAppendToQueue: { player.appendToQueue([result.song]) }
+                    ) {
+                        showInLibraryButton(for: result.song)
+                    }
+                    .accessibilityAction(named: Text("show_in_library")) {
+                        onShowInLibrary(result.song)
+                    }
+                }
+            } header: {
+                Label("search_ai_section", systemImage: "sparkles")
+            }
+        }
+    }
+
+    private func appleMusicRow(_ song: MusicKit.Song) -> some View {
+        Button {
+            Task { await appleMusic.play(song) }
+        } label: {
+            HStack(spacing: 12) {
+                AsyncImage(url: song.artwork?.url(width: 88, height: 88)) { phase in
+                    if let img = phase.image {
+                        img.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Color.secondary.opacity(0.15)
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(song.title).font(.subheadline).lineLimit(1)
+                    Text(song.artistName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "applelogo").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func searchResultPath(
+        for song: PrimuseKit.Song,
+        leadingPadding: CGFloat = 0
+    ) -> some View {
+        if let path = SongPathPresentationPolicy.displayPath(
+            filePath: song.filePath,
+            sourceID: song.sourceID,
+            sourceType: sourcesStore.source(id: song.sourceID)?.type
+        ) {
+            HStack(spacing: 4) {
+                Image(systemName: "folder")
+                Text(verbatim: path)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .font(.caption2.monospaced())
+            .foregroundStyle(.secondary)
+            .padding(.leading, leadingPadding)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: String(
+                format: String(localized: "search_result_path_accessibility_format"),
+                path
+            )))
+        }
+    }
+
+    /// 视图重新出现时补跑当前 query。两种丢状态场景:(1) iPhone 切 tab 时
+    /// onDisappear 取消了搜索 task, isSearching 被 defer 置回 false, 但 renderedQuery
+    /// 仍是旧值;(2) iPad detail 重建导致 @State(searchResults/renderedQuery) 清零,
+    /// 而 searchText 由 ContentView 持有保留非空。两种情况都没有任何 task 在跑,
+    /// body 会永久落在 searchingPlaceholder 分支。这里检测到"有词、结果对不上、
+    /// 且当前没在搜"时重新触发, 让结果恢复。
+    private func resumeSearchIfNeeded() {
+        guard !searchText.isEmpty, !isSearching, renderedQuery != searchText else { return }
+        performSearch(query: searchText)
+        performAppleMusicSearch(query: searchText)
+        performAggregatedMusicSearch(query: searchText)
+    }
+
+    private func performAppleMusicSearch(query: String) {
+        guard appleMusicSearchEnabled else {
+            appleMusic.clearCatalogSearchResults()
+            return
+        }
+        appleMusic.search(query: query)
+    }
+
+    private func performAggregatedMusicSearch(query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            aggregatedMusic.clearSearchResults()
+            return
+        }
+        Task {
+            await aggregatedMusic.search(query: trimmed)
+        }
+    }
+
+    private func performSearch(query: String) {
+        workCoordinator.cancelSearch()
+        workCoordinator.generation += 1
+        guard !query.isEmpty else {
+            searchResults = []
+            matchingAlbums = []
+            semanticResults = []
+            isSearching = false
+            isIntelligenceSearching = false
+            semanticSearchFeedback = .idle
+            renderedQuery = ""
+            intelligenceRenderedQuery = ""
+            return
+        }
+
+        let scopedSearch = scope != nil
+        let songsSnapshot = scope?.songs(in: library.visibleSongs) ?? library.visibleSongs
+        let albumsSnapshot = scopedSearch ? [] : library.visibleAlbums
+        let cacheSnapshot = workCoordinator.lyricsCache
+        let metadataRevisionKey = "\(library.visibleSongCollectionRevision):\(library.searchRevision)"
+
+        let myGen = workCoordinator.generation
+        isSearching = true
+
+        performSemanticSearch(
+            query: query,
+            songsSnapshot: songsSnapshot,
+            metadataRevisionKey: metadataRevisionKey,
+            generation: myGen
+        )
+
+        workCoordinator.searchTask = Task {
+            // 不管成功 / 取消 / 出错都要把 isSearching 关回去, 否则 UI 卡在
+            // loading 状态。用 generation 防止旧 task 的 defer 覆盖新一轮
+            // performSearch 设的状态 — 新 task 已 bump generation 时, 旧 task
+            // defer 看到 gen 不匹配就不动 state。
+            defer {
+                if myGen == workCoordinator.generation {
+                    isSearching = false
+                }
+            }
+            // Debounce 200ms
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
+
+            // The persistent index limits global matches before membership filtering.
+            // Search the scope directly so matches outside it cannot crowd out its songs.
+            let indexed: LibraryIndexedSearchOutput?
+            if scopedSearch {
+                indexed = nil
+            } else {
+                indexed = await LibrarySearchIndex.shared.search(
+                    query: query,
+                    songs: songsSnapshot,
+                    albums: albumsSnapshot,
+                    metadataRevisionKey: metadataRevisionKey
+                )
+            }
+            guard !Task.isCancelled else { return }
+
+            let output: LibrarySearchOutput
+            if var indexed {
+                // The first persistent lyrics build is intentionally gradual.
+                // Until it has examined the current song set, merge only the
+                // old literal-lyrics path (no metadata/pinyin ICU scan) so the
+                // feature remains complete during migration.
+                if !indexed.lyricsIndexComplete {
+                    let fallbackWorker = Task.detached(priority: .utility) {
+                        LibrarySearchWorker.compute(
+                            query: query,
+                            songs: songsSnapshot,
+                            albums: [],
+                            cache: cacheSnapshot,
+                            includeMetadata: false,
+                            includeLyrics: true,
+                            albumLimit: 0
+                        )
+                    }
+                    let fallback = await withTaskCancellationHandler {
+                        await fallbackWorker.value
+                    } onCancel: {
+                        fallbackWorker.cancel()
+                    }
+                    indexed.output = mergeIndexedSearch(
+                        indexed.output,
+                        literalFallback: fallback
+                    )
+                }
+                output = indexed.output
+            } else {
+                // FTS5/trigram is unavailable only on an unsupported SQLite
+                // runtime. Keep the corrected cancellable worker as a safe
+                // compatibility fallback.
+                let fallbackWorker = Task.detached(priority: .userInitiated) {
+                    LibrarySearchWorker.compute(
+                        query: query,
+                        songs: songsSnapshot,
+                        albums: albumsSnapshot,
+                        cache: cacheSnapshot,
+                        songLimit: scopedSearch ? songsSnapshot.count : 120
+                    )
+                }
+                output = await withTaskCancellationHandler {
+                    await fallbackWorker.value
+                } onCancel: {
+                    fallbackWorker.cancel()
+                }
+            }
+            guard !Task.isCancelled else { return }
+            let catalogWorker = Task.detached(priority: .userInitiated) {
+                SearchCatalogPolicy.albums(
+                    query: query,
+                    visibleAlbums: albumsSnapshot,
+                    relatedAlbums: output.albumResults
+                )
+            }
+            let albums = await withTaskCancellationHandler {
+                await catalogWorker.value
+            } onCancel: {
+                catalogWorker.cancel()
+            }
+            guard !Task.isCancelled, myGen == workCoordinator.generation else { return }
+            searchResults = output.songResults
+            matchingAlbums = albums
+            workCoordinator.lyricsCache = output.cache
+            renderedQuery = query
+            isSearching = false
+        }
+    }
+
+    private func performSemanticSearch(
+        query: String,
+        songsSnapshot: [PrimuseKit.Song],
+        metadataRevisionKey: String,
+        generation: Int
+    ) {
+        guard scope == nil, intelligence.isSemanticSearchConfigured else {
+            semanticResults = []
+            intelligenceRenderedQuery = query
+            isIntelligenceSearching = false
+            semanticSearchFeedback = .idle
+            return
+        }
+
+        isIntelligenceSearching = true
+        semanticSearchFeedback = .loading
+        semanticResults = []
+        workCoordinator.intelligenceTask = Task {
+            defer {
+                if generation == workCoordinator.generation {
+                    isIntelligenceSearching = false
+                }
+            }
+
+            do {
+                try await Task.sleep(for: .milliseconds(550))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, generation == workCoordinator.generation else { return }
+            intelligenceRenderedQuery = query
+            var streamedTerms: [String] = []
+            let outcome = await intelligence.semanticSearchOutcome(
+                for: query,
+                onStreamEvent: { event in
+                    guard !Task.isCancelled,
+                          generation == workCoordinator.generation else { return }
+                    switch event {
+                    case .reset:
+                        streamedTerms = []
+                        semanticResults = []
+                    case .term(let term):
+                        guard !streamedTerms.contains(where: {
+                            $0.caseInsensitiveCompare(term) == .orderedSame
+                        }) else { return }
+                        streamedTerms.append(term)
+                        let results = await semanticLibraryMatches(
+                            plan: AISemanticSearchPlan(expandedTerms: streamedTerms),
+                            songsSnapshot: songsSnapshot,
+                            metadataRevisionKey: metadataRevisionKey
+                        )
+                        guard !Task.isCancelled,
+                              generation == workCoordinator.generation else { return }
+                        semanticResults = results
+                    case .completed:
+                        break
+                    }
+                }
+            )
+            guard !Task.isCancelled, generation == workCoordinator.generation else { return }
+            switch outcome {
+            case .unavailable:
+                semanticResults = []
+                semanticSearchFeedback = .idle
+            case .failed:
+                semanticResults = []
+                semanticSearchFeedback = .failed
+            case .empty(let providerName, let fallbackDepth):
+                semanticResults = []
+                semanticSearchFeedback = .noMatches(
+                    provider: providerName,
+                    fallbackDepth: fallbackDepth
+                )
+            case .success(let execution):
+                let results = await semanticLibraryMatches(
+                    plan: execution.plan,
+                    songsSnapshot: songsSnapshot,
+                    metadataRevisionKey: metadataRevisionKey
+                )
+                guard !Task.isCancelled, generation == workCoordinator.generation else { return }
+                semanticResults = results
+                semanticSearchFeedback = results.isEmpty
+                    ? .noMatches(
+                        provider: execution.providerName,
+                        fallbackDepth: execution.fallbackDepth
+                    )
+                    : .success(
+                        provider: execution.providerName,
+                        resultCount: results.count,
+                        fallbackDepth: execution.fallbackDepth
+                    )
+            }
+            intelligenceRenderedQuery = query
+        }
+    }
+
+    private func semanticLibraryMatches(
+        plan: AISemanticSearchPlan,
+        songsSnapshot: [PrimuseKit.Song],
+        metadataRevisionKey: String
+    ) async -> [SemanticLibrarySearchResult] {
+        let concepts = AISemanticLibraryAggregationPolicy.concepts(from: plan)
+        var candidates: [AISemanticLibraryMatchCandidate] = []
+        var songsByID: [String: PrimuseKit.Song] = [:]
+        for (conceptOrder, concept) in concepts.enumerated() {
+            guard !Task.isCancelled else { return [] }
+            let indexed = await LibrarySearchIndex.shared.search(
+                query: concept,
+                songs: songsSnapshot,
+                albums: [],
+                metadataRevisionKey: metadataRevisionKey,
+                songLimit: 12,
+                albumLimit: 0
+            )
+
+            let matches: [LibrarySearchResult]
+            if let indexed {
+                matches = indexed.output.songResults
+            } else {
+                let fallbackWorker = Task.detached(priority: .utility) {
+                    LibrarySearchWorker.compute(
+                        query: concept,
+                        songs: songsSnapshot,
+                        albums: [],
+                        cache: LibrarySearchCache(),
+                        includeMetadata: true,
+                        includeLyrics: false,
+                        songLimit: 12,
+                        albumLimit: 0
+                    ).songResults
+                }
+                matches = await withTaskCancellationHandler {
+                    await fallbackWorker.value
+                } onCancel: {
+                    fallbackWorker.cancel()
+                }
+            }
+
+            for match in matches {
+                songsByID[match.song.id] = match.song
+                candidates.append(AISemanticLibraryMatchCandidate(
+                    songID: match.song.id,
+                    title: match.song.title,
+                    score: match.score,
+                    relatedConcept: concept,
+                    conceptOrder: conceptOrder
+                ))
+            }
+        }
+        return AISemanticLibraryAggregationPolicy.rankedMatches(candidates).compactMap { match in
+            guard let song = songsByID[match.songID] else { return nil }
+            return SemanticLibrarySearchResult(
+                song: song,
+                relatedConcept: match.relatedConcept
+            )
+        }
+    }
+
+    private func mergeIndexedSearch(
+        _ indexed: LibrarySearchOutput,
+        literalFallback: LibrarySearchOutput
+    ) -> LibrarySearchOutput {
+        var results = indexed.songResults
+        var ids = Set(results.map(\.id))
+        for result in literalFallback.songResults where !ids.contains(result.id) {
+            ids.insert(result.id)
+            results.append(result)
+        }
+        results.sort { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.song.title.localizedCaseInsensitiveCompare(rhs.song.title) == .orderedAscending
+        }
+        return LibrarySearchOutput(
+            songResults: Array(results.prefix(120)),
+            albumResults: indexed.albumResults,
+            cache: literalFallback.cache
+        )
+    }
+
+    private var searchingPlaceholder: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+            Text("search_running")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        #if os(iOS)
+        .background(Color(.systemBackground))
+        #else
+        .background(Color(NSColor.windowBackgroundColor))
+        #endif
+    }
+
+    private func playSong(_ song: PrimuseKit.Song, lyricsHint: String? = nil, matchKind: LibrarySearchMatchKind? = nil) {
+        guard let insertedIndex = player.insertNextInQueue([song]) else { return }
+        // 歌词命中: 让 NowPlayingView 加载完歌词后自动 seek 到那行;
+        // 同时打开全屏 NowPlayingView 让用户能立刻看到上下文。
+        if matchKind == .lyrics, let snippet = lyricsHint, !snippet.isEmpty {
+            player.requestLyricsJump(songID: song.id, snippet: snippet)
+            NotificationCenter.default.post(name: .primuseRequestShowNowPlaying, object: nil)
+        }
+        SiriMediaInteractionDonor.donate(song: song)
+        Task { await player.playFromQueue(at: insertedIndex) }
+        addRecentSearch(searchText)
+    }
+
+    private func showInLibraryButton(for song: PrimuseKit.Song) -> some View {
+        Button {
+            onShowInLibrary(song)
+        } label: {
+            Label("show_in_library", systemImage: "music.note.list")
+        }
+    }
+
+    private func loadRecentSearches() {
+        recentSearches = SearchHistoryStore.load()
+    }
+
+    private func addRecentSearch(_ query: String) {
+        SearchHistoryStore.record(query)
+    }
+
+    private func deleteRecentSearches(at offsets: IndexSet) {
+        recentSearches.remove(atOffsets: offsets)
+        saveRecentSearches()
+    }
+
+    private func clearRecentSearches() {
+        recentSearches.removeAll()
+        saveRecentSearches()
+    }
+
+    private func removeRecentSearch(_ query: String) {
+        recentSearches.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
+        saveRecentSearches()
+    }
+
+    private func saveRecentSearches() {
+        SearchHistoryStore.save(recentSearches)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func searchResultSwipeActions<LibraryAction: View>(
+        queueActionsEnabled: Bool,
+        onInsertNext: @escaping () -> Void,
+        onAppendToQueue: @escaping () -> Void,
+        @ViewBuilder showInLibrary: @escaping () -> LibraryAction
+    ) -> some View {
+        #if os(iOS)
+        if queueActionsEnabled {
+            self
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    Button(action: onInsertNext) {
+                        Label("insert_next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    }
+                    .tint(.accentColor)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(action: onAppendToQueue) {
+                        Label("add_to_queue", systemImage: "text.line.last.and.arrowtriangle.forward")
+                    }
+                    .tint(.green)
+
+                    showInLibrary()
+                        .tint(.accentColor)
+                }
+        } else {
+            self.swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                showInLibrary()
+                    .tint(.accentColor)
+            }
+        }
+        #else
+        self.swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            showInLibrary()
+                .tint(.accentColor)
+        }
+        #endif
+    }
+}
+
+#if os(macOS)
+private struct MacSearchFlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var rowSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? 480
+        let rows = rows(in: maxWidth, subviews: subviews)
+        return CGSize(width: maxWidth, height: rows.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var lineHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += lineHeight + rowSpacing
+                lineHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+    }
+
+    private func rows(in maxWidth: CGFloat, subviews: Subviews) -> (height: CGFloat, count: Int) {
+        guard subviews.isEmpty == false else { return (0, 0) }
+
+        var x: CGFloat = 0
+        var height: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var count = 1
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                height += lineHeight + rowSpacing
+                x = 0
+                lineHeight = 0
+                count += 1
+            }
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+
+        height += lineHeight
+        return (height, count)
+    }
+}
+#endif

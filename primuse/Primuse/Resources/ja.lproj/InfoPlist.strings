@@ -1,0 +1,10 @@
+// 日本語:App情報のオーバーライド。ここにキーがない場合は、
+// Info.plistの英語の既定値にフォールバックします。
+"CFBundleDisplayName" = "Primuse";
+
+// システムの権限ダイアログに表示する説明文。Appleは機能に即した
+// 明確な記述を必須としています。
+"NSSiriUsageDescription" = "Siriの音声コマンドで再生を開始し、Primuseを操作するために使用します。";
+"NSAppleMusicUsageDescription" = "ローカルの曲を再生ソースとして読み込むために、PrimuseはApple Music／iTunesライブラリへのアクセスを必要とします。";
+"NSLocalNetworkUsageDescription" = "PrimuseはNASデバイスやメディアサーバ、その他の音楽ソースを検出して接続するために、ローカルネットワークへのアクセスを必要とします。";
+"NSMotionUsageDescription" = "Primuseはヘッドフォンのモーションデータを使用して、頭を動かしても空間オーディオの定位を安定させます。";

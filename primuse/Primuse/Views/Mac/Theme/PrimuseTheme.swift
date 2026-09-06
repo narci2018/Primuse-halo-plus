@@ -1,0 +1,1819 @@
+#if os(macOS)
+import SwiftUI
+import AppKit
+
+// MARK: - Appearance Mode
+
+/// 整体外观模式 — Liquid Glass (透明 + 模糊) 或 Classic Material (实色 + 细分割线)。
+enum PMAppearanceMode: String, CaseIterable, Codable, Sendable {
+    case glass
+    case classic
+}
+
+private struct PMAppearanceModeKey: EnvironmentKey {
+    static let defaultValue: PMAppearanceMode = .glass
+}
+
+extension EnvironmentValues {
+    var pmAppearance: PMAppearanceMode {
+        get { self[PMAppearanceModeKey.self] }
+        set { self[PMAppearanceModeKey.self] = newValue }
+    }
+}
+
+// MARK: - Color Tokens
+
+/// 设计稿里的 CSS variable 直译成 SwiftUI Color。所有半透明值都跟暗色 / 浅色模式相关。
+enum PMColor {
+    // 文本
+    static let text       = dyn(dark: hex(0xEEF0F2),               light: hex(0x1C1D1F))
+    static let textMuted  = dyn(dark: hex(0xEEF0F2).opacity(0.66), light: hex(0x1C1D1F).opacity(0.62))
+    static let textFaint  = dyn(dark: hex(0xEEF0F2).opacity(0.42), light: hex(0x1C1D1F).opacity(0.42))
+
+    // 背景 — 浅色为冷静中性灰 (贴 Apple Music / 系统设置白天), 深色为微冷石墨
+    static let bg     = dyn(dark: hex(0x161719), light: hex(0xF3F4F6))
+    static let bgElev = dyn(dark: hex(0x202226), light: hex(0xFFFFFF))
+    static let bgDeep = dyn(dark: hex(0x0C0D0E), light: hex(0xE7E8EC))
+    /// 大播放器恒为暗底 (设计稿 AmbientBackdrop dark=true 用的 #0E0D0B), 不随系统浅色
+    /// 变亮 —— 否则浅色模式下白色歌词 / 按钮在浅底上看不清。
+    static let ambientDarkBase = hex(0x0E0D0B)
+
+    // 侧栏 (玻璃半透 + 经典实色两套, 由 modifier 选择)
+    static let sidebarGlass   = dyn(dark: hex(0x0A0B0D).opacity(0.82), light: hex(0xE8EAEE).opacity(0.65))
+    static let sidebarClassic = dyn(dark: hex(0x0E0F11),               light: hex(0xE8EAEE))
+
+    /// 底部播放栏玻璃模式的半透色 (设计稿 --pm-glass-fill): 盖在 NSVisualEffectView
+    /// 模糊层上, 让底栏是"半透材质"而不是实色卡片, 跟窗口融为一体。
+    static let barGlassFill = dyn(dark: hex(0x282B30).opacity(0.58), light: Color.white.opacity(0.58))
+
+    // 分割线
+    static let divider       = dyn(dark: Color.white.opacity(0.10), light: Color.black.opacity(0.10))
+    static let dividerStrong = dyn(dark: Color.white.opacity(0.20), light: Color.black.opacity(0.18))
+
+    // 卡片
+    static let card       = dyn(dark: Color.white.opacity(0.06), light: hex(0xFFFFFF))
+    static let cardBorder = dyn(dark: Color.white.opacity(0.10), light: Color.black.opacity(0.10))
+
+    // 状态色 — 浅色模式用更深、更饱和的变体, 保证在冷灰底上的可读对比度
+    static let flac = dyn(dark: hex(0x7ED187), light: hex(0x2E7A2E))
+    static let dsd  = dyn(dark: hex(0xB89EEE), light: hex(0x6A4DC8))
+    static let ok   = dyn(dark: hex(0x7ED187), light: hex(0x3D9A4D))
+    static let warn = dyn(dark: hex(0xF0B078), light: hex(0xC96442))
+    static let bad  = dyn(dark: hex(0xFF7565), light: hex(0xD94F3A))
+
+    // 默认品牌色 (赤陶) — 用户没选时的回退, 也用在色板里"默认"项的固定展示。
+    static let brandDefault = hex(0xC96442)
+
+    /// 当前品牌色 — 自动模式读取正在播放封面，固定模式读取用户色板。整个 Mac UI
+    /// 90+ 处自定义控件 (按钮 / 进度条 / active 高亮 / ambient fallback) 的 accent
+    /// 都读它, 所以改这一处即全局换色。读取发生在 view body 内, Observation 会
+    /// 注册依赖, 切换后相关视图自动重渲染。@MainActor 因为读的是主线程隔离的
+    /// MacUIPreferences — SwiftUI view body 本就在主线程, 90+ 调用点都满足。
+    @MainActor
+    static var brand: Color { MacUIPreferences.shared.brandColor }
+
+    // 行 hover (selected 由 modifier 用 accent 拼)
+    static let rowHover = dyn(dark: Color.white.opacity(0.07), light: Color.black.opacity(0.05))
+
+    // 玻璃按钮态
+    static let glassBtn      = dyn(dark: Color.white.opacity(0.12), light: Color.black.opacity(0.06))
+    static let glassBtnHover = dyn(dark: Color.white.opacity(0.20), light: Color.black.opacity(0.10))
+
+    // Material 按钮态
+    static let matBtn      = dyn(dark: Color.white.opacity(0.10), light: Color.black.opacity(0.05))
+    static let matBtnHover = dyn(dark: Color.white.opacity(0.16), light: Color.black.opacity(0.09))
+
+    // 桌面歌词调色板 (用户可选)
+    static let desktopPalette: [Color] = [
+        hex(0xFFCC66), hex(0xFF7676), hex(0xFF9ED1),
+        hex(0xA995FF), hex(0x76C6FF), hex(0x7AF0C5),
+        hex(0x9CE070), hex(0xF0F0F0), hex(0x1A1A1A),
+    ]
+
+    // 用户可选品牌色
+    static let brandPalette: [Color] = [
+        hex(0xC96442), hex(0x0A84FF), hex(0x1F8A5B), hex(0x5E6B87), hex(0xA0522D),
+    ]
+}
+
+/// 把 #RRGGBB 直接当 Color 用。
+@inline(__always)
+private func hex(_ rgb: UInt32) -> Color {
+    let r = Double((rgb >> 16) & 0xFF) / 255.0
+    let g = Double((rgb >> 8)  & 0xFF) / 255.0
+    let b = Double((rgb)       & 0xFF) / 255.0
+    return Color(red: r, green: g, blue: b)
+}
+
+/// 用 NSColor.init(name:dynamicProvider:) 拼一个跟随系统外观切换的 SwiftUI Color。
+private func dyn(dark: Color, light: Color) -> Color {
+    let nsColor = NSColor(name: nil) { appearance in
+        let darkNames: Set<NSAppearance.Name> = [
+            .darkAqua, .vibrantDark,
+            .accessibilityHighContrastDarkAqua, .accessibilityHighContrastVibrantDark,
+        ]
+        let isDark = darkNames.contains(appearance.name)
+        return NSColor(isDark ? dark : light)
+    }
+    return Color(nsColor: nsColor)
+}
+
+// MARK: - Spacing / Radius
+
+enum PMSpace {
+    static let xxs: CGFloat = 2
+    static let xs:  CGFloat = 4
+    static let s:   CGFloat = 6
+    static let s8:  CGFloat = 8
+    static let s10: CGFloat = 10
+    static let m:   CGFloat = 12
+    static let m14: CGFloat = 14
+    static let m16: CGFloat = 16
+    static let l:   CGFloat = 18
+    static let l24: CGFloat = 24
+    static let xl:  CGFloat = 28
+    static let xxl: CGFloat = 32
+    static let xxxl: CGFloat = 36
+    static let pagePadH: CGFloat = 32
+    static let pagePadV: CGFloat = 28
+}
+
+enum PMRadius {
+    static let xs: CGFloat = 4
+    static let s:  CGFloat = 6
+    static let m:  CGFloat = 8
+    static let m10: CGFloat = 10
+    static let l:  CGFloat = 12
+    static let l14: CGFloat = 14
+    static let xl: CGFloat = 16
+    static let xxl: CGFloat = 18
+    static let pill: CGFloat = 999
+}
+
+enum PMSize {
+    /// 设计稿 TitleBar 标 44pt, 但跟 macOS Tahoe 实际 toolbar 高度 (48-52pt) 对比偏矮,
+    /// 跟设计 PNG 视觉对比也偏矮一点。提到 48pt 跟 macOS 系统 toolbar 接近, 同时给搜索
+    /// 框 / 按钮更多呼吸空间, 不至于看起来挤。
+    static let titlebar: CGFloat = 48
+    static let bottomBar: CGFloat = 74
+    static let sidebarDefault: CGFloat = 220
+    static let sidebarMin: CGFloat = 180
+    static let sidebarMax: CGFloat = 300
+    static let sidebarCollapsed: CGFloat = 56
+
+    static let trafficLight: CGFloat = 12
+    static let trafficLightMini: CGFloat = 11
+
+    static let smallBtn: CGFloat = 24
+    static let medBtn: CGFloat = 26
+    static let bigBtn: CGFloat = 32
+    static let playBtn: CGFloat = 36
+}
+
+// MARK: - Typography
+
+enum PMFont {
+    /// SF + PingFang 系统字体 (SwiftUI 默认就是这套, 我们只是统一字号 / 字重)。
+    // 页面主标题
+    static func pageTitle(_ size: CGFloat = 32) -> Font {
+        .system(size: size, weight: .bold).leading(.tight)
+    }
+    static let pageTitleXL: Font = .system(size: 44, weight: .bold).leading(.tight)
+
+    // 卡片 / 侧栏标题
+    static let sectionTitle: Font = .system(size: 17, weight: .semibold)
+    static let cardTitle:    Font = .system(size: 14, weight: .semibold)
+    static let cardTitleS:   Font = .system(size: 13.5, weight: .semibold)
+
+    // 正文
+    static let body:    Font = .system(size: 13, weight: .regular)
+    static let bodyM:   Font = .system(size: 12.5, weight: .medium)
+    static let bodyS:   Font = .system(size: 12, weight: .regular)
+    static let caption: Font = .system(size: 11, weight: .regular)
+    static let captionS: Font = .system(size: 10.5, weight: .regular)
+
+    // 大数字 (统计 / 计数)
+    static let bigNumber: Font = .system(size: 28, weight: .semibold).monospacedDigit()
+
+    // 等宽 (时间码 / spec 号)
+    static let mono:    Font = .system(size: 11, design: .monospaced)
+    static let monoXS:  Font = .system(size: 10.5, design: .monospaced)
+    static let monoTime: Font = .system(size: 10.5, design: .monospaced).monospacedDigit()
+
+    // 大歌词 (基础 30, 可乘 lyricsFontScale 0.7..1.8)
+    static func lyricsCurrent(scale: CGFloat) -> Font {
+        .system(size: 30 * scale, weight: .semibold)
+    }
+    static func lyricsAround(scale: CGFloat) -> Font {
+        .system(size: 22 * scale, weight: .regular)
+    }
+    static func lyricsTranslation(scale: CGFloat) -> Font {
+        .system(size: 13 * scale, weight: .regular).italic()
+    }
+    static func lyricsFullscreenCurrent(scale: CGFloat) -> Font {
+        .system(size: 44 * scale, weight: .semibold)
+    }
+    static func lyricsFullscreenAround(scale: CGFloat) -> Font {
+        .system(size: 28 * scale, weight: .regular)
+    }
+}
+
+// MARK: - Glass / Material modifiers
+
+/// 玻璃面板: 玻璃模式下 ultraThinMaterial + 内描边, 经典模式下退化成 bg-elev 实色。
+struct PMGlass: ViewModifier {
+    @Environment(\.pmAppearance) private var mode
+    var cornerRadius: CGFloat = PMRadius.l
+    var stroke: Bool = true
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                ZStack {
+                    if mode == .glass {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                    } else {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(PMColor.bgElev)
+                    }
+                }
+            }
+            .overlay {
+                if stroke {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+                }
+            }
+    }
+}
+
+/// 卡片背景 (跟 PMGlass 类似, 但默认更"扁平", 不带玻璃模糊 — 用于 Home 数据卡)。
+struct PMCard: ViewModifier {
+    @Environment(\.pmAppearance) private var mode
+    var cornerRadius: CGFloat = PMRadius.l
+    var padding: CGFloat? = nil
+
+    func body(content: Content) -> some View {
+        Group {
+            if let padding {
+                content.padding(padding)
+            } else {
+                content
+            }
+        }
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(mode == .glass
+                          ? AnyShapeStyle(Material.ultraThinMaterial)
+                          : AnyShapeStyle(PMColor.bgElev))
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(PMColor.card)
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+    }
+}
+
+extension View {
+    /// 玻璃 / 材料容器 (跟随 pmAppearance 自动切换两套外观)。
+    func pmGlass(cornerRadius: CGFloat = PMRadius.l, stroke: Bool = true) -> some View {
+        modifier(PMGlass(cornerRadius: cornerRadius, stroke: stroke))
+    }
+
+    /// 卡片背景。
+    func pmCard(cornerRadius: CGFloat = PMRadius.l, padding: CGFloat? = nil) -> some View {
+        modifier(PMCard(cornerRadius: cornerRadius, padding: padding))
+    }
+
+    /// 把整个视图渲染到 NSVisualEffectView 之上 — 用在主窗口背景, 让玻璃模式真有底层模糊可吸。
+    func pmWindowBackground() -> some View {
+        background(NSVisualEffectBackdrop().ignoresSafeArea())
+    }
+}
+
+// MARK: - NSVisualEffectView bridge
+
+struct NSVisualEffectBackdrop: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .underWindowBackground
+    var blending: NSVisualEffectView.BlendingMode = .behindWindow
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = blending
+        v.state = .followsWindowActiveState
+        v.isEmphasized = false
+        return v
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blending
+    }
+}
+
+// MARK: - Ambient Backdrop
+
+/// 跟设计稿里的 `AmbientBackdrop` 等价: 多个 radial-gradient 叠加 + 强模糊, 由 accent / dark accent
+/// 拼出当前歌曲的氛围。strength 控制整体不透明度 (0..1)。
+struct AmbientBackdrop: View {
+    var accent: Color
+    var darkAccent: Color
+    var strength: Double = 0.7
+    /// 恒暗模式: 底色用固定深色 (而非随系统切换的 bgDeep)。大播放器需要它,
+    /// 这样浅色系统外观下背景也保持暗, 白色歌词 / 浮动按钮才有对比。
+    var forceDark: Bool = false
+
+    var body: some View {
+        ZStack {
+            // 底色
+            (forceDark ? PMColor.ambientDarkBase : PMColor.bgDeep)
+
+            // 三个色斑
+            Circle()
+                .fill(accent.opacity(0.55))
+                .frame(width: 720, height: 720)
+                .blur(radius: 140)
+                .offset(x: -180, y: -160)
+
+            Circle()
+                .fill(darkAccent.opacity(0.65))
+                .frame(width: 640, height: 640)
+                .blur(radius: 160)
+                .offset(x: 220, y: 200)
+
+            Circle()
+                .fill(accent.opacity(0.35))
+                .frame(width: 480, height: 480)
+                .blur(radius: 120)
+                .offset(x: 60, y: -60)
+
+            // 暗化层 + 一层 noise 般的细 grain, 防止纯色过曝
+            LinearGradient(
+                colors: [Color.black.opacity(0.35), Color.black.opacity(0.55)],
+                startPoint: .top, endPoint: .bottom
+            )
+        }
+        .opacity(strength)
+        .compositingGroup()
+        .drawingGroup()
+        .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Format pills (FLAC / DSD / MP3 …)
+
+/// 跟设计稿里 `pm-pill` 风格匹配的小标签。
+struct PMFormatPill: View {
+    let text: String
+    var color: Color = PMColor.textMuted
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+            .tracking(0.4)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.18), in: .rect(cornerRadius: 3))
+            .foregroundStyle(color)
+    }
+
+    static func forFormat(_ format: String?) -> PMFormatPill {
+        let upper = (format ?? "").uppercased()
+        switch upper {
+        case "FLAC", "ALAC", "APE", "WAV", "AIFF":
+            return PMFormatPill(text: upper, color: PMColor.flac)
+        case "DSD", "DSF", "DFF":
+            return PMFormatPill(text: upper, color: PMColor.dsd)
+        case "":
+            return PMFormatPill(text: "—", color: PMColor.textFaint)
+        default:
+            return PMFormatPill(text: upper, color: PMColor.textMuted)
+        }
+    }
+}
+
+// MARK: - Round icon button
+
+private struct PMPointingHand: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        content.pointerStyle(isEnabled ? .link : nil)
+    }
+}
+
+extension View {
+    func pmPointingHand() -> some View {
+        modifier(PMPointingHand())
+    }
+}
+
+/// 圆形 icon 按钮 — 跟设计稿的 `pm-glass-btn` / `pm-mat-btn` 视觉一致。
+struct PMRoundBtn: View {
+    enum Style { case glass, material, accent, plain }
+
+    var icon: String
+    var size: CGFloat = PMSize.medBtn
+    var iconSize: CGFloat = 13
+    var style: Style = .glass
+    var isActive: Bool = false
+    var help: LocalizedStringKey? = nil
+    var action: () -> Void
+
+    @Environment(\.pmAppearance) private var mode
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: iconSize, weight: .medium))
+                .foregroundStyle(foreground)
+                .frame(width: size, height: size)
+                .background(background, in: .circle)
+                .overlay {
+                    Circle().strokeBorder(borderColor, lineWidth: 0.5)
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(helpText)
+        .animation(.easeOut(duration: 0.12), value: hover)
+        .animation(.easeOut(duration: 0.12), value: isActive)
+    }
+
+    private var helpText: Text {
+        if let help { return Text(help) }
+        return Text(verbatim: "")
+    }
+
+    private var foreground: Color {
+        switch style {
+        case .accent:   return .white
+        case .plain:    return isActive ? PMColor.brand : PMColor.text
+        case .glass, .material:
+            return isActive ? PMColor.brand : PMColor.text
+        }
+    }
+
+    private var background: AnyShapeStyle {
+        let baseColor: Color
+        switch style {
+        case .accent:
+            baseColor = PMColor.brand
+        case .plain:
+            baseColor = hover ? PMColor.glassBtn : .clear
+        case .glass:
+            baseColor = mode == .glass
+                ? (hover ? PMColor.glassBtnHover : PMColor.glassBtn)
+                : (hover ? PMColor.matBtnHover : PMColor.matBtn)
+        case .material:
+            baseColor = hover ? PMColor.matBtnHover : PMColor.matBtn
+        }
+        return AnyShapeStyle(baseColor)
+    }
+
+    private var borderColor: Color {
+        switch style {
+        case .accent, .plain: return .clear
+        case .glass:    return PMColor.cardBorder
+        case .material: return PMColor.cardBorder
+        }
+    }
+}
+
+// MARK: - Hover-aware row background
+
+struct PMRowHoverBackground: ViewModifier {
+    var selected: Bool = false
+    var cornerRadius: CGFloat = PMRadius.s
+    @State private var hover = false
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(selected ? PMColor.brand.opacity(0.22)
+                          : (hover ? PMColor.rowHover : .clear))
+            }
+            .onHover { hover = $0 }
+            .animation(.easeOut(duration: 0.12), value: hover)
+            .animation(.easeOut(duration: 0.12), value: selected)
+            .contentShape(Rectangle())
+    }
+}
+
+extension View {
+    func pmRowBackground(selected: Bool = false, cornerRadius: CGFloat = PMRadius.s) -> some View {
+        modifier(PMRowHoverBackground(selected: selected, cornerRadius: cornerRadius))
+    }
+}
+
+// MARK: - Window chrome
+
+/// Keeps AppKit chrome synchronized with Primuse's custom title bar while
+/// leaving the standard window controls in charge of native macOS behavior.
+@MainActor
+struct PMWindowChromeConfigurator: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> PMWindowChromeHostView {
+        PMScrollViewStyle.shared.install()
+        let view = PMWindowChromeHostView(frame: .zero)
+        bind(view, to: context.coordinator)
+        return view
+    }
+
+    func updateNSView(_ nsView: PMWindowChromeHostView, context: Context) {
+        bind(nsView, to: context.coordinator)
+        context.coordinator.attach(to: nsView.window)
+    }
+
+    private func bind(_ view: PMWindowChromeHostView, to coordinator: Coordinator) {
+        view.windowDidChange = { [weak coordinator] window in
+            coordinator?.attach(to: window)
+        }
+    }
+
+    private static let requiredStyleMask: NSWindow.StyleMask = [
+        .titled,
+        .closable,
+        .miniaturizable,
+        .resizable,
+        .fullSizeContentView,
+    ]
+
+    private static func needsRepair(in window: NSWindow) -> Bool {
+        if !requiredStyleMask.subtracting(window.styleMask).isEmpty
+            || window.titleVisibility != .hidden
+            || !window.titlebarAppearsTransparent
+            || window.isMovableByWindowBackground
+            || window.toolbar != nil
+            || window.backgroundColor.alphaComponent > 0.001 {
+            return true
+        }
+
+        guard !window.styleMask.contains(.fullScreen) else { return false }
+        return standardWindowButtonContainerNeedsRepair(in: window)
+            || PMStandardWindowButtonAlignment.needsAlignment(in: window)
+    }
+
+    private static func repair(window: NSWindow) {
+        let missingStyle = requiredStyleMask.subtracting(window.styleMask)
+        if !missingStyle.isEmpty {
+            window.styleMask.formUnion(missingStyle)
+        }
+        if window.titleVisibility != .hidden {
+            window.titleVisibility = .hidden
+        }
+        if !window.titlebarAppearsTransparent {
+            window.titlebarAppearsTransparent = true
+        }
+        if window.isMovableByWindowBackground {
+            window.isMovableByWindowBackground = false
+        }
+        suppressInjectedToolbar(in: window)
+        if window.backgroundColor.alphaComponent > 0.001 {
+            window.backgroundColor = .clear
+        }
+
+        guard !window.styleMask.contains(.fullScreen) else { return }
+        revealStandardWindowButtonContainer(in: window)
+        PMStandardWindowButtonAlignment.align(in: window)
+    }
+
+    /// A macOS NavigationStack may install its history control after the host
+    /// view's first update, recreating a top-leading back button even though
+    /// this window uses fully custom chrome. Reassert the window contract when
+    /// AppKit reports an update; assigning only when needed avoids a loop.
+    private static func suppressInjectedToolbar(in window: NSWindow) {
+        guard window.toolbar != nil else { return }
+        window.toolbar = nil
+    }
+
+    private static func standardWindowButtonContainerNeedsRepair(in window: NSWindow) -> Bool {
+        guard let frameView = window.contentView?.superview,
+              let closeButton = window.standardWindowButton(.closeButton)
+        else { return false }
+
+        if [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton,
+        ].contains(where: { window.standardWindowButton($0)?.isHidden == true }) {
+            return true
+        }
+
+        var ancestor = closeButton.superview
+        while let view = ancestor, view !== frameView {
+            if view.isHidden || view.alphaValue <= 0.001 {
+                return true
+            }
+            ancestor = view.superview
+        }
+        return false
+    }
+
+    private static func revealStandardWindowButtonContainer(in window: NSWindow) {
+        guard let frameView = window.contentView?.superview,
+              let closeButton = window.standardWindowButton(.closeButton)
+        else { return }
+
+        [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton,
+        ].forEach { type in
+            guard let button = window.standardWindowButton(type), button.isHidden else {
+                return
+            }
+            button.isHidden = false
+        }
+
+        var ancestor = closeButton.superview
+        while let view = ancestor, view !== frameView {
+            if view.isHidden {
+                view.isHidden = false
+            }
+            if view.alphaValue == 0 {
+                view.alphaValue = 1
+            }
+            ancestor = view.superview
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        private weak var window: NSWindow?
+        private var notificationRelay: MainActorNotificationRelay?
+        private var repairScheduled = false
+        private var repairGeneration = 0
+        private var isApplyingRepair = false
+        private var isFullScreenTransitioning = false
+
+        func attach(to window: NSWindow?) {
+            guard let window else {
+                stopObserving()
+                return
+            }
+
+            if self.window !== window {
+                stopObserving()
+                self.window = window
+                observeNotifications(from: window)
+                requestRepair(force: true)
+            } else if !isApplyingRepair,
+                      PMWindowChromeConfigurator.needsRepair(in: window) {
+                requestRepair()
+            }
+        }
+
+        private func observeNotifications(from window: NSWindow) {
+            let relay = MainActorNotificationRelay { [weak self] delivery in
+                self?.handleWindowNotification(delivery)
+            }
+            notificationRelay = relay
+            let names: [Notification.Name] = [
+                NSWindow.didUpdateNotification,
+                NSWindow.willEnterFullScreenNotification,
+                NSWindow.didEnterFullScreenNotification,
+                NSWindow.willExitFullScreenNotification,
+                NSWindow.didExitFullScreenNotification,
+                NSWindow.didChangeScreenNotification,
+                NSWindow.didChangeBackingPropertiesNotification,
+                NSWindow.didEndLiveResizeNotification,
+            ]
+            names.forEach { name in
+                NotificationCenter.default.addObserver(
+                    relay,
+                    selector: #selector(MainActorNotificationRelay.receive(_:)),
+                    name: name,
+                    object: window
+                )
+            }
+        }
+
+        private func stopObserving() {
+            if let notificationRelay {
+                NotificationCenter.default.removeObserver(notificationRelay)
+            }
+            notificationRelay = nil
+            if let window {
+                PMStandardWindowButtonAlignment.setSuspended(false, in: window)
+            }
+            cancelScheduledRepair()
+            window = nil
+            isFullScreenTransitioning = false
+        }
+
+        private func requestRepair(force: Bool = false) {
+            guard let window,
+                  !isFullScreenTransitioning,
+                  force || PMWindowChromeConfigurator.needsRepair(in: window),
+                  !repairScheduled
+            else { return }
+
+            repairScheduled = true
+            let generation = repairGeneration
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self,
+                      let window,
+                      self.window === window,
+                      self.repairGeneration == generation
+                else { return }
+
+                self.repairScheduled = false
+                guard !self.isApplyingRepair,
+                      !self.isFullScreenTransitioning
+                else { return }
+
+                self.isApplyingRepair = true
+                PMWindowChromeConfigurator.repair(window: window)
+                self.isApplyingRepair = false
+            }
+        }
+
+        private func cancelScheduledRepair() {
+            repairGeneration &+= 1
+            repairScheduled = false
+        }
+
+        private func handleWindowNotification(_ delivery: MainActorNotificationDelivery) {
+            guard let window,
+                  delivery.objectIdentifier == ObjectIdentifier(window)
+            else { return }
+
+            switch delivery.name {
+            case NSWindow.willEnterFullScreenNotification,
+                 NSWindow.willExitFullScreenNotification:
+                isFullScreenTransitioning = true
+                PMStandardWindowButtonAlignment.setSuspended(true, in: window)
+                cancelScheduledRepair()
+
+            case NSWindow.didEnterFullScreenNotification:
+                isFullScreenTransitioning = false
+                PMStandardWindowButtonAlignment.setSuspended(false, in: window)
+                requestRepair(force: true)
+
+            case NSWindow.didExitFullScreenNotification:
+                isFullScreenTransitioning = false
+                PMStandardWindowButtonAlignment.setSuspended(false, in: window)
+                requestRepair(force: true)
+
+            case NSWindow.didUpdateNotification:
+                guard !isApplyingRepair else { return }
+                requestRepair()
+
+            case NSWindow.didChangeScreenNotification,
+                 NSWindow.didChangeBackingPropertiesNotification,
+                 NSWindow.didEndLiveResizeNotification:
+                requestRepair(force: true)
+
+            default:
+                break
+            }
+        }
+
+        deinit {
+            if let notificationRelay {
+                NotificationCenter.default.removeObserver(notificationRelay)
+            }
+        }
+    }
+}
+
+final class PMWindowChromeHostView: NSView {
+    var windowDidChange: ((NSWindow?) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowDidChange?(window)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+@MainActor
+private enum PMStandardWindowButtonAlignment {
+    private static let anchors = NSMapTable<NSWindow, PMStandardWindowButtonAnchorView>
+        .weakToWeakObjects()
+    private static let suspendedWindows = NSHashTable<NSWindow>.weakObjects()
+    private static let buttonTypes: [NSWindow.ButtonType] = [
+        .closeButton,
+        .miniaturizeButton,
+        .zoomButton,
+    ]
+
+    static func register(_ anchor: PMStandardWindowButtonAnchorView, in window: NSWindow) {
+        anchors.setObject(anchor, forKey: window)
+        align(in: window)
+    }
+
+    static func unregister(_ anchor: PMStandardWindowButtonAnchorView, from window: NSWindow) {
+        guard anchors.object(forKey: window) === anchor else { return }
+        anchors.removeObject(forKey: window)
+    }
+
+    static func setSuspended(_ suspended: Bool, in window: NSWindow) {
+        if suspended {
+            suspendedWindows.add(window)
+        } else {
+            suspendedWindows.remove(window)
+        }
+    }
+
+    static func needsAlignment(in window: NSWindow) -> Bool {
+        guard let desiredCenterY = desiredCenterY(in: window) else { return false }
+        let tolerance = pointTolerance(in: window)
+        return buttonTypes.contains { type in
+            guard let button = window.standardWindowButton(type),
+                  let superview = button.superview
+            else { return false }
+            let frameInWindow = superview.convert(button.frame, to: nil)
+            return abs(frameInWindow.midY - desiredCenterY) > tolerance
+        }
+    }
+
+    static func align(in window: NSWindow) {
+        guard let desiredCenterY = desiredCenterY(in: window) else { return }
+        let tolerance = pointTolerance(in: window)
+
+        buttonTypes.forEach { type in
+            guard let button = window.standardWindowButton(type),
+                  let superview = button.superview
+            else { return }
+
+            let frameInWindow = superview.convert(button.frame, to: nil)
+            guard abs(frameInWindow.midY - desiredCenterY) > tolerance else { return }
+
+            let desiredCenterInSuperview = superview.convert(
+                NSPoint(x: frameInWindow.midX, y: desiredCenterY),
+                from: nil
+            )
+            var frame = button.frame
+            frame.origin.y += desiredCenterInSuperview.y - frame.midY
+            button.setFrameOrigin(frame.origin)
+        }
+    }
+
+    private static func desiredCenterY(in window: NSWindow) -> CGFloat? {
+        guard !window.styleMask.contains(.fullScreen),
+              !suspendedWindows.contains(window),
+              let anchor = anchors.object(forKey: window),
+              anchor.window === window,
+              !anchor.bounds.isEmpty
+        else { return nil }
+        return anchor.convert(anchor.bounds, to: nil).midY
+    }
+
+    private static func pointTolerance(in window: NSWindow) -> CGFloat {
+        0.5 / max(window.backingScaleFactor, 1)
+    }
+}
+
+// MARK: - Window-safe controls
+
+struct PMWindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        PMWindowDragRegionView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class PMWindowDragRegionView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+
+        // `performDrag(with:)` consumes the mouse-down sequence.  In a normal
+        // AppKit title bar the second click is intercepted first and toggles
+        // the window's zoomed state, but our custom drag region previously
+        // sent both clicks straight into dragging.  Restore the native
+        // double-click behaviour explicitly.
+        if event.clickCount == 2 {
+            PMWindowZoomController.toggle(window)
+        } else {
+            window.performDrag(with: event)
+        }
+    }
+}
+
+/// Deterministic fill/restore handling for hidden-titlebar windows.
+///
+/// AppKit's `performZoom(_:)` depends on the hidden standard zoom button and
+/// `zoom(_:)` can decide that the current content size is already ideal, both
+/// of which make a title-bar double-click appear to do nothing. Keep the last
+/// regular frame per live window and toggle against the screen's visible frame
+/// directly instead.
+@MainActor
+private enum PMWindowZoomController {
+    private static let regularFrames = NSMapTable<NSWindow, NSValue>.weakToStrongObjects()
+
+    static func toggle(_ window: NSWindow) {
+        guard let screen = window.screen ?? NSScreen.main else {
+            window.zoom(nil)
+            return
+        }
+
+        let visibleFrame = screen.visibleFrame
+        if approximatelyEqual(window.frame, visibleFrame) {
+            let regularFrame = regularFrames.object(forKey: window)?.rectValue
+                ?? defaultRegularFrame(for: window, in: visibleFrame)
+            regularFrames.setObject(NSValue(rect: regularFrame), forKey: window)
+            window.setFrame(window.constrainFrameRect(regularFrame, to: screen),
+                            display: true, animate: true)
+        } else {
+            regularFrames.setObject(NSValue(rect: window.frame), forKey: window)
+            window.setFrame(visibleFrame, display: true, animate: true)
+        }
+    }
+
+    private static func approximatelyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        abs(lhs.minX - rhs.minX) <= 2
+            && abs(lhs.minY - rhs.minY) <= 2
+            && abs(lhs.width - rhs.width) <= 2
+            && abs(lhs.height - rhs.height) <= 2
+    }
+
+    private static func defaultRegularFrame(for window: NSWindow, in visibleFrame: NSRect) -> NSRect {
+        let width = max(window.minSize.width, min(1280, visibleFrame.width * 0.85))
+        let height = max(window.minSize.height, min(820, visibleFrame.height * 0.85))
+        return NSRect(
+            x: visibleFrame.midX - width / 2,
+            y: visibleFrame.midY - height / 2,
+            width: width,
+            height: height
+        )
+    }
+}
+
+/// Native macOS slider that opts out of `isMovableByWindowBackground`.
+///
+/// SwiftUI's `Slider` can still be treated as draggable window background in
+/// borderless/hidden-titlebar windows, which makes volume drags move the whole
+/// window. Keeping this as an AppKit control lets the slider own mouse tracking.
+struct PMVolumeSlider: NSViewRepresentable {
+    @Binding var value: Double
+    var range: ClosedRange<Double> = 0...1
+    var controlSize: NSControl.ControlSize = .mini
+    var isEnabled = true
+    var accessibilityLabel: String = String(localized: "volume")
+    var accessibilityHelp: String?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value)
+    }
+
+    func makeNSView(context: Context) -> NSSlider {
+        let slider = PMWindowSafeSlider(
+            value: clampedValue,
+            minValue: range.lowerBound,
+            maxValue: range.upperBound,
+            target: context.coordinator,
+            action: #selector(Coordinator.valueChanged(_:))
+        )
+        slider.isContinuous = true
+        slider.sliderType = .linear
+        slider.sendAction(on: [.leftMouseDown, .leftMouseDragged, .leftMouseUp])
+        slider.controlSize = controlSize
+        slider.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        slider.setAccessibilityLabel(accessibilityLabel)
+        applyConfiguration(to: slider, context: context)
+        return slider
+    }
+
+    func updateNSView(_ nsView: NSSlider, context: Context) {
+        applyConfiguration(to: nsView, context: context)
+    }
+
+    private var clampedValue: Double {
+        min(range.upperBound, max(range.lowerBound, value))
+    }
+
+    private func applyConfiguration(to slider: NSSlider, context: Context) {
+        context.coordinator.value = $value
+        slider.minValue = range.lowerBound
+        slider.maxValue = range.upperBound
+        slider.controlSize = controlSize
+        slider.isEnabled = isEnabled
+        slider.setAccessibilityLabel(accessibilityLabel)
+        slider.setAccessibilityHelp(accessibilityHelp)
+        if abs(slider.doubleValue - clampedValue) > 0.0005 {
+            slider.doubleValue = clampedValue
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var value: Binding<Double>
+
+        init(value: Binding<Double>) {
+            self.value = value
+        }
+
+        @objc func valueChanged(_ sender: NSSlider) {
+            value.wrappedValue = sender.doubleValue
+        }
+    }
+}
+
+private final class PMWindowSafeSlider: NSSlider {
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let wasMovableByBackground = window?.isMovableByWindowBackground
+        window?.isMovableByWindowBackground = false
+        defer {
+            if let wasMovableByBackground {
+                window?.isMovableByWindowBackground = wasMovableByBackground
+            }
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+struct PMWindowResolver: NSViewRepresentable {
+    var onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { onResolve(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { onResolve(nsView.window) }
+    }
+}
+
+// MARK: - Scroll view appearance
+
+@MainActor
+final class PMScrollViewStyle {
+    static let shared = PMScrollViewStyle()
+
+    private var observers: [NSObjectProtocol] = []
+    private let windows = NSHashTable<NSWindow>.weakObjects()
+    private let pending = NSHashTable<NSScrollView>.weakObjects()
+    private let registrations = NSMapTable<NSScrollView, Registration>.weakToStrongObjects()
+
+    func install() {
+        guard observers.isEmpty else { return }
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(
+            forName: NSView.frameDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let scrollView = notification.object as? NSScrollView else { return }
+            // SwiftUI lays out newly mounted ScrollView/List/Form instances after
+            // creating them. Defer until mounting finishes; never scan on scroll.
+            DispatchQueue.main.async { [weak self, weak scrollView] in
+                guard let scrollView else { return }
+                self?.register(scrollView)
+            }
+        })
+        observers.append(center.addObserver(
+            forName: NSWindow.didUpdateNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let window = notification.object as? NSWindow else { return }
+            // The observer is delivered on OperationQueue.main. Avoid enqueuing
+            // another run-loop turn for every otherwise unchanged window update.
+            MainActor.assumeIsolated {
+                self?.update(window)
+            }
+        })
+        for window in NSApp.windows {
+            update(window)
+        }
+    }
+
+    private func update(_ window: NSWindow) {
+        guard !(window is NSSavePanel), let content = window.contentView else { return }
+        if !windows.contains(window) {
+            windows.add(window)
+            registerDescendants(of: content)
+        }
+        // A pre-sized scroll view can be attached without another frame change.
+        // Only revisit these unmounted candidates, not the window's view tree.
+        for scrollView in pending.allObjects where scrollView.window === window {
+            register(scrollView)
+        }
+    }
+
+    private func registerDescendants(of view: NSView) {
+        if let scrollView = view as? NSScrollView {
+            register(scrollView)
+        }
+        for child in view.subviews {
+            registerDescendants(of: child)
+        }
+    }
+
+    private func register(_ scrollView: NSScrollView) {
+        guard let window = scrollView.window else {
+            pending.add(scrollView)
+            return
+        }
+        pending.remove(scrollView)
+        guard !(window is NSSavePanel), registrations.object(forKey: scrollView) == nil else { return }
+        registrations.setObject(Registration(scrollView), forKey: scrollView)
+    }
+
+    @MainActor
+    private final class Registration {
+        private weak var scrollView: NSScrollView?
+        private var observations: [NSKeyValueObservation] = []
+        private var refreshScheduled = false
+
+        init(_ scrollView: NSScrollView) {
+            self.scrollView = scrollView
+            observations = [
+                scrollView.observe(\.scrollerStyle) { [weak self] _, _ in
+                    DispatchQueue.main.async { self?.scheduleRefresh() }
+                },
+                scrollView.observe(\.verticalScroller) { [weak self] _, _ in
+                    DispatchQueue.main.async { self?.scheduleRefresh() }
+                },
+                scrollView.observe(\.horizontalScroller) { [weak self] _, _ in
+                    DispatchQueue.main.async { self?.scheduleRefresh() }
+                },
+            ]
+            apply()
+        }
+
+        private func scheduleRefresh() {
+            guard !refreshScheduled else { return }
+            refreshScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshScheduled = false
+                self?.apply()
+            }
+        }
+
+        private func apply() {
+            guard let scrollView else { return }
+            // AppKit can reset the style when pointing devices or system
+            // preferences change. Keep native dragging and automatic fading.
+            if scrollView.scrollerStyle != .overlay {
+                scrollView.scrollerStyle = .overlay
+            }
+            for scroller in [scrollView.verticalScroller, scrollView.horizontalScroller].compactMap({ $0 }) {
+                if scroller.controlSize != .small {
+                    scroller.controlSize = .small
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Force-hide NSScrollView scrollers
+
+/// SwiftUI 的 `.scrollIndicators(.hidden)` 在用户系统设置「总是显示滚动条」时
+/// 会被忽略 — Apple 的 SDK 文档明确说明 indicator visibility 仅在 "Auto" /
+/// "When scrolling" 模式下才生效。
+///
+/// 这个 NSViewRepresentable 通过反向遍历 view hierarchy 找到包裹 SwiftUI
+/// ScrollView 的 NSScrollView, 然后强制隐藏它的两个 NSScroller (无视系统
+/// 偏好), 用在那种空间紧凑、滚动条会很碍眼的 popover 场景。
+private struct PMNSScrollerHider: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        weak var configured: NSScrollView?
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { hide(from: view, coordinator: context.coordinator) }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // 已经找到并配置过就不再搜 —— 否则每次 updateNSView (滚动时可能很频繁) 都
+        // 递归遍历一遍视图树找 NSScrollView, 自己反而成了卡顿源。
+        guard context.coordinator.configured == nil else { return }
+        DispatchQueue.main.async { hide(from: nsView, coordinator: context.coordinator) }
+    }
+    private func hide(from view: NSView, coordinator: Coordinator) {
+        if coordinator.configured != nil { return }
+        // 1. 这个 0×0 view 若正好在 scroll 内容里, enclosingScrollView 直接命中。
+        if let sv = view.enclosingScrollView {
+            configure(sv)
+            coordinator.configured = sv
+            return
+        }
+        // 2. 但我们是用 `.background(...)` 挂上去的 —— SwiftUI 把它放成 NSScrollView
+        //    的"兄弟"节点, 单纯沿 superview 往上找不到它 (这正是之前隐藏不掉的根因)。
+        //    改成逐层往上, 在每一层的子树里找最近的 NSScrollView。
+        var ancestor: NSView? = view.superview
+        var hops = 0
+        while let a = ancestor, hops < 8 {
+            if let sv = Self.firstScrollView(in: a) {
+                configure(sv)
+                coordinator.configured = sv
+                return
+            }
+            ancestor = a.superview
+            hops += 1
+        }
+    }
+
+    private func configure(_ sv: NSScrollView) {
+        sv.hasVerticalScroller = false
+        sv.hasHorizontalScroller = false
+        sv.verticalScroller?.isHidden = true
+        sv.horizontalScroller?.isHidden = true
+        sv.scrollerStyle = .overlay
+        sv.autohidesScrollers = true
+    }
+
+    private static func firstScrollView(in view: NSView) -> NSScrollView? {
+        if let sv = view as? NSScrollView { return sv }
+        for sub in view.subviews {
+            if let found = firstScrollView(in: sub) { return found }
+        }
+        return nil
+    }
+}
+
+extension View {
+    func pmWindowDragRegion() -> some View {
+        background(PMWindowDragRegion())
+    }
+
+    /// 强制隐藏被这个 View 所在的 NSScrollView 上的所有滚动条 — 即便用户系统
+    /// 设置是「总是显示滚动条」也无视。仅 macOS 有效。
+    func pmForceHideScrollers() -> some View {
+        background(PMNSScrollerHider().allowsHitTesting(false).frame(width: 0, height: 0))
+    }
+
+    /// 给 SwiftUI 横向 ScrollView 加上"鼠标点击拖动平移"能力 —— 默认 SwiftUI
+    /// ScrollView 只响应触控板/滚轮, 不支持鼠标按住拖动。这个 modifier 用
+    /// NSPanGestureRecognizer 在外层 NSScrollView 上挂上 pan handler, 把鼠标
+    /// 拖动距离换算成 scroll offset。
+    func pmEnableHorizontalDragScroll() -> some View {
+        background(PMHorizontalDragScroll().allowsHitTesting(false).frame(width: 0, height: 0))
+    }
+}
+
+/// 在所在 NSScrollView 上挂一个 NSPanGestureRecognizer, 鼠标按住拖动 → 改
+/// scroll origin。.minimumNumberOfTouches = 1 + 鼠标按钮事件让它响应鼠标。
+private struct PMHorizontalDragScroll: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView(frame: .zero)
+        DispatchQueue.main.async { attach(to: v, context: context) }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { attach(to: nsView, context: context) }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    private func attach(to view: NSView, context: Context) {
+        var node: NSView? = view.superview
+        while let n = node {
+            if let sv = n as? NSScrollView {
+                // 避免重复挂 — 用 associated object 标记一次
+                let key = "pmHorizontalDragInstalled"
+                if objc_getAssociatedObject(sv, key) != nil { return }
+                objc_setAssociatedObject(sv, key, true, .OBJC_ASSOCIATION_RETAIN)
+
+                let pan = NSPanGestureRecognizer(target: context.coordinator,
+                                                 action: #selector(Coordinator.handlePan(_:)))
+                pan.buttonMask = 0x1   // 左键
+                sv.addGestureRecognizer(pan)
+                context.coordinator.scrollView = sv
+                return
+            }
+            node = n.superview
+        }
+    }
+
+    final class Coordinator: NSObject {
+        weak var scrollView: NSScrollView?
+
+        @MainActor @objc func handlePan(_ gesture: NSPanGestureRecognizer) {
+            guard let sv = scrollView, let doc = sv.documentView else { return }
+            let translation = gesture.translation(in: sv)
+            let clip = sv.contentView
+            var origin = clip.bounds.origin
+            origin.x -= translation.x
+            // clamp 在 0..documentWidth-clipWidth
+            let maxX = max(0, doc.frame.width - clip.bounds.width)
+            origin.x = min(max(0, origin.x), maxX)
+            clip.scroll(to: origin)
+            sv.reflectScrolledClipView(clip)
+            gesture.setTranslation(.zero, in: sv)
+        }
+    }
+}
+
+private struct PMStandardWindowButtonAnchor: NSViewRepresentable {
+    func makeNSView(context: Context) -> PMStandardWindowButtonAnchorView {
+        PMStandardWindowButtonAnchorView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: PMStandardWindowButtonAnchorView, context: Context) {}
+}
+
+@MainActor
+private final class PMStandardWindowButtonAnchorView: NSView {
+    private weak var registeredWindow: NSWindow?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let registeredWindow, registeredWindow !== window {
+            PMStandardWindowButtonAlignment.unregister(self, from: registeredWindow)
+        }
+        registeredWindow = window
+        if let window {
+            PMStandardWindowButtonAlignment.register(self, in: window)
+        }
+    }
+
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        alignButtons()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        alignButtons()
+    }
+
+    override func layout() {
+        super.layout()
+        alignButtons()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    private func alignButtons() {
+        guard let window else { return }
+        PMStandardWindowButtonAlignment.align(in: window)
+    }
+}
+
+/// Reserves and anchors the native title-bar button area in custom SwiftUI
+/// chrome. The controls stay in AppKit's hierarchy so hover menus, modifier-key
+/// actions, accessibility, enabled states, and full screen retain system behavior.
+struct PMStandardWindowButtonArea: View {
+    var body: some View {
+        PMStandardWindowButtonAnchor()
+            .frame(width: 52, height: 26)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Karaoke line
+
+/// 卡拉 OK 风歌词行: 按 progress (0..1) 横向遮罩, 给当前字符额外光晕。
+/// 适用于"逐字进度未知"的 LRC 简化情形 (按整行时间均分)。需要逐字 syllable
+/// 时序时另外再做一个版本。
+struct KaraokeLine: View {
+    let text: String
+    /// 0..1 进度, 表示当前行已经唱过多少。
+    let progress: Double
+    let font: Font
+    let tint: Color
+    /// false 时显示成"非当前行" — 没有遮罩, 整行用低饱和度文本色。
+    var isCurrent: Bool = true
+    var inactiveColor: Color = PMColor.text.opacity(0.42)
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            // 底层: 未唱的字 (低饱和)
+            Text(text)
+                .font(font)
+                .foregroundStyle(isCurrent ? PMColor.text.opacity(0.55) : inactiveColor)
+                .multilineTextAlignment(.leading)
+
+            // 顶层: 已唱的字, 用遮罩按比例显示
+            if isCurrent {
+                Text(text)
+                    .font(font)
+                    .foregroundStyle(tint)
+                    .shadow(color: tint.opacity(0.45), radius: 14, x: 0, y: 0)
+                    .multilineTextAlignment(.leading)
+                    .mask {
+                        GeometryReader { geo in
+                            Rectangle()
+                                .fill(.black)
+                                .frame(width: max(0, geo.size.width * progress))
+                        }
+                    }
+            }
+        }
+        .animation(.linear(duration: 0.1), value: progress)
+    }
+}
+
+// MARK: - Vertical mask (lyrics column fade)
+
+struct VerticalEdgeMask: ViewModifier {
+    var startStop: Double = 0.18
+    var endStop: Double = 0.82
+
+    func body(content: Content) -> some View {
+        content.mask {
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: startStop),
+                    .init(color: .black, location: endStop),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .top, endPoint: .bottom
+            )
+        }
+    }
+}
+
+extension View {
+    func pmVerticalFadeMask(startStop: Double = 0.18, endStop: Double = 0.82) -> some View {
+        modifier(VerticalEdgeMask(startStop: startStop, endStop: endStop))
+    }
+}
+
+// MARK: - Localization helper
+
+/// Mac UI 本地化简写。用英文原文当 key, 中文译文放在 zh-Hans.lproj;
+/// 其它语言 (含英文本身) 没有对应词条时回退到英文 key 本身。整套 Mac 界面
+/// 的硬编码文案都走它, 这样 `Views/Mac` 不再夹带中文字面量。
+@inline(__always)
+func Lz(_ english: String.LocalizationValue) -> String {
+    String(localized: english)
+}
+
+func PMAppDisplayName() -> String {
+    String(localized: "app_name")
+}
+
+/// Resolves dynamic localization keys used by reusable macOS components.
+/// Values that are already localized, user-provided, or intentionally
+/// technical fall back to themselves.
+func PMLocalizedOrVerbatim(_ text: String) -> String {
+    Bundle.main.localizedString(forKey: text, value: text, table: nil)
+}
+
+func PMTextWithoutDesignCodes(_ text: String) -> String {
+    let codePattern = #"(?<![A-Za-z0-9_])(?:STATS|THEME|SCROB|CAST|META|SRC|LIB|SYS|PL|FX|ST|P|S|C|L)-(?:\d{1,3}(?:/\d{1,3})?|\*)(?![A-Za-z0-9_])"#
+    var cleaned = PMLocalizedOrVerbatim(text)
+        .replacingOccurrences(of: codePattern,
+                              with: "",
+                              options: .regularExpression)
+    let implementationPatterns = [
+        #"\bprimuse\.[A-Za-z0-9_.]+\b"#,
+        #"\b(?:AudioCacheManager|CloudKitSyncService|NSUbiquitousKeyValueStore|SmartPlaylistEngine|SourceManager(?:\.[A-Za-z0-9_]+)?|WidgetKit|WidgetURL|AppIntent|CloudKVS|CKShare|SFBAudioEngine)\b"#,
+        #"\.(?:glassEffect|regularMaterial)(?:\([^)]*\))?"#,
+        #"\bif\s+#available\s*\([^)]*\)"#
+    ]
+    for pattern in implementationPatterns {
+        cleaned = cleaned.replacingOccurrences(of: pattern,
+                                               with: "",
+                                               options: .regularExpression)
+    }
+    let cleanupPatterns = [
+        #"\s*[（(]\s*[)）]\s*"#,
+        #"\s*[·•|/—–-]+\s*(?:Matches design\s+sizes|与设计稿\s*尺寸一致)\s*$"#,
+        #"\s*->\s*"#,
+        #"^\s*[·•|/—–-]+\s*"#,
+        #"\s*[·•|/—–-]+\s*$"#,
+        #"\s{2,}"#
+    ]
+    for pattern in cleanupPatterns {
+        cleaned = cleaned.replacingOccurrences(of: pattern,
+                                               with: pattern == #"\s{2,}"# ? " " : "",
+                                               options: .regularExpression)
+    }
+    return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+// MARK: - Color scheme override (light / dark / system)
+
+/// 用户在「外观」里选的明暗模式 — 应用到 `NSApp.appearance`, 同时驱动所有
+/// `dyn()` 动态色。`.system` 时交还给系统跟随。
+enum PMColorSchemeOverride: String, CaseIterable, Sendable {
+    case system, light, dark
+}
+
+// MARK: - Brand mark (应用内品牌图标)
+
+/// 应用内统一使用默认折页音符，并按出现位置套用平台圆角和阴影。
+struct BrandMonogram: View {
+    enum Slot {
+        case sidebar
+        case update
+        case feature
+        case onboarding
+    }
+
+    var slot: Slot
+    @State private var preferences = MacUIPreferences.shared
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let metrics: (size: CGFloat, corner: CGFloat, shadow: CGFloat, y: CGFloat)
+        let followsTheme: Bool
+        switch slot {
+        case .sidebar:
+            metrics = (28, 7, 4, 2)
+            followsTheme = true
+        case .update:
+            metrics = (58, 14, 16, 6)
+            followsTheme = false
+        case .feature:
+            metrics = (96, 22, 24, 8)
+            followsTheme = false
+        case .onboarding:
+            metrics = (110, 26, 36, 12)
+            followsTheme = false
+        }
+
+        return Group {
+            if followsTheme {
+                RoundedRectangle(cornerRadius: metrics.corner, style: .continuous)
+                    .fill(preferences.brandColor.opacity(colorScheme == .dark ? 0.20 : 0.12))
+                    .frame(width: metrics.size, height: metrics.size)
+                    .overlay {
+                        Image("BrandGlyph")
+                            .renderingMode(.template)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .foregroundStyle(preferences.brandColor)
+                            .padding(5)
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: metrics.corner, style: .continuous)
+                            .strokeBorder(preferences.brandColor.opacity(colorScheme == .dark ? 0.34 : 0.22), lineWidth: 0.5)
+                    }
+                    .shadow(color: preferences.brandColor.opacity(colorScheme == .dark ? 0.22 : 0.16), radius: metrics.shadow, y: metrics.y)
+            } else {
+                Image("AppIconPreview")
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(1, contentMode: .fill)
+                    .frame(width: metrics.size, height: metrics.size)
+                    .clipShape(RoundedRectangle(cornerRadius: metrics.corner, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: metrics.corner, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5)
+                    }
+                    .shadow(color: PMColor.brand.opacity(0.30), radius: metrics.shadow, y: metrics.y)
+            }
+        }
+    }
+}
+
+// MARK: - Alternate app icons (macOS dock 图标)
+
+/// 一套可切换的 App 图标。macOS 不支持 iOS 的 `setAlternateIconName`, 只能在
+/// 运行时换 dock 图标 (`NSApp.applicationIconImage`) 并持久化选择、下次启动重放;
+/// Finder 里 .app 包的图标不变 (沙盒应用改不了自身包)。
+struct MacAppIcon: Identifiable, Equatable, Sendable {
+    /// 稳定标识。"" = 默认 (用 bundle 自带的 AppIcon-Mac)。
+    let id: String
+    /// 资源目录里的预览 imageset 名 (universal, 含明暗变体)。
+    let previewAsset: String
+    /// 本地化显示名的 key (复用 iOS 已有的 icon_* 词条)。
+    let nameKey: String
+    /// 这套图标的品牌色 — 仅用于色环展示, 不强行改全局 accent。
+    let tint: Color
+
+    /// 当前默认、经典图标和 4 套保留方向，跟资源目录里的预览资源一一对应。
+    static let all: [MacAppIcon] = [
+        MacAppIcon(id: "",         previewAsset: "AppIconPreview",  nameKey: "icon_default", tint: Color(red: 0.914, green: 0.314, blue: 0.263)),
+        MacAppIcon(id: "AppIcon9", previewAsset: "AppIcon9Preview", nameKey: "icon_theme_9", tint: Color(red: 0.078, green: 0.490, blue: 0.541)),
+        MacAppIcon(id: "AppIcon12", previewAsset: "AppIcon12Preview", nameKey: "icon_theme_12", tint: Color(red: 0.965, green: 0.251, blue: 0.424)),
+        MacAppIcon(id: "AppIcon11", previewAsset: "AppIcon11Preview", nameKey: "icon_theme_11", tint: Color(red: 0.176, green: 0.651, blue: 0.890)),
+        MacAppIcon(id: "AppIcon6", previewAsset: "AppIcon6Preview", nameKey: "icon_theme_6", tint: Color(red: 0.251, green: 0.835, blue: 0.784)),
+    ]
+
+    static func option(for id: String) -> MacAppIcon {
+        all.first { $0.id == id } ?? all[0]
+    }
+
+    /// 把满幅方形预览图渲染成标准 macOS 图标外形 (连续圆角 squircle + 四周留白),
+    /// 再交给 `applicationIconImage`。预览 PNG 是不带 alpha 的满幅方图, 直接当 dock
+    /// 图标会又大又方, 跟系统其它图标 (含本 app 默认图标) 的圆角 + 留白对不上。
+    @MainActor
+    static func dockIconImage(previewAsset asset: String) -> NSImage? {
+        guard let src = NSImage(named: asset) else { return nil }
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let side: CGFloat = 512
+        let inset = side * 0.0977          // ≈ macOS 图标网格留白 (100 / 1024)
+        let body = side - inset * 2
+        let radius = body * 0.2247         // ≈ macOS 图标圆角比例
+        let content = Image(nsImage: src)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: body, height: body)
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .frame(width: side, height: side)   // 居中 + 四周透明留白
+            .environment(\.colorScheme, isDark ? .dark : .light)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 2
+        return renderer.nsImage
+    }
+}
+
+extension Notification.Name {
+    /// App 图标切换后广播 —— 让菜单栏状态项重画图标 (它默认只设一次)。
+    static let primuseAppIconChanged = Notification.Name("primuse.appIcon.changed")
+}
+
+// MARK: - User preferences key (appearance + lyrics font scale)
+
+/// 把 macOS UI 偏好 (玻璃 / 经典模式, 歌词字号缩放, 侧栏宽度, 品牌色, 明暗模式,
+/// App 图标) 集中存到 UserDefaults。
+@MainActor
+@Observable
+final class MacUIPreferences {
+    static let shared = MacUIPreferences()
+
+    var appearance: PMAppearanceMode {
+        didSet { UserDefaults.standard.set(appearance.rawValue, forKey: Self.keyAppearance) }
+    }
+    var lyricsFontScale: CGFloat {
+        didSet { UserDefaults.standard.set(Double(lyricsFontScale), forKey: Self.keyLyricsScale) }
+    }
+    var sidebarWidth: CGFloat {
+        didSet { UserDefaults.standard.set(Double(sidebarWidth), forKey: Self.keySidebarWidth) }
+    }
+    var themeColorMode: AppThemeColorMode {
+        didSet {
+            UserDefaults.standard.set(themeColorMode.rawValue, forKey: AppThemePreferences.colorModeKey)
+        }
+    }
+    var ambientStrength: Double {
+        didSet {
+            UserDefaults.standard.set(
+                AppThemePreferences.normalizedAmbientStrength(ambientStrength),
+                forKey: AppThemePreferences.ambientStrengthKey
+            )
+        }
+    }
+    var coverDrivenAmbient: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                coverDrivenAmbient,
+                forKey: AppThemePreferences.coverDrivenAmbientKey
+            )
+        }
+    }
+
+    /// 品牌色十六进制 (无 #)。驱动 `PMColor.brand`。
+    var brandColorHex: String {
+        didSet {
+            UserDefaults.standard.set(
+                AppThemePreferences.normalizedHex(brandColorHex, fallback: Self.defaultBrandHex),
+                forKey: AppThemePreferences.accentHexKey
+            )
+        }
+    }
+    /// 明暗模式覆盖。didSet 立即应用到 NSApp.appearance。
+    var colorScheme: PMColorSchemeOverride {
+        didSet {
+            UserDefaults.standard.set(colorScheme.rawValue, forKey: Self.keyColorScheme)
+            applyColorScheme()
+            applyAppIcon()
+        }
+    }
+    /// 当前 App 图标 id ("" = 默认)。didSet 立即换 dock 图标。
+    var appIconID: String {
+        didSet {
+            UserDefaults.standard.set(appIconID, forKey: Self.keyAppIcon)
+            applyAppIcon()
+        }
+    }
+
+    private(set) var artworkBrandColor: Color? = nil
+
+    /// 固定回退色与当前生效色分开，自动模式下全套 Mac 自绘控件会随封面更新。
+    var fixedBrandColor: Color { Color(hex: brandColorHex) }
+    var brandColor: Color {
+        themeColorMode == .automatic ? artworkBrandColor ?? fixedBrandColor : fixedBrandColor
+    }
+
+    func updateArtworkBrandColor(_ color: Color?) {
+        artworkBrandColor = color
+    }
+
+    private static let keyAppearance   = "pm.mac.appearance"
+    private static let keyLyricsScale  = "pm.mac.lyricsScale"
+    private static let keySidebarWidth = "pm.mac.sidebarWidth"
+    private static let legacyAmbientKey = "pm.mac.ambientStrength"
+    private static let legacyCoverDrivenAmbientKey = "pm.mac.coverDrivenAmbient"
+    private static let legacyBrandKey = "pm.mac.brandColor"
+    private static let keyColorScheme  = "pm.mac.colorScheme"
+    private static let keyAppIcon      = "pm.mac.appIcon"
+
+    static let defaultBrandHex = "C96442"
+
+    private init() {
+        let d = UserDefaults.standard
+        if d.object(forKey: AppThemePreferences.ambientStrengthKey) == nil {
+            d.set(
+                d.object(forKey: Self.legacyAmbientKey) as? Double
+                    ?? AppThemePreferences.defaultAmbientStrength,
+                forKey: AppThemePreferences.ambientStrengthKey
+            )
+        }
+        if d.object(forKey: AppThemePreferences.coverDrivenAmbientKey) == nil {
+            d.set(
+                d.object(forKey: Self.legacyCoverDrivenAmbientKey) as? Bool
+                    ?? AppThemePreferences.defaultCoverDrivenAmbient,
+                forKey: AppThemePreferences.coverDrivenAmbientKey
+            )
+        }
+        if d.object(forKey: AppThemePreferences.accentHexKey) == nil {
+            d.set(
+                d.string(forKey: Self.legacyBrandKey) ?? Self.defaultBrandHex,
+                forKey: AppThemePreferences.accentHexKey
+            )
+        }
+        appearance = PMAppearanceMode(rawValue: d.string(forKey: Self.keyAppearance) ?? "") ?? .glass
+        let scale = d.object(forKey: Self.keyLyricsScale) as? Double ?? 1.0
+        lyricsFontScale = CGFloat(max(0.7, min(1.8, scale)))
+        let width = d.object(forKey: Self.keySidebarWidth) as? Double ?? Double(PMSize.sidebarDefault)
+        sidebarWidth = CGFloat(max(Double(PMSize.sidebarMin), min(Double(PMSize.sidebarMax), width)))
+        themeColorMode = AppThemePreferences.colorMode(in: d)
+        ambientStrength = AppThemePreferences.normalizedAmbientStrength(
+            d.object(forKey: AppThemePreferences.ambientStrengthKey) as? Double
+                ?? AppThemePreferences.defaultAmbientStrength
+        )
+        coverDrivenAmbient = d.object(forKey: AppThemePreferences.coverDrivenAmbientKey) as? Bool
+            ?? AppThemePreferences.defaultCoverDrivenAmbient
+        brandColorHex = AppThemePreferences.normalizedHex(
+            d.string(forKey: AppThemePreferences.accentHexKey) ?? Self.defaultBrandHex,
+            fallback: Self.defaultBrandHex
+        )
+        colorScheme = PMColorSchemeOverride(rawValue: d.string(forKey: Self.keyColorScheme) ?? "") ?? .system
+        let persistedAppIconID = d.string(forKey: Self.keyAppIcon) ?? ""
+        appIconID = MacAppIcon.all.contains(where: { $0.id == persistedAppIconID })
+            ? persistedAppIconID
+            : ""
+        if appIconID != persistedAppIconID {
+            d.removeObject(forKey: Self.keyAppIcon)
+        }
+        d.set(ambientStrength, forKey: AppThemePreferences.ambientStrengthKey)
+        d.set(themeColorMode.rawValue, forKey: AppThemePreferences.colorModeKey)
+        d.set(coverDrivenAmbient, forKey: AppThemePreferences.coverDrivenAmbientKey)
+        d.set(brandColorHex, forKey: AppThemePreferences.accentHexKey)
+    }
+
+    /// 启动时把持久化的明暗模式 + App 图标重放一遍 (didSet 在 init 期不触发,
+    /// 所以必须显式调一次)。在 AppDelegate.applicationDidFinishLaunching 里调。
+    func applyOnLaunch() {
+        applyColorScheme()
+        applyAppIcon()
+    }
+
+    /// 把 colorScheme 应用到整个 app (含 AppKit 的 mini player / 菜单栏窗口)。
+    func applyColorScheme() {
+        switch colorScheme {
+        case .system: NSApp.appearance = nil
+        case .light:  NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+
+    /// 换运行时 Dock 图标。默认与备选图标都从带 luminosity 变体的预览资源
+    /// 渲染，因此切换系统明暗时不会退回静态 bundle 图标。
+    func applyAppIcon() {
+        let asset = MacAppIcon.option(for: appIconID).previewAsset
+        if let shaped = MacAppIcon.dockIconImage(previewAsset: asset) {
+            NSApp.applicationIconImage = shaped
+        } else {
+            NSApp.applicationIconImage = nil
+        }
+        NotificationCenter.default.post(name: .primuseAppIconChanged, object: nil)
+    }
+}
+
+#endif

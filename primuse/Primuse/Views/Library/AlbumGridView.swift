@@ -1,0 +1,360 @@
+import SwiftUI
+import PrimuseKit
+
+struct AlbumGridView: View {
+    @Environment(MusicLibrary.self) private var library
+    @State private var albumFilter = ""
+
+    private var filteredAlbums: [Album] {
+        let query = albumFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return library.visibleAlbums }
+        return library.visibleAlbums.filter { album in
+            album.title.localizedCaseInsensitiveContains(query)
+                || (album.artistName?.localizedCaseInsensitiveContains(query) ?? false)
+                || album.year.map(String.init)?.contains(query) == true
+        }
+    }
+    #if !os(macOS)
+    private let columns = [
+        GridItem(.adaptive(minimum: 150), spacing: 16)
+    ]
+    #endif
+
+    var body: some View {
+        if library.visibleAlbums.isEmpty {
+            EmptyStateView(
+                titleKey: "no_albums",
+                descriptionKey: "no_albums_desc",
+                systemImage: "square.stack"
+            )
+        } else {
+            #if os(macOS)
+            macGrid
+                .onReceive(NotificationCenter.default.publisher(for: .primuseDetailOpenAlbum)) { note in
+                    guard let album = note.object as? Album,
+                          library.visibleAlbums.contains(where: { $0.id == album.id }) else { return }
+                    albumFilter = ""
+                    openAlbum(album)
+                }
+            #else
+            ScrollView {
+                if filteredAlbums.isEmpty {
+                    ContentUnavailableView.search(text: albumFilter)
+                }
+                LazyVGrid(columns: columns, spacing: 20) {
+                    ForEach(filteredAlbums) { album in
+                        NavigationLink(value: album) {
+                            AlbumCardView(album: album)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding()
+            }
+            .searchable(
+                text: $albumFilter,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Text("filter_albums_placeholder")
+            )
+            #endif
+        }
+    }
+
+    #if os(macOS)
+    @State private var albumSort: AlbumSortOrder = .year
+    @State private var albumViewMode: AlbumViewMode = .grid
+    @State private var selectedAlbumID: String?
+
+    private enum AlbumViewMode: String, CaseIterable, Hashable {
+        case grid, list
+
+        var icon: String {
+            switch self {
+            case .grid: return "square.grid.2x2"
+            case .list: return "list.bullet"
+            }
+        }
+    }
+
+    /// 设计稿 LIB-02 的排序维度: 发行年(默认) / 标题 / 艺术家 / 曲目数。
+    private enum AlbumSortOrder: CaseIterable, Hashable {
+        case year, title, artist, songCount
+
+        var label: String {
+            switch self {
+            case .year: return String(localized: "year_label")
+            case .title: return String(localized: "title_label")
+            case .artist: return String(localized: "artist_label")
+            case .songCount: return String(localized: "album_sort_song_count")
+            }
+        }
+    }
+
+    private var sortedAlbums: [Album] {
+        switch albumSort {
+        case .title:
+            return filteredAlbums.sorted { $0.title.localizedCompare($1.title) == .orderedAscending }
+        case .artist:
+            return filteredAlbums.sorted {
+                ($0.artistName ?? "").localizedCompare($1.artistName ?? "") == .orderedAscending
+            }
+        case .year:
+            return filteredAlbums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+        case .songCount:
+            return filteredAlbums.sorted { $0.songCount > $1.songCount }
+        }
+    }
+
+    /// 设计稿 LIB-02: 不再用带大封面的 hero header (那是全部歌曲/歌单的样式),
+    /// 而是左上角专辑标题 + 右上排序, 下面五列封面网格。
+    @ViewBuilder
+    private var macGrid: some View {
+        if let selectedAlbum {
+            AlbumDetailView(
+                album: selectedAlbum,
+                onMacInlineBack: closeAlbum
+            )
+            .id(selectedAlbum.id)
+        } else {
+            macAlbumOverview
+        }
+    }
+
+    private var selectedAlbum: Album? {
+        guard let selectedAlbumID else { return nil }
+        return library.visibleAlbums.first { $0.id == selectedAlbumID }
+    }
+
+    private var macAlbumOverview: some View {
+        let albums = sortedAlbums
+        return ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 18) {
+                albumsHeader(displayedCount: albums.count)
+
+                if albums.isEmpty {
+                    ContentUnavailableView.search(text: albumFilter)
+                        .frame(maxWidth: .infinity, minHeight: 280)
+                        .padding(.horizontal, PMSpace.xxxl)
+                } else if albumViewMode == .grid {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 150), spacing: 24, alignment: .top)],
+                        alignment: .leading,
+                        spacing: 24
+                    ) {
+                        ForEach(albums) { album in
+                            Button {
+                                openAlbum(album)
+                            } label: {
+                                GeometryReader { proxy in
+                                    macAlbumTile(album, artworkSize: proxy.size.width)
+                                }
+                                .aspectRatio(0.74, contentMode: .fit)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, PMSpace.xxxl)
+                } else {
+                    LazyVStack(spacing: 1) {
+                        ForEach(albums) { album in
+                            Button {
+                                openAlbum(album)
+                            } label: {
+                                macAlbumListRow(album)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, PMSpace.xxxl)
+                }
+            }
+            .padding(.top, 24)
+            .padding(.bottom, 112)
+        }
+        .background(PMColor.bg.ignoresSafeArea())
+    }
+
+    private func openAlbum(_ album: Album) {
+        withAnimation(.snappy(duration: 0.22)) {
+            selectedAlbumID = album.id
+        }
+    }
+
+    private func closeAlbum() {
+        withAnimation(.snappy(duration: 0.22)) {
+            selectedAlbumID = nil
+        }
+    }
+
+    private func albumsHeader(displayedCount: Int) -> some View {
+        HStack(alignment: .bottom) {
+            Text("tab_albums")
+                .font(.system(size: 32, weight: .bold))
+                .foregroundStyle(PMColor.text)
+
+            Spacer()
+
+            HStack(spacing: 10) {
+                Text(verbatim: String(
+                    format: String(localized: "album_grid_count_sort_format"),
+                    displayedCount,
+                    library.visibleAlbums.count,
+                    albumSort.label
+                ))
+                    .font(.system(size: 12))
+                    .foregroundStyle(PMColor.textFaint)
+                albumFilterField
+                albumViewSwitcher
+                albumSortMenu
+            }
+        }
+        .padding(.horizontal, PMSpace.xxxl)
+    }
+
+    private var albumFilterField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(PMColor.textFaint)
+            TextField("", text: $albumFilter, prompt: Text("filter_albums_placeholder"))
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(PMColor.text)
+                .frame(width: 150)
+            if !albumFilter.isEmpty {
+                Button { albumFilter = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(PMColor.textFaint)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 26)
+        .background(PMColor.glassBtn, in: .rect(cornerRadius: PMRadius.s))
+        .overlay {
+            RoundedRectangle(cornerRadius: PMRadius.s, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+    }
+
+    private var albumViewSwitcher: some View {
+        HStack(spacing: 2) {
+            ForEach(AlbumViewMode.allCases, id: \.self) { mode in
+                Button {
+                    albumViewMode = mode
+                } label: {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(albumViewMode == mode ? PMColor.text : PMColor.textMuted)
+                        .frame(width: 26, height: 22)
+                        .background(albumViewMode == mode ? PMColor.bgElev : .clear, in: .rect(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+                .help(Text(mode == .grid ? "grid_view" : "list_view"))
+            }
+        }
+        .padding(2)
+        .background(PMColor.glassBtn, in: .rect(cornerRadius: PMRadius.s))
+        .overlay {
+            RoundedRectangle(cornerRadius: PMRadius.s, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+    }
+
+    private var albumSortMenu: some View {
+        Menu {
+            Picker("sort_by", selection: $albumSort) {
+                ForEach(AlbumSortOrder.allCases, id: \.self) { order in
+                    Text(verbatim: order.label).tag(order)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(verbatim: albumSort.label)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(PMColor.text)
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(PMColor.glassBtn, in: .rect(cornerRadius: PMRadius.s))
+            .overlay {
+                RoundedRectangle(cornerRadius: PMRadius.s, style: .continuous)
+                    .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private func macAlbumTile(_ album: Album, artworkSize: CGFloat) -> some View {
+        return VStack(alignment: .leading, spacing: 0) {
+            AlbumArtworkView(album: album, size: artworkSize, cornerRadius: PMRadius.m)
+            .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
+
+            Text(album.title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(PMColor.text)
+                .lineLimit(1)
+                .padding(.top, 10)
+
+            if let artist = album.artistName, !artist.isEmpty {
+                Text(artist)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(PMColor.textMuted)
+                    .lineLimit(1)
+                    .padding(.top, 1)
+            }
+
+            Text(verbatim: albumMetaLine(album))
+                .font(.system(size: 10.5))
+                .foregroundStyle(PMColor.textFaint)
+                .lineLimit(1)
+                .padding(.top, 2)
+        }
+        .frame(width: artworkSize, alignment: .leading)
+    }
+
+    private func macAlbumListRow(_ album: Album) -> some View {
+        return HStack(spacing: 12) {
+            AlbumArtworkView(album: album, size: 44, cornerRadius: 6)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(album.title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+                Text(verbatim: [album.artistName, albumMetaLine(album)]
+                    .compactMap { $0?.isEmpty == false ? $0 : nil }
+                    .joined(separator: " · "))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(PMColor.textFaint)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(PMColor.textFaint)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .pmRowBackground(cornerRadius: 6)
+        .contentShape(Rectangle())
+    }
+
+    private func albumMetaLine(_ album: Album) -> String {
+        var parts: [String] = []
+        if let year = album.year {
+            parts.append("\(year)")
+        }
+        parts.append("\(album.songCount) \(String(localized: "songs_count"))")
+        return parts.joined(separator: " · ")
+    }
+    #endif
+}

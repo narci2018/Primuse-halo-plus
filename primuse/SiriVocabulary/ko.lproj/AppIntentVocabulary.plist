@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>IntentPhrases</key>
+	<array>
+		<dict>
+			<key>IntentExamples</key>
+			<array>
+				<string>Primuse에서 음악을 검색해 줘</string>
+				<string>Primuse에서 노래를 검색해 줘</string>
+				<string>Primuse에서 앨범을 검색해 줘</string>
+				<string>Primuse에서 아티스트를 검색해 줘</string>
+				<string>Primuse에서 플레이리스트를 검색해 줘</string>
+				<string>Primuse에서 재즈 음악을 검색해 줘</string>
+				<string>Primuse에서 라디오 방송국을 검색해 줘</string>
+			</array>
+			<key>IntentName</key>
+			<string>INSearchForMediaIntent</string>
+		</dict>
+		<dict>
+			<key>IntentExamples</key>
+			<array>
+				<string>Primuse에서 음악을 재생해 줘</string>
+				<string>Primuse에서 노래를 재생해 줘</string>
+				<string>Primuse에서 앨범을 재생해 줘</string>
+				<string>Primuse에서 아티스트의 음악을 재생해 줘</string>
+				<string>Primuse에서 플레이리스트를 재생해 줘</string>
+				<string>Primuse에서 재즈 음악을 재생해 줘</string>
+				<string>Primuse에서 라디오 방송국을 재생해 줘</string>
+			</array>
+			<key>IntentName</key>
+			<string>INPlayMediaIntent</string>
+		</dict>
+	</array>
+</dict>
+</plist>

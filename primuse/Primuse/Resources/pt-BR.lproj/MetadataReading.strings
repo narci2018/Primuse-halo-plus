@@ -1,0 +1,14 @@
+"title" = "Velocidade de leitura de tags";
+"automatic" = "Automático";
+"fast" = "Velocidade máxima";
+"energySaving" = "Economizar energia";
+"playback" = "Priorizando a reprodução";
+"lowPower" = "Modo de Pouca Energia";
+"thermal" = "Leitura reduzida para resfriar";
+"cooling" = "Pausado até o dispositivo esfriar";
+"background" = "Leitura em segundo plano";
+"rate" = "%.1f faixas/min";
+"fastWarningTitle" = "Ativar a velocidade máxima?";
+"fastWarningMessage" = "Conclui a leitura das tags mais rápido, mas pode aumentar o aquecimento, o consumo de bateria e as travadas na interface. A leitura ainda reduz a velocidade se o aparelho esquentar, estiver no modo de pouca energia ou reproduzindo música, e pausa se necessário. Você pode mudar de modo a qualquer momento.";
+"fastWarningConfirm" = "Executar";
+"cancel" = "Cancelar";

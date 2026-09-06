@@ -1,0 +1,14 @@
+"title" = "標籤讀取速度";
+"automatic" = "自動";
+"fast" = "全速";
+"energySaving" = "節能";
+"playback" = "優先保障播放";
+"lowPower" = "低耗電模式";
+"thermal" = "正在降速散熱";
+"cooling" = "等待裝置降溫後繼續";
+"background" = "背景讀取";
+"rate" = "%.1f 首/分鐘";
+"fastWarningTitle" = "開啟全速讀取？";
+"fastWarningMessage" = "儘快完成標籤讀取，可能增加發熱、耗電和介面卡頓。溫度偏高、低電量或播放音樂時仍會自動降速，必要時暫停。可隨時切回其他檔位。";
+"fastWarningConfirm" = "執行";
+"cancel" = "取消";

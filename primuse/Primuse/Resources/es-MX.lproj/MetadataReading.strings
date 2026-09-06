@@ -1,0 +1,14 @@
+"title" = "Velocidad de lectura de etiquetas";
+"automatic" = "Automático";
+"fast" = "Máxima velocidad";
+"energySaving" = "Ahorrar energía";
+"playback" = "Protegiendo la reproducción";
+"lowPower" = "Modo de bajo consumo";
+"thermal" = "Lectura más lenta para enfriar";
+"cooling" = "En pausa hasta que el dispositivo se enfríe";
+"background" = "Lectura en segundo plano";
+"rate" = "%.1f pistas/min";
+"fastWarningTitle" = "¿Activar la máxima velocidad?";
+"fastWarningMessage" = "Termina de leer las etiquetas antes. Puede aumentar el calor, el consumo de batería y los tirones de la interfaz. La lectura seguirá reduciendo su velocidad si el dispositivo se calienta, está en modo de bajo consumo o reproduce música, y se pausará si hace falta. Puedes cambiar de modo en cualquier momento.";
+"fastWarningConfirm" = "Ejecutar";
+"cancel" = "Cancelar";

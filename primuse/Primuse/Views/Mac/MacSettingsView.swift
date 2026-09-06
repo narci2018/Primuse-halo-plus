@@ -1,0 +1,7088 @@
+#if os(macOS)
+import SwiftUI
+import AppKit
+import CloudKit
+import UniformTypeIdentifiers
+import WidgetKit
+import PrimuseKit
+
+/// macOS settings window rebuilt against `design/猿音/scenes/settings.jsx`.
+/// The window chrome, sidebar, and every ST-* page use the same custom row
+/// system as the design instead of embedding the older grouped Forms.
+enum MacSettingsTab: String, Hashable, CaseIterable, Identifiable {
+    case playback, storage, equalizer, effects, keyboard, theme
+    case scrape, artists, lyrics, appleMusic, intelligence, widgets, cloud, deleted, ssl, siri, about
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .playback: return Lz("Playback")
+        case .storage: return String(localized: "storage_management")
+        case .equalizer: return Lz("Equalizer")
+        case .effects: return Lz("Audio Effects")
+        case .keyboard: return String(localized: "keyboard_shortcuts_title")
+        case .scrape: return Lz("Metadata Scraping")
+        case .artists: return String(localized: "artist_name_settings_title")
+        case .lyrics: return String(localized: "lyrics_settings_title")
+        case .appleMusic: return "Apple Music"
+        case .intelligence: return String(localized: "ai_settings_title")
+        case .widgets: return Lz("Widgets")
+        case .cloud: return "iCloud"
+        case .theme: return Lz("Appearance")
+        case .deleted: return Lz("Recently Deleted")
+        case .ssl: return Lz("Trusted Domains")
+        case .about: return Lz("About")
+        case .siri: return SettingsPage.siri.title
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .playback: return "play.circle"
+        case .storage: return "internaldrive"
+        case .equalizer: return "slider.horizontal.3"
+        case .effects: return "waveform.badge.plus"
+        case .keyboard: return "keyboard"
+        case .scrape: return "tag"
+        case .artists: return "person.2"
+        case .lyrics: return "character.bubble"
+        case .appleMusic: return "music.note"
+        case .intelligence: return "sparkles"
+        case .widgets: return "rectangle.grid.2x2"
+        case .cloud: return "icloud"
+        case .theme: return "sun.max"
+        case .deleted: return "trash"
+        case .ssl: return "lock.shield"
+        case .about: return "info.circle"
+        case .siri: return "waveform"
+        }
+    }
+
+    var spec: String {
+        switch self {
+        case .playback: return "ST-01"
+        case .storage: return "ST-16"
+        case .equalizer: return "ST-02"
+        case .effects: return "ST-03"
+        case .keyboard: return "ST-13"
+        case .scrape: return "ST-04"
+        case .artists: return "ST-15"
+        case .lyrics: return "ST-05"
+        case .appleMusic: return "ST-06"
+        case .intelligence: return "ST-14"
+        case .widgets: return "ST-07"
+        case .cloud: return "ST-08"
+        case .theme: return "ST-12"
+        case .deleted: return "ST-09"
+        case .ssl: return "ST-10"
+        case .about: return "ST-11"
+        case .siri: return ""
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class MacSettingsNavigationModel {
+    var tab: MacSettingsTab = .playback
+    var settingID: String?
+    var showsCacheSync = false
+    var revision = UUID()
+
+    func select(tab: MacSettingsTab) {
+        showsCacheSync = false
+        self.tab = tab
+        settingID = nil
+        revision = UUID()
+    }
+
+    func select(item: SettingDefinition) {
+        if item.page == .cacheSync {
+            settingID = nil
+            showsCacheSync = true
+            revision = UUID()
+            return
+        }
+        guard let tab = item.page?.macTab else { return }
+        showsCacheSync = false
+        self.tab = tab
+        settingID = item.isPage ? nil : item.id
+        if item.page == .transcription { settingID = item.id }
+        revision = UUID()
+    }
+}
+
+extension SettingsPage {
+    var macTab: MacSettingsTab? {
+        switch self {
+        case .playback: .playback
+        case .storage: .storage
+        case .equalizer: .equalizer
+        case .effects: .effects
+        case .keyboard: .keyboard
+        case .appearance: .theme
+        case .scraping: .scrape
+        case .artists: .artists
+        case .lyrics, .transcription: .lyrics
+        case .appleMusic: .appleMusic
+        case .intelligence: .intelligence
+        case .widgets: .widgets
+        case .cloud: .cloud
+        case .deleted: .deleted
+        case .domains: .ssl
+        case .about: .about
+        case .siri: .siri
+        default: nil
+        }
+    }
+}
+
+private extension MacSettingsTab {
+    var page: SettingsPage {
+        switch self {
+        case .playback: .playback
+        case .storage: .storage
+        case .equalizer: .equalizer
+        case .effects: .effects
+        case .keyboard: .keyboard
+        case .theme: .appearance
+        case .scrape: .scraping
+        case .artists: .artists
+        case .lyrics: .lyrics
+        case .appleMusic: .appleMusic
+        case .intelligence: .intelligence
+        case .widgets: .widgets
+        case .cloud: .cloud
+        case .deleted: .deleted
+        case .ssl: .domains
+        case .about: .about
+        case .siri: .siri
+        }
+    }
+}
+
+struct MacSettingsView: View {
+    let navigation: MacSettingsNavigationModel
+
+    @Environment(MusicIntelligenceService.self) private var intelligence
+    @State private var sidebarFilter = ""
+    @State private var showingSearchResults = false
+
+    private var tab: MacSettingsTab { navigation.tab }
+
+    private func selectTab(_ newTab: MacSettingsTab) {
+        navigation.select(tab: newTab)
+        SettingsSearchHistory.shared.record(newTab.page.id)
+        showingSearchResults = false
+    }
+
+    private var availableTabs: [MacSettingsTab] {
+        MacSettingsTab.allCases.filter { $0 != .intelligence || intelligence.shouldExposeRemoteConfiguration }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            settingsTitleBar
+
+            HStack(spacing: 0) {
+                sidebar
+                    .frame(width: 200)
+                Divider()
+                contentPane
+            }
+        }
+        // 设计稿 Settings 窗口尺寸: sidebar 200 + content max-width 720 + L/R padding 32×2
+        // ≈ 984pt 宽。之前设 1040×720, 右侧 max-width 限制让 56pt 留白; 用户截图看着
+        // "右边空一片"。改成 940×680, content 几乎贴右边缘。
+        .frame(minWidth: 940, idealWidth: 960, minHeight: 680, idealHeight: 720)
+        .environment(\.pmAppearance, MacUIPreferences.shared.appearance)
+        .background(PMColor.bg.ignoresSafeArea())
+        .background(PMWindowChromeConfigurator())
+        .ignoresSafeArea(.container, edges: .top)
+        .onChange(of: sidebarFilter) { _, value in
+            showingSearchResults = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        .onChange(of: navigation.revision) { _, _ in showingSearchResults = false }
+        .sheet(isPresented: Binding(
+            get: { navigation.showsCacheSync },
+            set: { navigation.showsCacheSync = $0 }
+        )) { MacAudioCacheSyncView() }
+    }
+
+    private var settingsTitleBar: some View {
+        HStack(spacing: 0) {
+            PMStandardWindowButtonArea()
+
+            Text(verbatim: showingSearchResults ? SettingsStrings.text("Search settings") : tab.title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(PMColor.text)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            // 跟左侧三色窗口按钮等宽的占位, 让标题在窗口里居中。
+            Color.clear.frame(width: 52, height: 1)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: PMSize.titlebar)
+        .background {
+            ZStack {
+                NSVisualEffectBackdrop(material: .sidebar, blending: .behindWindow)
+                Rectangle().fill(PMColor.sidebarGlass)
+            }
+        }
+        .pmWindowDragRegion()
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sidebarSearch
+                .padding(.horizontal, 10)
+                .padding(.top, 14)
+                .padding(.bottom, 10)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(availableTabs) { sidebarItem($0) }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 10)
+            }
+        }
+        .background {
+            ZStack {
+                NSVisualEffectBackdrop(material: .sidebar, blending: .behindWindow)
+                Rectangle().fill(PMColor.sidebarGlass)
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    private var sidebarSearch: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(PMColor.textFaint)
+            TextField("", text: $sidebarFilter, prompt: Text(verbatim: Lz("Search…")))
+                .textFieldStyle(.plain)
+                .accessibilityIdentifier("settings.search")
+                .onExitCommand { sidebarFilter = "" }
+                .font(.system(size: 12.5))
+                .foregroundStyle(PMColor.text)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+        .background(PMColor.glassBtn, in: .rect(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+    }
+
+    private func sidebarItem(_ item: MacSettingsTab) -> some View {
+        let selected = item == tab
+        return Button { selectTab(item) } label: {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(selected ? AnyShapeStyle(Color.white.opacity(0.22))
+                          : AnyShapeStyle(PMColor.brand.opacity(0.16)))
+                    .frame(width: 22, height: 22)
+                    .overlay {
+                        Image(systemName: item.icon)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(selected ? Color.white : PMColor.brand)
+                    }
+
+                Text(verbatim: item.title)
+                    .font(selected ? .system(size: 12.5, weight: .medium) : .system(size: 12.5))
+                    .foregroundStyle(selected ? Color.white : PMColor.text)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(selected ? PMColor.brand : .clear, in: .rect(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var contentPane: some View {
+        VStack(spacing: 0) {
+            if showingSearchResults {
+                let results = SettingsCatalog.search(sidebarFilter, showsIntelligence: intelligence.shouldExposeRemoteConfiguration)
+                if results.isEmpty {
+                    ContentUnavailableView.search(text: sidebarFilter)
+                } else {
+                    List(results) { item in
+                        Button {
+                            SettingsSearchHistory.shared.record(item.id)
+                            navigation.select(item: item)
+                            showingSearchResults = false
+                        } label: {
+                            SettingsSearchResultRow(item: item)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.clear)
+                    }
+                    .scrollContentBackground(.hidden)
+                }
+            } else {
+                if !sidebarFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        showingSearchResults = true
+                    } label: {
+                        Label(SettingsStrings.text("Back to search results"), systemImage: "chevron.left")
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                }
+                SettingsFocusedPage(itemID: navigation.settingID, page: tab.page) {
+                    if navigation.settingID.flatMap({ SettingsCatalog.byID[$0] })?.page == .transcription {
+                        GoogleLyricsTranscriptionSettingsView()
+                    } else {
+                        MacSettingsScroll(title: tab.title) { settingsContent }
+                    }
+                }
+                .id(navigation.revision)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(PMColor.bg)
+    }
+
+    @ViewBuilder
+    private var settingsContent: some View {
+        switch tab {
+        case .playback:
+            MacSTPlaybackView()
+        case .storage:
+            MacSTStorageView()
+        case .equalizer:
+            MacSTEqualizerView()
+        case .effects:
+            MacSTEffectsView()
+        case .keyboard:
+            MacSTKeyboardShortcutsView()
+        case .scrape:
+            MacSTScrapingView()
+        case .artists:
+            MacSTArtistNameView()
+        case .lyrics:
+            MacSTLyricsView()
+        case .appleMusic:
+            MacSTAppleMusicView()
+        case .intelligence:
+            MacSTIntelligenceView()
+        case .widgets:
+            MacSTWidgetView()
+        case .cloud:
+            MacSTCloudView()
+        case .theme:
+            MacSTThemeView()
+        case .deleted:
+            MacSTDeletedView()
+        case .ssl:
+            MacSTSSLView()
+        case .about:
+            MacSTAboutView()
+        case .siri:
+            SettingsShortcutsHelpView()
+        }
+    }
+}
+
+// MARK: - ST-16 Storage
+
+private struct MacSTStorageView: View {
+    @Environment(PlaybackSettingsStore.self) private var playbackSettings
+    @Environment(SourceManager.self) private var sourceManager
+
+    var body: some View {
+        @Bindable var settings = playbackSettings
+
+        VStack(alignment: .leading, spacing: 0) {
+            MacSTSection(String(localized: "cache")) {
+                MacSTGroup {
+                    MacSTRow(
+                        String(localized: "audio_cache_enabled"),
+                        divider: false
+                    ) {
+                        MacSTToggle(isOn: $settings.audioCacheEnabled)
+                    }
+                    .settingsAnchor("storage.audioCacheEnabled")
+                    MacSTRow(String(localized: "audio_cache_limit")) {
+                        MacSTPicker(
+                            selection: $settings.audioCacheLimitBytes,
+                            options: AudioCacheLimitPolicy.options(
+                                including: settings.audioCacheLimitBytes
+                            ).map { ($0, audioCacheLimitLabel($0)) },
+                            width: 120
+                        )
+                        MacSTButton(title: String(localized: "clear_cache")) {
+                            Task { await sourceManager.clearAudioCache() }
+                        }
+                    }
+                    .settingsAnchor("storage.audioCacheLimit")
+                }
+            }
+        }
+    }
+
+    private func audioCacheLimitLabel(_ bytes: Int64) -> String {
+        guard bytes != AudioCacheLimitPolicy.unlimitedBytes else {
+            return String(localized: "smart_limit_placeholder")
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .binary
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+// MARK: - Settings Shell Components
+
+private struct MacSettingsScroll<Content: View>: View {
+    let title: String
+    private let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        // 标题随内容一起滚动 — 标题栏(红绿灯区)已经显示当前页名,
+        // 这里不再固定标题, 也不画分割线, 滚动条隐藏。
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(verbatim: title)
+                        .font(.system(size: 22, weight: .bold))
+                        .tracking(-0.3)
+                        .foregroundStyle(PMColor.text)
+                }
+                .padding(.bottom, 18)
+
+                content
+            }
+            .padding(.horizontal, 32)
+            .padding(.top, 22)
+            .padding(.bottom, 36)
+            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(PMColor.bg)
+    }
+}
+
+private struct MacSTSection<Content: View>: View {
+    let title: String?
+    let hint: String?
+    private let content: Content
+
+    init(_ title: String? = nil, hint: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.hint = hint
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let title {
+                let visibleTitle = PMTextWithoutDesignCodes(title)
+                if !visibleTitle.isEmpty {
+                    Text(verbatim: visibleTitle)
+                        .font(.system(size: 11, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(PMColor.textFaint)
+                        .textCase(.uppercase)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 4)
+                        .padding(.bottom, -2)
+                }
+            }
+
+            content
+
+            if let hint {
+                let visibleHint = PMTextWithoutDesignCodes(hint)
+                if !visibleHint.isEmpty {
+                    Text(verbatim: visibleHint)
+                        .font(.system(size: 10.5))
+                        .lineSpacing(3)
+                        .foregroundStyle(PMColor.textFaint)
+                        .padding(.horizontal, 14)
+                        .padding(.top, -4)
+                }
+            }
+        }
+        .padding(.bottom, 22)
+    }
+}
+
+private struct MacSTGroup<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+        }
+        .background(PMColor.bgElev, in: .rect(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+private struct MacSTRow<Content: View>: View {
+    let label: String
+    let hint: String?
+    let divider: Bool
+    let block: Bool
+    private let content: Content
+
+    init(_ label: String,
+         hint: String? = nil,
+         divider: Bool = true,
+         block: Bool = false,
+         @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.hint = hint
+        self.divider = divider
+        self.block = block
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if divider {
+                Rectangle().fill(PMColor.divider).frame(height: 0.5)
+            }
+
+            if block {
+                VStack(alignment: .leading, spacing: 0) {
+                    rowLabel
+                    content
+                        .padding(.top, 10)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            } else {
+                HStack(alignment: .center, spacing: 16) {
+                    rowLabel
+                    Spacer(minLength: 12)
+                    content
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(minHeight: 38)
+            }
+        }
+    }
+
+    private var rowLabel: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            let visibleLabel = PMTextWithoutDesignCodes(label)
+            if !visibleLabel.isEmpty {
+                Text(verbatim: visibleLabel)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+            }
+            if let hint {
+                let visibleHint = PMTextWithoutDesignCodes(hint)
+                if !visibleHint.isEmpty {
+                    Text(verbatim: visibleHint)
+                        .font(.system(size: 11))
+                        .foregroundStyle(PMColor.textFaint)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MacSTToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.18, dampingFraction: 0.9)) {
+                isOn.toggle()
+            }
+        } label: {
+            Capsule()
+                .fill(isOn ? Color(red: 0.20, green: 0.78, blue: 0.35) : PMColor.dividerStrong)
+                .frame(width: 32, height: 18)
+                .overlay(alignment: isOn ? .trailing : .leading) {
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 14, height: 14)
+                        .shadow(color: .black.opacity(0.22), radius: 2, y: 1)
+                        .padding(2)
+                }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct MacSTSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let width: CGFloat
+    let formatter: (Double) -> String
+
+    init(value: Binding<Double>,
+         in range: ClosedRange<Double> = 0...100,
+         width: CGFloat = 200,
+         formatter: @escaping (Double) -> String = { "\($0.rounded().finiteInt())" }) {
+        self._value = value
+        self.range = range
+        self.width = width
+        self.formatter = formatter
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Slider(value: $value, in: range)
+                .tint(PMColor.brand)
+                .controlSize(.small)
+            Text(verbatim: formatter(value))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(PMColor.textMuted)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 36, alignment: .trailing)
+        }
+        .frame(width: width)
+    }
+}
+
+/// 真实 Picker — Menu 下拉, 点击会弹真菜单。
+private struct MacSTPicker<T: Hashable>: View {
+    @Binding var selection: T
+    let options: [(value: T, label: String)]
+    var width: CGFloat = 200
+
+    var body: some View {
+        Menu {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, opt in
+                Button(PMLocalizedOrVerbatim(opt.label)) { selection = opt.value }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(verbatim: PMLocalizedOrVerbatim(currentLabel))
+                    .font(.system(size: 12))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(PMColor.textFaint)
+            }
+            .padding(.horizontal, 10)
+            .frame(width: width, height: 22)
+            .background(PMColor.bgElev, in: .rect(cornerRadius: 5))
+            .overlay {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(PMColor.dividerStrong, lineWidth: 0.5)
+            }
+            .contentShape(.rect(cornerRadius: 5))
+        }
+        // `.borderlessButton` 会丢掉自定义 label, 退化成原生「⌄ 标题」下拉;
+        // `.button` + 透明 buttonStyle 才会把上面那个描边盒子当作触发器渲染,
+        // `.menuIndicator(.hidden)` 去掉系统自动补的箭头 (我们自己画了)。
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var currentLabel: String {
+        options.first(where: { $0.value == selection })?.label ?? "—"
+    }
+}
+
+private struct MacSTButton: View {
+    let title: String
+    var systemImage: String? = nil
+    var prominent = false
+    var destructive = false
+    var action: () -> Void = {}
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                Text(verbatim: PMLocalizedOrVerbatim(title))
+                    .font(.system(size: 11.5, weight: prominent ? .semibold : .medium))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .foregroundStyle(foreground)
+            .background(background, in: .rect(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var foreground: Color {
+        if prominent { return .white }
+        if destructive { return PMColor.bad }
+        return PMColor.text
+    }
+
+    private var background: Color {
+        if prominent { return PMColor.brand }
+        if destructive { return .clear }
+        return PMColor.glassBtn
+    }
+}
+
+private struct MacSTTextField: View {
+    @Binding var text: String
+    let prompt: String
+    var secure = false
+    var width: CGFloat = 360
+
+    var body: some View {
+        Group {
+            if secure {
+                SecureField("", text: $text, prompt: Text(verbatim: prompt))
+            } else {
+                TextField("", text: $text, prompt: Text(verbatim: prompt))
+            }
+        }
+        .textFieldStyle(.plain)
+        .font(.system(size: 12))
+        .foregroundStyle(PMColor.text)
+        .padding(.horizontal, 9)
+        .frame(width: width, height: 24)
+        .background(PMColor.bg, in: .rect(cornerRadius: 5))
+        .overlay {
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .strokeBorder(PMColor.dividerStrong, lineWidth: 0.5)
+        }
+    }
+}
+
+private struct MacAIModelField: View {
+    @Binding var text: String
+    let models: [AIProviderModel]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            MacSTTextField(
+                text: $text,
+                prompt: String(localized: "ai_model_manual_placeholder"),
+                width: models.isEmpty ? 360 : 324
+            )
+            if !models.isEmpty {
+                Menu {
+                    ForEach(models) { model in
+                        Button(model.id) { text = model.id }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(PMColor.textFaint)
+                        .frame(width: 30, height: 24)
+                        .background(PMColor.glassBtn, in: .rect(cornerRadius: 5))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(PMColor.dividerStrong, lineWidth: 0.5)
+                        }
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+            }
+        }
+    }
+}
+
+private struct MacSTIntelligenceView: View {
+    @Environment(MusicIntelligenceService.self) private var intelligence
+    @State private var editor = AISettingsEditorModel()
+    @State private var showsRemoveProviderConfirmation = false
+    @State private var showsProviderDetails = false
+
+    var body: some View {
+        Group {
+            if intelligence.regionAvailability.isRefreshing,
+               intelligence.regionAvailability.context.region == .unknown {
+            MacSTSection {
+                MacSTGroup {
+                    MacSTRow(String(localized: "ai_region_checking"), divider: false) {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            } else if !intelligence.shouldExposeRemoteConfiguration {
+            MacSTSection {
+                MacSTGroup {
+                    MacSTRow(
+                        String(localized: "ai_region_unavailable_title"),
+                        hint: String(localized: "ai_region_unavailable_description"),
+                        divider: false
+                    ) {
+                        Image(systemName: "globe.asia.australia.fill")
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+                }
+            }
+            } else {
+            statusCard
+            primuseRelaySection
+
+            MacSTSection(String(localized: "ai_capability_section")) {
+                MacSTGroup {
+                    MacSTRow(
+                        String(localized: "ai_enable_semantic_search"),
+                        divider: false
+                    ) {
+                        MacSTToggle(isOn: editor.semanticSearchBinding)
+                    }
+                    .settingsAnchor("intelligence.semanticSearch")
+                    MacSTRow(
+                        String(localized: "ai_enable_recommendations")
+                    ) {
+                        MacSTToggle(isOn: editor.recommendationsBinding)
+                    }
+                    .settingsAnchor("intelligence.recommendations")
+                }
+            }
+
+            providerListSection
+            providerDetailToggleSection
+
+            if showsProviderDetails {
+            MacSTSection(
+                hint: editor.providerFooterText
+            ) {
+                MacSTGroup {
+                    MacSTRow(String(localized: "ai_provider_preset"), divider: false) {
+                        MacSTPicker(
+                            selection: editor.providerPresetBinding,
+                            options: visibleProviderPresets.map { ($0, $0.localizedTitle) },
+                            width: 220
+                        )
+                    }
+                    if editor.selectedProviderPreset == .custom {
+                        MacSTRow(String(localized: "ai_provider_name")) {
+                            MacSTTextField(
+                                text: editor.configurationBinding(\.displayName),
+                                prompt: String(localized: "ai_provider_default_name")
+                            )
+                        }
+                        MacSTRow(String(localized: "ai_base_url")) {
+                            MacSTTextField(
+                                text: editor.configurationBinding(
+                                    \.baseURL,
+                                    clearModels: true,
+                                    updatesProviderPreset: true
+                                ),
+                                prompt: "https://api.openai.com/v1"
+                            )
+                        }
+                        MacSTRow(String(localized: "ai_compatibility_mode")) {
+                            MacSTPicker(
+                                selection: editor.compatibilityModeBinding,
+                                options: AIProviderCompatibilityMode.allCases.map {
+                                    ($0, $0.localizedTitle)
+                                },
+                                width: 220
+                            )
+                        }
+                    } else {
+                        MacSTRow(String(localized: "ai_service_address")) {
+                            Text(verbatim: editor.draftConfiguration.baseURL)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(PMColor.textFaint)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                                .frame(width: 320, alignment: .trailing)
+                        }
+                    }
+                    if !selectedProviderIsAvailableInRegion {
+                        MacSTRow(
+                            String(localized: "ai_region_unavailable_title"),
+                            hint: String(localized: "ai_provider_region_blocked")
+                        ) {
+                            Image(systemName: "exclamationmark.shield.fill")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    MacSTRow(
+                        editor.apiKeyTitle,
+                        hint: editor.hasStoredAPIKeyForDraft && editor.apiKeyDraft.isEmpty
+                            ? String(localized: "ai_api_key_stored") : nil
+                    ) {
+                        MacSTTextField(
+                            text: editor.apiKeyBinding,
+                            prompt: "sk-…",
+                            secure: true
+                        )
+                    }
+                }
+            }
+
+            MacSTSection(String(localized: "ai_models_section")) {
+                MacSTGroup {
+                    MacSTRow(String(localized: "ai_generation_model"), divider: false) {
+                        MacAIModelField(
+                            text: editor.configurationBinding(\.generationModel),
+                            models: editor.availableModels
+                        )
+                    }
+                    if editor.draftConfiguration.supportsEmbeddings {
+                        MacSTRow(String(localized: "ai_embedding_model")) {
+                            MacAIModelField(
+                                text: editor.configurationBinding(\.embeddingModel),
+                                models: editor.availableModels
+                            )
+                        }
+                    } else {
+                        MacSTRow(
+                            String(localized: "ai_embedding_model"),
+                            hint: String(localized: "ai_embedding_unsupported")
+                        ) {
+                            Image(systemName: "info.circle")
+                                .foregroundStyle(PMColor.textFaint)
+                        }
+                    }
+                    MacSTRow(
+                        String(localized: "ai_online_models"),
+                        hint: modelStatusText
+                    ) {
+                        HStack(spacing: 8) {
+                            if editor.isFetchingModels {
+                                ProgressView().controlSize(.small)
+                            }
+                            MacSTButton(
+                                title: String(localized: "ai_fetch_models"),
+                                systemImage: "arrow.triangle.2.circlepath",
+                                prominent: !editor.availableModels.isEmpty
+                            ) {
+                                Task { await editor.fetchModels(using: intelligence) }
+                            }
+                            .disabled(!editor.canFetchModels)
+                        }
+                    }
+                }
+            }
+            }
+
+            MacSTSection(
+                String(localized: "ai_privacy_section"),
+                hint: String(localized: "ai_privacy_footer")
+            ) {
+                MacSTGroup {
+                    if showsProviderDetails {
+                        MacSTRow(
+                            String(localized: "ai_allow_insecure_local_http"),
+                            divider: false
+                        ) {
+                            MacSTToggle(
+                                isOn: editor.configurationBinding(
+                                    \.allowInsecureLocalHTTP,
+                                    clearModels: true,
+                                    autoSaveDelayNanoseconds: 0
+                                )
+                            )
+                        }
+                    }
+                    MacSTRow(String(localized: "ai_remote_consent")) {
+                        MacSTToggle(isOn: editor.consentBinding)
+                    }
+                    MacSTRow(
+                        String(localized: "ai_listening_context_consent")
+                    ) {
+                        MacSTToggle(isOn: editor.listeningContextConsentBinding)
+                    }
+                }
+            }
+
+            MacSTSection {
+                MacSTGroup {
+                    MacSTRow(String(localized: "ai_actions_section"), divider: false) {
+                        HStack(spacing: 8) {
+                            if editor.isWorking {
+                                ProgressView().controlSize(.small)
+                            }
+                            if editor.hasStoredAPIKeyForDraft {
+                                MacSTButton(
+                                    title: String(localized: "ai_delete_current_api_key"),
+                                    destructive: true
+                                ) {
+                                    Task {
+                                        await editor.deleteCurrentAPIKey(using: intelligence)
+                                    }
+                                }
+                                .disabled(editor.isWorking || editor.isFetchingModels)
+                            }
+                            MacSTButton(
+                                title: String(localized: "ai_test_connection"),
+                                systemImage: "network"
+                            ) {
+                                Task { await editor.testConnection(using: intelligence) }
+                            }
+                            .disabled(!editor.canTestConnection)
+                        }
+                    }
+                    MacSTRow(
+                        String(localized: "ai_save_status"),
+                        hint: String(localized: "ai_key_sync_footer"),
+                        divider: false
+                    ) {
+                        Label(actionStatusText, systemImage: actionStatusIcon)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(actionStatusColor)
+                    }
+                }
+            }
+            }
+        }
+        .task { await editor.load(using: intelligence) }
+        .confirmationDialog(
+            String(localized: "ai_remove_provider_confirm"),
+            isPresented: $showsRemoveProviderConfirmation
+        ) {
+            Button(String(localized: "ai_remove_provider"), role: .destructive) {
+                editor.removeSelectedProvider()
+            }
+            Button(String(localized: "cancel"), role: .cancel) {}
+        }
+    }
+
+    private var primuseRelaySection: some View {
+        MacSTSection(
+            String(localized: "ai_primuse_relay_section"),
+            hint: String(localized: "ai_primuse_relay_footer")
+        ) {
+            MacSTGroup {
+                MacSTRow(String(localized: "ai_primuse_relay_enabled"), divider: false) {
+                    MacSTToggle(isOn: editor.primuseRelayBinding)
+                }
+                .settingsAnchor("intelligence.relay")
+                MacSTRow(
+                    String(localized: "ai_connection_section")
+                ) {
+                    HStack(spacing: 8) {
+                        if editor.isTestingPrimuseRelay {
+                            ProgressView().controlSize(.small)
+                        }
+                        MacSTButton(
+                            title: String(localized: "ai_primuse_relay_test_connection"),
+                            systemImage: "network"
+                        ) {
+                            Task {
+                                await editor.testPrimuseRelayConnection(using: intelligence)
+                            }
+                        }
+                        .disabled(!editor.canTestPrimuseRelayConnection)
+                    }
+                }
+                .settingsAnchor("intelligence.relayTest")
+                if editor.primuseRelayConnectionPresentation != .notTested {
+                    MacSTRow(
+                        editor.primuseRelayConnectionTitle,
+                        hint: editor.primuseRelayConnectionDetail,
+                        divider: false
+                    ) {
+                        Image(systemName: primuseRelayConnectionIcon)
+                            .foregroundStyle(primuseRelayConnectionColor)
+                    }
+                }
+                if !PrimuseAIRelayClient.isSupportedOnCurrentDevice {
+                    MacSTRow(
+                        String(localized: "ai_primuse_relay_unsupported"),
+                        divider: false
+                    ) {
+                        Image(systemName: "exclamationmark.shield")
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+                }
+            }
+        }
+    }
+
+    private var providerDetailToggleSection: some View {
+        MacSTSection(String(localized: "ai_provider_detail_section")) {
+            MacSTGroup {
+                MacSTRow(
+                    editor.draftConfiguration.displayName.isEmpty
+                        ? String(localized: "ai_provider_default_name")
+                        : editor.draftConfiguration.displayName,
+                    hint: editor.draftConfiguration.baseURL,
+                    divider: false
+                ) {
+                    MacSTButton(
+                        title: String(localized: showsProviderDetails
+                                      ? "done" : "ai_edit_provider"),
+                        systemImage: showsProviderDetails ? "chevron.up" : "slider.horizontal.3",
+                        prominent: !showsProviderDetails
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showsProviderDetails.toggle()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var providerListSection: some View {
+        MacSTSection(
+            String(localized: "ai_provider_list_section"),
+            hint: String(localized: "ai_fallback_footer")
+        ) {
+            MacSTGroup {
+                ForEach(Array(editor.draftProviderSet.providers.enumerated()), id: \.element.id) {
+                    index, provider in
+                    MacSTRow(
+                        provider.displayName.isEmpty
+                            ? String(localized: "ai_provider_default_name")
+                            : provider.displayName,
+                        hint: provider.baseURL,
+                        divider: index < editor.draftProviderSet.providers.count - 1
+                    ) {
+                        HStack(spacing: 8) {
+                            if provider.id == editor.draftProviderSet.primaryProviderID {
+                                MacSTBadge(text: String(localized: "ai_primary_provider"))
+                            }
+                            MacSTToggle(isOn: editor.providerEnabledBinding(provider.id))
+                            MacSTButton(
+                                title: String(localized: provider.id == editor.selectedProviderID
+                                              ? "ai_provider_editing" : "ai_edit_provider")
+                            ) {
+                                editor.selectProvider(provider.id)
+                                showsProviderDetails = true
+                            }
+                            Menu {
+                                if provider.id != editor.draftProviderSet.primaryProviderID {
+                                    Button(String(localized: "ai_set_primary")) {
+                                        editor.makePrimary(provider.id)
+                                    }
+                                }
+                                Button(String(localized: "ai_move_up")) {
+                                    editor.moveProvider(provider.id, offset: -1)
+                                }
+                                .disabled(index == 0)
+                                Button(String(localized: "ai_move_down")) {
+                                    editor.moveProvider(provider.id, offset: 1)
+                                }
+                                .disabled(index == editor.draftProviderSet.providers.count - 1)
+                                if editor.draftProviderSet.providers.count > 1 {
+                                    Divider()
+                                    Button(
+                                        String(localized: "ai_remove_provider"),
+                                        role: .destructive
+                                    ) {
+                                        editor.selectProvider(provider.id)
+                                        showsRemoveProviderConfirmation = true
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis")
+                                    .frame(width: 24, height: 22)
+                                    .foregroundStyle(PMColor.textMuted)
+                            }
+                            .menuStyle(.button)
+                            .buttonStyle(.plain)
+                            .menuIndicator(.hidden)
+                        }
+                    }
+                }
+                MacSTRow(String(localized: "ai_fallback_enabled")) {
+                    MacSTToggle(isOn: editor.fallbackBinding)
+                }
+                .settingsAnchor("intelligence.fallback")
+                MacSTRow(String(localized: "ai_provider_actions"), divider: false) {
+                    HStack(spacing: 8) {
+                        MacSTButton(
+                            title: String(localized: "ai_add_provider"),
+                            systemImage: "plus",
+                            prominent: true
+                        ) {
+                            editor.addProvider()
+                        }
+                    }
+                }
+                .settingsAnchor("intelligence.addProvider")
+            }
+        }
+        .settingsAnchor("intelligence.providers")
+    }
+
+    private var visibleProviderPresets: [AIProviderPreset] {
+        var presets = [AIProviderPreset.custom]
+        presets.append(contentsOf: AIProviderPreset.catalog(
+            for: intelligence.regionAvailability.context.region
+        ))
+        if !presets.contains(editor.selectedProviderPreset) {
+            presets.append(editor.selectedProviderPreset)
+        }
+        return presets
+    }
+
+    private var selectedProviderIsAvailableInRegion: Bool {
+        AIProviderRegionPolicy.allows(
+            configuration: editor.draftConfiguration,
+            region: intelligence.regionAvailability.context.region,
+            purpose: .modelCatalog
+        )
+    }
+
+    private var statusCard: some View {
+        HStack(spacing: 14) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(PMColor.brand.opacity(0.14))
+                .frame(width: 42, height: 42)
+                .overlay {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(PMColor.brand)
+                }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(verbatim: editor.draftConfiguration.displayName.isEmpty
+                     ? (usesPrimuseRelay
+                        ? String(localized: "ai_primuse_relay_name")
+                        : String(localized: "ai_provider_default_name"))
+                     : (usesPrimuseRelay
+                        ? String(localized: "ai_primuse_relay_name")
+                        : editor.draftConfiguration.displayName))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PMColor.text)
+                Text(verbatim: summaryText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(summaryColor)
+                    .lineLimit(2)
+            }
+            Spacer()
+            HStack(spacing: 3) {
+                ForEach(0..<4, id: \.self) { index in
+                    Capsule()
+                        .fill(hasReadyAIConfiguration
+                              ? PMColor.brand.opacity(0.45 + Double(index) * 0.14)
+                              : PMColor.dividerStrong)
+                        .frame(width: 3, height: CGFloat(8 + index * 3))
+                }
+            }
+            .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 70)
+        .background(PMColor.bgElev, in: .rect(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+        .padding(.bottom, 22)
+    }
+
+    private var summaryText: String {
+        if editor.primuseRelayEnabled,
+           editor.primuseRelayConnectionPresentation != .notTested {
+            return editor.primuseRelayConnectionTitle
+        }
+        switch editor.status {
+        case .saving:
+            return String(localized: "ai_saving_changes")
+        case .saved:
+            return String(localized: "ai_settings_saved")
+        case .connectionSucceeded:
+            return String(localized: "ai_connection_success")
+        case .modelsLoaded(let count):
+            return String(
+                format: String(localized: "ai_models_loaded_format"), count
+            )
+        case .modelsEmpty:
+            return String(localized: "ai_models_empty")
+        case .failed(let message, _):
+            return message
+        case .idle:
+            if editor.primuseRelayEnabled {
+                return editor.primuseRelayConnectionTitle
+            }
+            return String(
+                format: String(localized: "ai_provider_count_format"),
+                editor.draftProviderSet.providers.count
+            )
+        }
+    }
+
+    private var summaryColor: Color {
+        if editor.primuseRelayEnabled { return primuseRelayConnectionColor }
+        if case .failed = editor.status { return PMColor.bad }
+        return hasReadyAIConfiguration ? PMColor.brand : PMColor.textFaint
+    }
+
+    private var modelStatusText: String? {
+        if editor.isFetchingModels { return String(localized: "ai_models_loading") }
+        switch editor.status {
+        case .modelsLoaded(let count):
+            return String(
+                format: String(localized: "ai_models_loaded_format"), count
+            )
+        case .modelsEmpty:
+            return String(localized: "ai_models_empty")
+        case .failed(let message, .models):
+            return message
+        default:
+            return editor.availableModels.isEmpty ? nil : String(
+                format: String(localized: "ai_models_loaded_format"),
+                editor.availableModels.count
+            )
+        }
+    }
+
+    private var actionStatusText: String {
+        switch editor.status {
+        case .saving:
+            return String(localized: "ai_saving_changes")
+        case .saved:
+            return String(localized: "ai_settings_saved")
+        case .connectionSucceeded:
+            return String(localized: "ai_connection_success")
+        case .modelsLoaded(let count):
+            return String(format: String(localized: "ai_models_loaded_format"), count)
+        case .modelsEmpty:
+            return String(localized: "ai_models_empty")
+        case .failed(let message, _):
+            return message
+        case .idle:
+            return String(localized: "ai_settings_unchanged")
+        }
+    }
+
+    private var actionStatusIcon: String {
+        switch editor.status {
+        case .saving:
+            return "arrow.triangle.2.circlepath"
+        case .saved, .connectionSucceeded, .modelsLoaded:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        case .modelsEmpty:
+            return "info.circle"
+        case .idle:
+            return editor.hasUnsavedChanges ? "circle.dotted" : "checkmark.circle"
+        }
+    }
+
+    private var actionStatusColor: Color {
+        switch editor.status {
+        case .saving:
+            return PMColor.brand
+        case .saved, .connectionSucceeded, .modelsLoaded:
+            return PMColor.ok
+        case .failed:
+            return PMColor.bad
+        default:
+            return PMColor.textMuted
+        }
+    }
+
+    private var usesPrimuseRelay: Bool {
+        editor.primuseRelayEnabled
+    }
+
+    private var hasReadyAIConfiguration: Bool {
+        usesPrimuseRelay ? primuseRelayIsOperational : editor.hasUsableAPIKey
+    }
+
+    private var primuseRelayIsOperational: Bool {
+        guard let report = editor.primuseRelayConnectionReport else { return false }
+        if report.isDirectlyAvailable { return true }
+        if case .remoteProvider = report.fallback { return true }
+        return false
+    }
+
+    private var primuseRelayConnectionIcon: String {
+        switch editor.primuseRelayConnectionPresentation {
+        case .notTested:
+            return "questionmark.circle"
+        case .testing:
+            return "arrow.triangle.2.circlepath"
+        case .success:
+            return "checkmark.circle.fill"
+        case .degraded:
+            return "arrow.down.right.circle.fill"
+        case .failure:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var primuseRelayConnectionColor: Color {
+        switch editor.primuseRelayConnectionPresentation {
+        case .success:
+            return PMColor.ok
+        case .degraded:
+            return .orange
+        case .failure:
+            return PMColor.bad
+        case .notTested, .testing:
+            return PMColor.textFaint
+        }
+    }
+}
+
+private struct MacSTBadge: View {
+    let text: String
+    var color: Color = PMColor.brand
+
+    var body: some View {
+        Text(verbatim: text)
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .foregroundStyle(color)
+            .background(color.opacity(0.16), in: .rect(cornerRadius: 3))
+    }
+}
+
+private struct MacSTChip: View {
+    let text: String
+    var selected = false
+
+    var body: some View {
+        Text(verbatim: text)
+            .font(.system(size: 11, weight: selected ? .semibold : .medium))
+            .foregroundStyle(selected ? Color.white : PMColor.text)
+            .padding(.horizontal, 10)
+            .frame(height: 22)
+            .background(selected ? PMColor.brand : PMColor.glassBtn, in: .capsule)
+    }
+}
+
+private struct MacSTInfoText: View {
+    let text: String
+    var color: Color = PMColor.textMuted
+
+    var body: some View {
+        Text(verbatim: PMTextWithoutDesignCodes(text))
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(color)
+            .lineLimit(1)
+    }
+}
+
+// MARK: - ST-01 Playback
+
+private struct MacSTPlaybackView: View {
+    // 接真 Store, 拖滑块/切 toggle 会立即写回 PlaybackSettingsStore 并 persist。
+    @Environment(PlaybackSettingsStore.self) private var store
+    @Environment(SourceManager.self) private var sourceManager
+
+    var body: some View {
+        @Bindable var s = store
+
+        MacSTSection(Lz("Audio Output")) {
+            MacSTGroup {
+                MacSTRow(Lz("Output Mode"), hint: s.outputMode == .highFidelity
+                    ? Lz("Direct output · Unity gain · DSP bypass")
+                    : Lz("EQ · Spatial · ReplayGain · Crossfade"), divider: false) {
+                    MacSTPicker(
+                        selection: $s.outputMode,
+                        options: AudioOutputMode.allCases.map { ($0, $0.displayName) },
+                        width: 180
+                    )
+                }
+                .settingsAnchor("playback.outputMode")
+                MacSTRow(Lz("DSD Playback"), hint: Lz("DoP requires a compatible USB DAC")) {
+                    MacSTPicker(
+                        selection: $s.dsdPlaybackMode,
+                        options: DSDPlaybackMode.allCases.map { ($0, $0.displayName) },
+                        width: 180
+                    )
+                }
+                .settingsAnchor("playback.dsdMode")
+                MacSTRow(Lz("Match Hardware Sample Rate"), hint: Lz("Works on physical iOS devices; ignored by some hardware")) {
+                    MacSTToggle(isOn: Binding(
+                        get: { s.outputMode == .highFidelity || s.matchOutputSampleRate },
+                        set: { s.matchOutputSampleRate = $0 }
+                    ))
+                }
+                .settingsAnchor("playback.matchSampleRate")
+                .disabled(s.outputMode == .highFidelity)
+            }
+        }
+
+        MacSTSection(Lz("Playback Rate & Quality")) {
+            MacSTGroup {
+                MacSTRow(Lz("Playback Rate"), divider: false) {
+                    MacSTSlider(
+                        value: Binding(
+                            get: { Double((s.outputMode == .highFidelity ? 1 : s.playbackRate) * 100) },
+                            set: { s.playbackRate = Float($0 / 100) }
+                        ),
+                        in: 50...200,
+                        formatter: { String(format: "%.2fx", $0 / 100) }
+                    )
+                    .accessibilityHint(Text(verbatim: Lz("0.5x – 2.0x · Preserve Pitch")))
+                }
+                .settingsAnchor("playback.speed")
+                .disabled(s.outputMode == .highFidelity)
+                MacSTRow(Lz("Spatial Audio")) {
+                    MacSTToggle(isOn: $s.spatialAudioEnabled)
+                        .accessibilityHint(Text(verbatim: Lz("Apple AirPods · Head Tracking")))
+                }
+                .settingsAnchor("playback.spatialAudio")
+                .disabled(s.outputMode == .highFidelity)
+                MacSTRow(String(localized: "replay_gain")) {
+                    MacSTToggle(isOn: $s.replayGainEnabled)
+                        .accessibilityHint(Text(verbatim: Lz("Automatic Volume Balancing")))
+                }
+                .settingsAnchor("playback.replayGain")
+                .disabled(s.outputMode == .highFidelity)
+                if s.replayGainEnabled {
+                    MacSTRow(Lz("RG Mode")) {
+                        MacSTPicker(
+                            selection: $s.replayGainMode,
+                            options: ReplayGainMode.allCases.map { ($0, $0.displayName) },
+                            width: 160
+                        )
+                    }
+                }
+            }
+        }
+
+        MacSTSection(Lz("Transitions & Gapless")) {
+            MacSTGroup {
+                MacSTRow(Lz("Gapless Playback"), divider: false) {
+                    MacSTToggle(isOn: $s.gaplessEnabled)
+                        .accessibilityHint(Text(verbatim: Lz("P-16 · On by Default")))
+                }
+                .settingsAnchor("playback.gapless")
+                MacSTRow(String(localized: "crossfade")) {
+                    MacSTToggle(isOn: $s.crossfadeEnabled)
+                        .accessibilityHint(Text(verbatim: Lz("Mutually exclusive with Gapless")))
+                }
+                .settingsAnchor("playback.crossfade")
+                .disabled(s.outputMode == .highFidelity)
+                if s.crossfadeEnabled {
+                    MacSTRow(Lz("Crossfade Mode"), hint: s.crossfadeMode == .smart
+                        ? Lz("Energy-aware song boundaries")
+                        : Lz("Fixed overlap")) {
+                        MacSTPicker(
+                            selection: $s.crossfadeMode,
+                            options: CrossfadeMode.allCases.map { ($0, $0.displayName) },
+                            width: 160
+                        )
+                    }
+                    MacSTRow(
+                        s.crossfadeMode == .smart
+                            ? Lz("Maximum Crossfade Duration")
+                            : Lz("Crossfade Duration"),
+                        hint: Lz("1–12 seconds")
+                    ) {
+                        MacSTSlider(
+                            value: $s.crossfadeDuration,
+                            in: 1...12,
+                            formatter: { "\(Int($0))s" }
+                        )
+                    }
+                }
+                MacSTRow(Lz("Skip leading silence")) {
+                    MacSTToggle(isOn: $s.skipLeadingSilenceEnabled)
+                }
+                .settingsAnchor("playback.skipLeadingSilence")
+                MacSTRow(Lz("Skip trailing silence")) {
+                    MacSTToggle(isOn: $s.skipTrailingSilenceEnabled)
+                }
+                .settingsAnchor("playback.skipTrailingSilence")
+            }
+            .disabled(s.outputMode == .highFidelity)
+        }
+
+        MacSTSection(Lz("Cache")) {
+            MacSTGroup {
+                MacSTRow(Lz("Enable Audio Cache"), divider: false) {
+                    MacSTToggle(isOn: $s.audioCacheEnabled)
+                }
+                if s.audioCacheEnabled {
+                    MacSTRow(String(localized: "audio_cache_limit")) {
+                        MacSTPicker(
+                            selection: $s.audioCacheLimitBytes,
+                            options: AudioCacheLimitPolicy.options(
+                                including: s.audioCacheLimitBytes
+                            ).map {
+                                ($0, Self.audioCacheLimitLabel($0))
+                            },
+                            width: 120
+                        )
+                        MacSTButton(title: Lz("Clean Up Now")) {
+                            Task {
+                                await sourceManager.clearAudioCache()
+                            }
+                        }
+                    }
+                    MacSTRow(Lz("Prewarm queue head")) {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(s.prewarmQueueCount) },
+                                set: { s.prewarmQueueCount = $0.rounded().finiteInt() }
+                            ),
+                            in: 0...8,
+                            formatter: { "\($0.rounded().finiteInt())" }
+                        )
+                    }
+                    .settingsAnchor("playback.prewarmQueue")
+                }
+            }
+        }
+    }
+
+    private static func audioCacheLimitLabel(_ bytes: Int64) -> String {
+        guard bytes != AudioCacheLimitPolicy.unlimitedBytes else {
+            return String(localized: "smart_limit_placeholder")
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .binary
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+// MARK: - ST-13 Keyboard Shortcuts
+
+private struct MacSTKeyboardShortcutsView: View {
+    @State private var store = MacKeyboardShortcutStore.shared
+    @State private var pendingAssignment: PendingShortcutAssignment?
+    @State private var recorderMessage: String?
+
+    private let playbackActions: [MacKeyboardShortcutAction] = [
+        .playPause, .nextTrack, .previousTrack, .shuffle, .repeatMode,
+        .volumeUp, .volumeDown,
+    ]
+    private let windowActions: [MacKeyboardShortcutAction] = [
+        .focusSearch, .showMiniPlayer, .showDesktopLyrics, .toggleDesktopLyricsLock,
+    ]
+
+    var body: some View {
+        MacSTSection(
+            String(localized: "keyboard_shortcuts_recorder_title"),
+            hint: String(localized: "keyboard_shortcuts_recorder_hint")
+        ) {
+            shortcutRecorder
+        }
+
+        shortcutSection(
+            title: String(localized: "keyboard_shortcuts_playback_section"),
+            actions: playbackActions
+        )
+        shortcutSection(
+            title: String(localized: "keyboard_shortcuts_window_section"),
+            actions: windowActions
+        )
+
+        HStack {
+            Text(String(localized: "keyboard_shortcuts_changes_apply_immediately"))
+                .font(.system(size: 10.5))
+                .foregroundStyle(PMColor.textFaint)
+            Spacer()
+            MacSTButton(
+                title: String(localized: "keyboard_shortcuts_restore_defaults"),
+                systemImage: "arrow.counterclockwise"
+            ) {
+                store.restoreDefaults()
+                recorderMessage = nil
+            }
+        }
+        .settingsAnchor("keyboard.restoreDefaults")
+        .padding(.horizontal, 14)
+        .padding(.bottom, 22)
+        .alert(item: $pendingAssignment) { pending in
+            Alert(
+                title: Text(String(localized: "keyboard_shortcuts_conflict_title")),
+                message: Text(String(
+                    format: String(localized: "keyboard_shortcuts_conflict_message_format"),
+                    pending.shortcut.displayString,
+                    pending.conflictingAction.localizedTitle
+                )),
+                primaryButton: .default(Text(String(localized: "keyboard_shortcuts_replace"))) {
+                    store.assign(pending.shortcut, to: pending.action)
+                    recorderMessage = nil
+                },
+                secondaryButton: .cancel()
+            )
+        }
+        .onDisappear {
+            store.recordingAction = nil
+            pendingAssignment = nil
+            recorderMessage = nil
+        }
+    }
+
+    private var shortcutRecorder: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(PMColor.bgElev)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    store.recordingAction == nil
+                        ? PMColor.cardBorder
+                        : PMColor.brand.opacity(0.72),
+                    lineWidth: store.recordingAction == nil ? 0.5 : 1
+                )
+
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(PMColor.brand.opacity(store.recordingAction == nil ? 0.12 : 0.2))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: store.recordingAction == nil ? "keyboard" : "record.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(PMColor.brand)
+                        .symbolEffect(.pulse, isActive: store.recordingAction != nil)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: recorderTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: recorderSubtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(recorderMessage == nil ? PMColor.textFaint : PMColor.warn)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 12)
+
+                if store.recordingAction != nil {
+                    MacSTButton(title: String(localized: "Cancel")) {
+                        store.recordingAction = nil
+                        recorderMessage = nil
+                    }
+                } else {
+                    Text(String(localized: "keyboard_shortcuts_click_a_keycap"))
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(PMColor.textFaint)
+                }
+            }
+            .padding(14)
+        }
+        .frame(minHeight: 70)
+        .background {
+            MacShortcutRecorderBridge(
+                isRecording: store.recordingAction != nil,
+                onKeyDown: handleRecordedEvent
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func shortcutSection(
+        title: String,
+        actions: [MacKeyboardShortcutAction]
+    ) -> some View {
+        MacSTSection(title) {
+            MacSTGroup {
+                ForEach(Array(actions.enumerated()), id: \.offset) { index, action in
+                    MacSTShortcutRow(
+                        action: action,
+                        shortcut: store.shortcut(for: action),
+                        isRecording: store.recordingAction == action,
+                        divider: index != 0,
+                        onRecord: {
+                            store.recordingAction = action
+                            recorderMessage = nil
+                        },
+                        onClear: {
+                            store.remove(action)
+                            if store.recordingAction == action {
+                                store.recordingAction = nil
+                            }
+                        }
+                    )
+                    .settingsAnchor("keyboard." + action.rawValue)
+                }
+            }
+        }
+    }
+
+    private var recorderTitle: String {
+        guard let action = store.recordingAction else {
+            return String(localized: "keyboard_shortcuts_recorder_idle")
+        }
+        return String(
+            format: String(localized: "keyboard_shortcuts_recording_format"),
+            action.localizedTitle
+        )
+    }
+
+    private var recorderSubtitle: String {
+        if let recorderMessage { return recorderMessage }
+        if store.recordingAction == nil {
+            return String(localized: "keyboard_shortcuts_recorder_idle_hint")
+        }
+        return String(localized: "keyboard_shortcuts_press_combination")
+    }
+
+    private func handleRecordedEvent(_ event: NSEvent) {
+        guard let action = store.recordingAction else { return }
+        if event.keyCode == 53 {
+            store.recordingAction = nil
+            recorderMessage = nil
+            return
+        }
+        let shortcut = MacKeyboardShortcut.appKitShortcut(from: event)
+        switch MacKeyboardShortcutPolicy.validate(shortcut) {
+        case .reserved:
+            recorderMessage = String(localized: "keyboard_shortcuts_reserved_key")
+        case .modifierRequired:
+            recorderMessage = String(localized: "keyboard_shortcuts_modifier_required")
+        case .accepted:
+            store.recordingAction = nil
+            if let conflict = store.conflictingAction(for: shortcut, excluding: action) {
+                pendingAssignment = PendingShortcutAssignment(
+                    action: action,
+                    shortcut: shortcut,
+                    conflictingAction: conflict
+                )
+            } else {
+                store.assign(shortcut, to: action)
+                recorderMessage = nil
+            }
+        }
+    }
+}
+
+private struct PendingShortcutAssignment: Identifiable {
+    let id = UUID()
+    let action: MacKeyboardShortcutAction
+    let shortcut: MacKeyboardShortcut
+    let conflictingAction: MacKeyboardShortcutAction
+}
+
+private struct MacSTShortcutRow: View {
+    let action: MacKeyboardShortcutAction
+    let shortcut: MacKeyboardShortcut?
+    let isRecording: Bool
+    let divider: Bool
+    let onRecord: () -> Void
+    let onClear: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if divider {
+                Rectangle().fill(PMColor.divider).frame(height: 0.5)
+            }
+            HStack(spacing: 12) {
+                Text(verbatim: action.localizedTitle)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(PMColor.text)
+                Spacer(minLength: 12)
+
+                if shortcut != nil {
+                    Button(action: onClear) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(PMColor.textFaint)
+                            .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(Text(String(localized: "keyboard_shortcuts_clear")))
+                    .accessibilityLabel(Text(String(localized: "keyboard_shortcuts_clear")))
+                }
+
+                Button(action: onRecord) {
+                    Text(verbatim: isRecording
+                         ? String(localized: "keyboard_shortcuts_recording_short")
+                         : shortcut?.displayString
+                            ?? String(localized: "keyboard_shortcuts_not_set"))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(isRecording ? Color.white : PMColor.text)
+                        .padding(.horizontal, 10)
+                        .frame(minWidth: 82, minHeight: 25)
+                        .background(
+                            isRecording ? PMColor.brand : PMColor.glassBtn,
+                            in: .rect(cornerRadius: 6)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(
+                                    isRecording ? PMColor.brand : PMColor.dividerStrong,
+                                    lineWidth: 0.5
+                                )
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 43)
+        }
+    }
+}
+
+private struct MacShortcutRecorderBridge: NSViewRepresentable {
+    let isRecording: Bool
+    let onKeyDown: (NSEvent) -> Void
+
+    func makeNSView(context: Context) -> MacShortcutRecorderNSView {
+        let view = MacShortcutRecorderNSView()
+        view.onKeyDown = onKeyDown
+        return view
+    }
+
+    func updateNSView(_ nsView: MacShortcutRecorderNSView, context: Context) {
+        nsView.onKeyDown = onKeyDown
+        nsView.isRecording = isRecording
+        if isRecording, nsView.window?.firstResponder !== nsView {
+            nsView.window?.makeFirstResponder(nsView)
+        } else if !isRecording, nsView.window?.firstResponder === nsView {
+            nsView.window?.makeFirstResponder(nil)
+        }
+    }
+}
+
+private final class MacShortcutRecorderNSView: NSView {
+    var onKeyDown: ((NSEvent) -> Void)?
+    var isRecording = false
+
+    override var acceptsFirstResponder: Bool { isRecording }
+
+    override func keyDown(with event: NSEvent) {
+        guard isRecording else {
+            super.keyDown(with: event)
+            return
+        }
+        onKeyDown?(event)
+    }
+}
+
+// MARK: - ST-02 Equalizer
+
+private struct MacSTEqualizerView: View {
+    @Environment(EqualizerService.self) private var eq
+
+    private var presets: [EQPreset] {
+        EQPreset.builtInPresets + [eq.customPreset]
+    }
+
+    var body: some View {
+        @Bindable var eq = eq
+
+        MacSTSection(Lz("10-Band Equalizer")) {
+            MacSTGroup {
+                MacSTRow(Lz("Enable EQ"), divider: false) {
+                    MacSTToggle(isOn: $eq.isEnabled)
+                }
+                .settingsAnchor("equalizer.enabled")
+                MacSTRow(Lz("Current Preset")) {
+                    MacSTPicker(
+                        selection: Binding(
+                            get: { eq.currentPreset.id },
+                            set: { id in
+                                if let preset = presets.first(where: { $0.id == id }) {
+                                    eq.applyPreset(preset)
+                                }
+                            }
+                        ),
+                        options: presets.map { ($0.id, $0.localizedName) },
+                        width: 180
+                    )
+                }
+                .settingsAnchor("equalizer.preset")
+                MacSTRow(Lz("Preset"), hint: Lz("Click to switch · Drag the slider below to make it custom"), block: true) {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 92), spacing: 6, alignment: .leading)],
+                        alignment: .leading,
+                        spacing: 6
+                    ) {
+                        ForEach(presets) { preset in
+                            Button {
+                                eq.applyPreset(preset)
+                            } label: {
+                                MacSTChip(text: preset.localizedName,
+                                          selected: preset.id == eq.currentPreset.id)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        MacSTButton(title: Lz("Reset")) { eq.reset() }
+                    }
+                }
+                .settingsAnchor("equalizer.reset")
+            }
+        }
+
+        MacEQFaderCard(
+            bands: eq.bandFrequencyLabels,
+            gains: Binding(
+                get: { eq.bands.map { $0.rounded().finiteInt() } },
+                set: { newGains in
+                    for (i, g) in newGains.enumerated() {
+                        eq.setBand(i, gain: Float(g))
+                    }
+                }
+            )
+        )
+        .settingsAnchor("equalizer.bands")
+    }
+}
+
+private struct MacEQFaderCard: View {
+    let bands: [String]
+    @Binding var gains: [Int]
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(alignment: .bottom, spacing: 0) {
+                ForEach(Array(bands.enumerated()), id: \.offset) { index, band in
+                    MacEQFader(
+                        band: band,
+                        gain: Binding(
+                            get: { gains.indices.contains(index) ? gains[index] : 0 },
+                            set: { newValue in
+                                guard gains.indices.contains(index) else { return }
+                                gains[index] = max(-12, min(12, newValue))
+                            }
+                        )
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .frame(height: 220)
+            .padding(.horizontal, 8)
+
+            HStack {
+                Text(verbatim: "-12 dB")
+                Spacer()
+                Text(verbatim: "0")
+                Spacer()
+                Text(verbatim: "+12 dB")
+            }
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(PMColor.textFaint)
+            .padding(.horizontal, 12)
+        }
+        .padding(18)
+        .background(PMColor.bgElev, in: .rect(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+        .padding(.bottom, 22)
+    }
+}
+
+private struct MacEQFader: View {
+    let band: String
+    @Binding var gain: Int
+
+    /// 滑轨可用纵向高度 (跟 frame height 一致)。每 dB ≈ trackHeight/24, 拖动时
+    /// 把垂直位移换算成 dB 增量。
+    private let trackHeight: CGFloat = 140
+    @State private var dragStartGain: Int? = nil
+
+    private var dbPerPoint: CGFloat { trackHeight / 24 }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Text(verbatim: gain > 0 ? "+\(gain)" : "\(gain)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(gain >= 0 ? PMColor.ok : PMColor.brand)
+
+            ZStack {
+                // 轨道
+                Capsule()
+                    .fill(PMColor.dividerStrong)
+                    .frame(width: 5, height: trackHeight)
+
+                // 进度填充 (从中点出发往 ± 方向)
+                Rectangle()
+                    .fill(PMColor.brand)
+                    .frame(width: 9, height: CGFloat(abs(gain)) * dbPerPoint)
+                    .cornerRadius(2)
+                    .offset(y: gain >= 0
+                            ? -CGFloat(abs(gain)) * dbPerPoint / 2
+                            : CGFloat(abs(gain)) * dbPerPoint / 2)
+
+                // 拖把
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(.white)
+                    .frame(width: 15, height: 9)
+                    .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
+                    .offset(y: CGFloat(-gain) * dbPerPoint)
+            }
+            .frame(width: 24, height: trackHeight)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        if dragStartGain == nil { dragStartGain = gain }
+                        guard let start = dragStartGain else { return }
+                        // 上拖 (negative y) → 增益变高
+                        let deltaDB = -g.translation.height / dbPerPoint
+                        gain = max(-12, min(12, start + deltaDB.rounded().finiteInt()))
+                    }
+                    .onEnded { _ in dragStartGain = nil }
+            )
+
+            Text(verbatim: band)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(PMColor.textMuted)
+        }
+    }
+}
+
+// MARK: - ST-03 Audio Effects
+
+private struct MacSTEffectsView: View {
+    @Environment(AudioEffectsService.self) private var fx
+
+    var body: some View {
+        @Bindable var fx = fx
+
+        MacSTSection(Lz("Effects Chain")) {
+            MacSTGroup {
+                MacSTRow(Lz("Enable Effects Chain"), hint: Lz("Master bypass"), divider: false) {
+                    MacSTToggle(isOn: $fx.effectChainEnabled)
+                }
+                .settingsAnchor("effects.chain")
+            }
+        }
+
+        MacSTSection(Lz("Reverb")) {
+            MacSTGroup {
+                MacSTRow(Lz("Toggle"), divider: false) {
+                    MacSTToggle(isOn: $fx.reverbEnabled)
+                }
+                .settingsAnchor("effects.reverb")
+                if fx.reverbEnabled {
+                    MacSTRow(Lz("Type")) {
+                        MacSTPicker(
+                            selection: $fx.reverbPreset,
+                            options: ReverbPreset.allCases.map { ($0, $0.localizedName) },
+                            width: 180
+                        )
+                    }
+                    .settingsAnchor("effects.reverbPreset")
+                    MacSTRow("\(String(localized: "reverb_mix")) (%)", hint: Lz("0 = dry, 100 = wet")) {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(fx.reverbWetDryMix) },
+                                set: { fx.reverbWetDryMix = Float($0) }
+                            ),
+                            in: 0...100
+                        )
+                    }
+                    .settingsAnchor("effects.reverbMix")
+                    MacSTRow(Lz("Room Size"), hint: Lz("Small room → large hall")) {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(fx.reverbRoomSize) },
+                                set: { fx.reverbRoomSize = Float($0) }
+                            ),
+                            in: 0...100,
+                            formatter: { String(format: "%.0f%%", $0) }
+                        )
+                    }
+                    .settingsAnchor("effects.reverbRoomSize")
+                }
+            }
+        }
+        .disabled(!fx.effectChainEnabled)
+        .opacity(fx.effectChainEnabled ? 1 : 0.56)
+
+        MacSTSection(Lz("Compressor / Limiter")) {
+            MacSTGroup {
+                MacSTRow(Lz("Toggle"), divider: false) {
+                    MacSTToggle(isOn: $fx.compressorEnabled)
+                }
+                .settingsAnchor("effects.compressor")
+                if fx.compressorEnabled {
+                    MacSTRow(Lz("Preset")) {
+                        MacSTPicker(
+                            selection: Binding(
+                                get: { fx.compressorPresetId ?? "" },
+                                set: { id in
+                                    if let p = CompressorPreset.allPresets.first(where: { $0.id == id }) {
+                                        fx.applyCompressorPreset(p)
+                                    }
+                                }
+                            ),
+                            options: [("", Lz("Custom"))]
+                                + CompressorPreset.allPresets.map { ($0.id, $0.localizedName) },
+                            width: 160
+                        )
+                    }
+                    .settingsAnchor("effects.compressorPreset")
+                    MacSTRow("\(String(localized: "compressor_threshold")) (dB)") {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(fx.compressorThreshold) },
+                                set: { fx.compressorThreshold = Float($0) }
+                            ),
+                            in: -40...0,
+                            formatter: { String(format: "%.0f", $0) }
+                        )
+                    }
+                    .settingsAnchor("effects.compressorThreshold")
+                    MacSTRow("\(String(localized: "compressor_headroom")) (dB)") {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(fx.compressorHeadRoom) },
+                                set: { fx.compressorHeadRoom = Float($0) }
+                            ),
+                            in: 0...20
+                        )
+                    }
+                    .settingsAnchor("effects.compressorHeadroom")
+                    MacSTRow("\(String(localized: "compressor_attack")) (s)") {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(fx.compressorAttackTime) },
+                                set: { fx.compressorAttackTime = Float($0) }
+                            ),
+                            in: 0.0001...0.2,
+                            formatter: { String(format: "%.3fs", $0) }
+                        )
+                    }
+                    .settingsAnchor("effects.compressorAttack")
+                    MacSTRow("\(String(localized: "compressor_release")) (s)") {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(fx.compressorReleaseTime) },
+                                set: { fx.compressorReleaseTime = Float($0) }
+                            ),
+                            in: 0.01...3,
+                            formatter: { String(format: "%.2fs", $0) }
+                        )
+                    }
+                    .settingsAnchor("effects.compressorRelease")
+                    MacSTRow("\(String(localized: "compressor_gain")) (dB)") {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { Double(fx.compressorMasterGain) },
+                                set: { fx.compressorMasterGain = Float($0) }
+                            ),
+                            in: -20...20
+                        )
+                    }
+                    .settingsAnchor("effects.compressorGain")
+                }
+            }
+        }
+        .disabled(!fx.effectChainEnabled)
+        .opacity(fx.effectChainEnabled ? 1 : 0.56)
+    }
+}
+
+// MARK: - ST-15 Artist Names
+
+private struct MacSTArtistNameView: View {
+    @State private var store = ArtistNameSettingsStore.shared
+    @State private var newSeparator = ""
+    @State private var newProtectedName = ""
+    @State private var displaySeparatorDraft = ""
+    @State private var showsResetConfirmation = false
+
+    private var previewExample: String {
+        String(localized: "artist_name_settings_preview_example")
+    }
+
+    private var preview: String {
+        ArtistNameParser.displayName(
+            rawName: previewExample,
+            configuration: store.configuration
+        ) ?? previewExample
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if store.hasUnsupportedStoredConfiguration {
+                MacSTSection {
+                    MacSTGroup {
+                        MacSTRow(
+                            String(localized: "artist_name_settings_newer_version_warning"),
+                            divider: false
+                        ) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundStyle(PMColor.bad)
+                        }
+                    }
+                }
+            }
+
+            MacSTSection(
+                String(localized: "artist_name_settings_preview"),
+                hint: String(localized: "artist_name_settings_intro")
+            ) {
+                MacSTGroup {
+                    MacSTRow(previewExample, divider: false) {
+                        MacSTInfoText(text: preview, color: PMColor.brand)
+                    }
+                }
+            }
+
+            MacSTSection(
+                String(localized: "artist_name_settings_separators"),
+                hint: String(localized: "artist_name_settings_separators_footer")
+            ) {
+                MacSTGroup {
+                    MacSTRow("", divider: false, block: true) {
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 88), alignment: .leading)],
+                            alignment: .leading,
+                            spacing: 8
+                        ) {
+                            ForEach(Array(store.configuration.separators.enumerated()), id: \.offset) { index, value in
+                                removableChip(value) {
+                                    store.removeSeparators(at: IndexSet(integer: index))
+                                }
+                            }
+                        }
+                    }
+                    MacSTRow(String(localized: "add")) {
+                        HStack(spacing: 6) {
+                            MacSTTextField(
+                                text: $newSeparator,
+                                prompt: String(localized: "artist_name_settings_separator_placeholder"),
+                                width: 250
+                            )
+                            MacSTButton(
+                                title: String(localized: "add"),
+                                systemImage: "plus",
+                                action: addSeparator
+                            )
+                            .disabled(newSeparator.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+                }
+            }
+            .settingsAnchor("artists.separators")
+
+            MacSTSection(
+                String(localized: "artist_name_settings_protected_names"),
+                hint: String(localized: "artist_name_settings_protected_footer")
+            ) {
+                MacSTGroup {
+                    MacSTRow("", divider: false, block: true) {
+                        if store.configuration.protectedNames.isEmpty {
+                            MacSTInfoText(text: String(localized: "artist_name_settings_protected_empty"))
+                        } else {
+                            LazyVGrid(
+                                columns: [GridItem(.adaptive(minimum: 130), alignment: .leading)],
+                                alignment: .leading,
+                                spacing: 8
+                            ) {
+                                ForEach(Array(store.configuration.protectedNames.enumerated()), id: \.offset) { index, value in
+                                    removableChip(value) {
+                                        store.removeProtectedNames(at: IndexSet(integer: index))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    MacSTRow(String(localized: "add")) {
+                        HStack(spacing: 6) {
+                            MacSTTextField(
+                                text: $newProtectedName,
+                                prompt: String(localized: "artist_name_settings_protected_placeholder"),
+                                width: 250
+                            )
+                            MacSTButton(
+                                title: String(localized: "add"),
+                                systemImage: "plus",
+                                action: addProtectedName
+                            )
+                            .disabled(newProtectedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+                }
+            }
+            .settingsAnchor("artists.protectedNames")
+
+            MacSTSection(
+                String(localized: "artist_name_settings_display_separator"),
+                hint: String(localized: "artist_name_settings_display_footer")
+            ) {
+                MacSTGroup {
+                    MacSTRow(
+                        String(localized: "artist_name_settings_display_separator"),
+                        divider: false
+                    ) {
+                        HStack(spacing: 6) {
+                            MacSTTextField(
+                                text: $displaySeparatorDraft,
+                                prompt: String(localized: "artist_name_settings_display_separator_placeholder"),
+                                width: 180
+                            )
+                            MacSTButton(
+                                title: String(localized: "save"),
+                                action: saveDisplaySeparator
+                            )
+                            .disabled(displaySeparatorDraft.isEmpty)
+                        }
+                    }
+                    .settingsAnchor("artists.displaySeparator")
+                    MacSTRow(String(localized: "artist_name_settings_reset")) {
+                        MacSTButton(
+                            title: String(localized: "artist_name_settings_reset"),
+                            destructive: true
+                        ) {
+                            showsResetConfirmation = true
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            displaySeparatorDraft = store.configuration.displaySeparator
+        }
+        .onChange(of: store.revision) {
+            displaySeparatorDraft = store.configuration.displaySeparator
+        }
+        .confirmationDialog(
+            String(localized: "artist_name_settings_reset_confirm"),
+            isPresented: $showsResetConfirmation
+        ) {
+            Button(String(localized: "artist_name_settings_reset"), role: .destructive) {
+                store.resetToDefaults()
+            }
+            Button(String(localized: "cancel"), role: .cancel) {}
+        }
+    }
+
+    private func removableChip(_ value: String, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 4) {
+            MacSTChip(text: value)
+            Button(action: action) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(PMColor.textFaint)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func addSeparator() {
+        if store.addSeparator(newSeparator) { newSeparator = "" }
+    }
+
+    private func addProtectedName() {
+        if store.addProtectedName(newProtectedName) { newProtectedName = "" }
+    }
+
+    private func saveDisplaySeparator() {
+        guard !displaySeparatorDraft.isEmpty else { return }
+        store.setDisplaySeparator(displaySeparatorDraft)
+        displaySeparatorDraft = store.configuration.displaySeparator
+    }
+}
+
+// MARK: - ST-04 Metadata Scraping
+
+private struct MacSTScrapingView: View {
+    @Environment(MusicLibrary.self) private var library
+    @Environment(MusicScraperService.self) private var scraperService
+    @Environment(ScraperSettingsStore.self) private var scraperSettings
+    @State private var showImportSheet = false
+    @State private var importText = ""
+    @State private var importError: String?
+    @AppStorage(MusicScraperService.sidecarCoverWriteEnabledKey) private var sidecarCoverWriteEnabled = true
+    @AppStorage(MusicScraperService.sidecarLyricsWriteEnabledKey) private var sidecarLyricsWriteEnabled = true
+    @AppStorage(MusicScraperService.sidecarWriteTimeoutKey) private var sidecarWriteTimeout = 30.0
+
+    var body: some View {
+        MacSTSection(Lz("Scraping Sources"), hint: Lz("META-01 · Drag to Reorder · Higher Items Take Priority")) {
+            VStack(spacing: 4) {
+                ForEach(Array(scraperSettings.sources.enumerated()), id: \.element.id) { index, source in
+                    MacScraperSourceRow(
+                        source: source,
+                        index: index,
+                        sourceCount: scraperSettings.sources.count,
+                        isEnabled: sourceEnabledBinding(source),
+                        move: { offsets, destination in
+                            scraperSettings.reorderSources(fromOffsets: offsets, toOffset: destination)
+                        },
+                        remove: { scraperSettings.removeCustomSource(id: source.id) }
+                    )
+                }
+            }
+
+            MacSTGroup {
+                MacSTRow(Lz("Custom Source"), hint: Lz("META-03 · Paste JSON or Import from URL"), divider: false) {
+                    MacSTButton(title: Lz("Import"), systemImage: "square.and.arrow.down") {
+                        beginImport()
+                    }
+                }
+                .settingsAnchor("scraping.import")
+            }
+        }
+        .settingsAnchor("scraping.sources")
+
+        MacSTSection(Lz("Matching Strategy"), hint: Lz("META-04 · Filling only missing fields won't overwrite metadata you've edited manually")) {
+            MacSTGroup {
+                MacSTRow(Lz("Fill Missing Fields Only"), hint: Lz("When on, keeps existing title, artist, album, and cover"), divider: false) {
+                    MacSTToggle(isOn: Binding(
+                        get: { scraperSettings.onlyFillMissingFields },
+                        set: { scraperSettings.onlyFillMissingFields = $0 }
+                    ))
+                }
+                .settingsAnchor("scraping.onlyMissing")
+                MacSTRow(Lz("Enabled Sources")) {
+                    MacSTInfoText(text: "\(scraperSettings.enabledSources.count) / \(scraperSettings.sources.count)")
+                    MacSTButton(title: Lz("Restore Defaults"), destructive: true) {
+                        scraperSettings.resetToDefaults()
+                    }
+                }
+                .settingsAnchor("scraping.reset")
+            }
+        }
+
+        MacSTSection(Lz("Sidecar Write-Back"), hint: Lz("Write sidecar files next to source tracks")) {
+            MacSTGroup {
+                MacSTRow(Lz("Cover Write-Back"), hint: Lz("<Song Name>-cover.jpg"), divider: false) {
+                    MacSTToggle(isOn: $sidecarCoverWriteEnabled)
+                }
+                .settingsAnchor("scraping.writeCover")
+                MacSTRow(Lz("Lyrics Write-Back"), hint: Lz("<Song Name>.lrc")) {
+                    MacSTToggle(isOn: $sidecarLyricsWriteEnabled)
+                }
+                .settingsAnchor("scraping.writeLyrics")
+                MacSTRow(Lz("Write Timeout"), hint: Lz("Network sidecar write timeout")) {
+                    MacSTSlider(
+                        value: $sidecarWriteTimeout,
+                        in: 5...120,
+                        formatter: { "\($0.rounded().finiteInt())s" }
+                    )
+                }
+                .settingsAnchor("scraping.writeTimeout")
+            }
+        }
+
+        MacSTSection(Lz("Batch Scraping")) {
+            MacSTGroup {
+                MacSTRow(Lz("Scrape Entire Library"), divider: false) {
+                    if scraperService.isScraping {
+                        VStack(alignment: .trailing, spacing: 5) {
+                            ProgressView(value: scraperService.progress)
+                                .tint(PMColor.brand)
+                                .frame(width: 180)
+                            Text(verbatim: "\(scraperService.processedCount)/\(scraperService.totalCount) · \(scraperService.updatedCount) \(Lz("updated")) · \(scraperService.failedCount) \(Lz("failed"))")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(PMColor.textFaint)
+                        }
+                        MacSTButton(title: Lz("Cancel"), destructive: true) {
+                            scraperService.cancel()
+                        }
+                    } else {
+                        MacSTButton(title: Lz("Fill Missing"), systemImage: "sparkles", prominent: true) {
+                            scraperService.scrapeMissingMetadata(in: library)
+                        }
+                        MacSTButton(title: Lz("Re-Scrape"), systemImage: "arrow.clockwise") {
+                            scraperService.rescrapeLibrary(in: library)
+                        }
+                    }
+                }
+                .settingsAnchor("scraping.fillMissing")
+            }
+        }
+        .sheet(isPresented: $showImportSheet) {
+            importScraperSheet
+        }
+    }
+
+    private func sourceEnabledBinding(_ source: ScraperSourceConfig) -> Binding<Bool> {
+        Binding(
+            get: {
+                scraperSettings.sources.first(where: { $0.id == source.id })?.isEnabled ?? source.isEnabled
+            },
+            set: { newValue in
+                var sources = scraperSettings.sources
+                guard let index = sources.firstIndex(where: { $0.id == source.id }) else { return }
+                sources[index].isEnabled = newValue
+                scraperSettings.sources = sources
+            }
+        )
+    }
+
+    private func beginImport() {
+        importText = ""
+        importError = nil
+        showImportSheet = true
+    }
+
+    private var importScraperSheet: some View {
+        MacScraperImportSheet(
+            text: $importText,
+            error: importError,
+            onCancel: { showImportSheet = false },
+            onImport: { performImport() }
+        )
+    }
+
+    private func performImport() {
+        importError = nil
+        let text = importText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        let input: ScraperImportInput
+        do {
+            input = try ScraperConfigStore.shared.classifyImportInput(text)
+        } catch {
+            importError = error.localizedDescription
+            return
+        }
+
+        switch input {
+        case .remoteURL(let url):
+            Task {
+                do {
+                    let configs = try await ScraperConfigStore.shared.importFromURL(url)
+                    for config in configs { scraperSettings.addCustomSource(config) }
+                    showImportSheet = false
+                } catch {
+                    importError = error.localizedDescription
+                }
+            }
+        case .json(let json):
+            do {
+                let configs = try ScraperConfigStore.shared.importFromJSON(json)
+                for config in configs { scraperSettings.addCustomSource(config) }
+                showImportSheet = false
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+}
+
+private struct MacScraperImportSheet: View {
+    @Binding var text: String
+    let error: String?
+    let onCancel: () -> Void
+    let onImport: () -> Void
+
+    private var preview: MacScraperImportPreview {
+        MacScraperImportPreview.parse(text) ?? .sample
+    }
+
+    private var detectedInput: ScraperImportInput? {
+        try? ScraperConfigStore.shared.classifyImportInput(text)
+    }
+
+    private var isInputRecognized: Bool { detectedInput != nil }
+    private var hasJSONPreview: Bool { MacScraperImportPreview.parse(text) != nil }
+
+    private var isRemoteURL: Bool {
+        guard let detectedInput else { return false }
+        if case .remoteURL = detectedInput { return true }
+        return false
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+
+            HStack(spacing: 0) {
+                leftPane
+                    .frame(maxWidth: .infinity)
+                Rectangle().fill(PMColor.divider).frame(width: 0.5)
+                if isRemoteURL {
+                    remoteURLSummaryPane.frame(width: 280)
+                } else if hasJSONPreview {
+                    rightPane.frame(width: 280)
+                } else {
+                    inputHintPane.frame(width: 280)
+                }
+            }
+            .frame(maxHeight: .infinity)
+
+            footer
+        }
+        .frame(width: 820, height: 620)
+        .background(PMColor.bg)
+    }
+
+    private var header: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(PMColor.brand)
+                    .frame(width: 34, height: 34)
+                    .background(PMColor.brand.opacity(0.14), in: .rect(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: Lz("Add Custom Scraper Source"))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: "ConfigurableScraper")
+                        .font(PMFont.caption)
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                Spacer()
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PMColor.textMuted)
+                        .frame(width: 26, height: 26)
+                        .background(PMColor.glassBtn, in: .circle)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+        }
+    }
+
+    @ViewBuilder
+    private var leftPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            importInputPane
+            if let error {
+                Text(verbatim: error)
+                    .font(PMFont.caption)
+                    .foregroundStyle(PMColor.bad)
+                    .lineSpacing(3)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.bottom, 16)
+    }
+
+    private var importInputPane: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(verbatim: Lz("JSON or Manifest URL"))
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(PMColor.textMuted)
+                Spacer()
+                HStack(spacing: 5) {
+                    Image(systemName: isInputRecognized ? "checkmark" : "exclamationmark.triangle")
+                        .font(.system(size: 10.5, weight: .semibold))
+                    Text(verbatim: isInputRecognized ? Lz("Input recognized") : Lz("Paste JSON or an HTTPS URL"))
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(isInputRecognized ? PMColor.ok : PMColor.warn)
+            }
+            MacJSONEditor(text: $text)
+                .frame(height: 382)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(PMColor.dividerStrong, lineWidth: 0.5)
+                }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+    }
+
+
+    private var remoteURLSummaryPane: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(verbatim: Lz("Remote Manifest"))
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.6)
+                .textCase(.uppercase)
+                .foregroundStyle(PMColor.textFaint)
+            Image(systemName: "link.circle.fill")
+                .font(.system(size: 34))
+                .foregroundStyle(PMColor.brand)
+            Text(verbatim: Lz("URL recognized"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(PMColor.text)
+            Text(verbatim: Lz("The manifest will be downloaded over HTTPS and validated before it is imported."))
+                .font(PMFont.caption)
+                .foregroundStyle(PMColor.textMuted)
+                .lineSpacing(3)
+            Spacer()
+        }
+        .padding(18)
+        .background(PMColor.bgDeep)
+    }
+
+    private var inputHintPane: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 34))
+                .foregroundStyle(PMColor.textFaint)
+            Text(verbatim: Lz("Paste JSON or an HTTPS URL"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(PMColor.text)
+            Text("scraper_import_auto_footer")
+                .font(PMFont.caption)
+                .foregroundStyle(PMColor.textMuted)
+                .lineSpacing(3)
+            Spacer()
+        }
+        .padding(18)
+        .background(PMColor.bgDeep)
+    }
+
+    private var rightPane: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(verbatim: Lz("Parse Result"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.6)
+                    .textCase(.uppercase)
+                    .foregroundStyle(PMColor.textFaint)
+                    .padding(.bottom, 12)
+
+                HStack(spacing: 10) {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(LinearGradient(colors: [Color(red: 0.76, green: 0.05, blue: 0.05),
+                                                      Color(red: 0.44, green: 0.03, blue: 0.03)],
+                                             startPoint: .topLeading,
+                                             endPoint: .bottomTrailing))
+                        .frame(width: 38, height: 38)
+                        .overlay {
+                            Text(verbatim: String(preview.name.prefix(1)))
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: preview.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(PMColor.text)
+                        Text(verbatim: "v\(preview.version)")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+                }
+                .padding(.bottom, 14)
+
+                previewField(Lz("Capabilities")) {
+                    HStack(spacing: 5) {
+                        ForEach(preview.capabilityLabels, id: \.self) { cap in
+                            MacSTBadge(text: cap)
+                        }
+                    }
+                }
+                previewField("Rate Limit") {
+                    Text(verbatim: preview.rateLimitText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(PMColor.text)
+                }
+                previewField(Lz("Custom Headers")) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(preview.headerRows, id: \.self) { row in
+                            Text(verbatim: row)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(PMColor.textMuted)
+                        }
+                    }
+                }
+                previewField(Lz("SSL Trusted Domains")) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(preview.sslDomains, id: \.self) { domain in
+                            HStack(spacing: 6) {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .foregroundStyle(PMColor.textFaint)
+                                Text(verbatim: domain)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(PMColor.textMuted)
+                            }
+                        }
+                    }
+                }
+                previewField(Lz("Endpoint Scripts")) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(preview.endpointScripts, id: \.self) { script in
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .foregroundStyle(PMColor.ok)
+                                Text(verbatim: script)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(PMColor.text)
+                            }
+                        }
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11))
+                    Text(verbatim: Lz("JS runs in a JavaScriptCore sandbox and can only access declared domains."))
+                        .font(.system(size: 10.5))
+                        .lineSpacing(3)
+                }
+                .foregroundStyle(PMColor.warn)
+                .padding(10)
+                .background(PMColor.warn.opacity(0.12), in: .rect(cornerRadius: 8))
+                .padding(.top, 2)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 8)
+            .padding(.bottom, 18)
+        }
+        .background(PMColor.bgDeep)
+    }
+
+    private func previewField<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(verbatim: label)
+                .font(.system(size: 10))
+                .foregroundStyle(PMColor.textFaint)
+            content()
+        }
+        .padding(.bottom, 12)
+    }
+
+    private var footer: some View {
+        HStack {
+            Spacer()
+            MacSTButton(title: Lz("Cancel"), action: onCancel)
+            MacSTButton(title: Lz("Add and Enable"), prominent: true, action: onImport)
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 18)
+        .frame(height: 64)
+        .overlay(alignment: .top) {
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+        }
+    }
+}
+
+private struct MacScraperImportPreview {
+    var name: String
+    var version: String
+    var capabilities: [String]
+    var rateLimitMs: Int?
+    var headers: [String: String]
+    var sslDomains: [String]
+    var endpointScripts: [String]
+
+    static let sample = MacScraperImportPreview(
+        name: "NetEase Music",
+        version: "1.2.0",
+        capabilities: ["metadata", "cover", "lyrics"],
+        rateLimitMs: 1000,
+        headers: ["User-Agent": "Primuse/3.8", "Referer": "https://music.163.com"],
+        sslDomains: ["music.163.com", "*.126.net"],
+        endpointScripts: ["search.js", "detail.js", "cover.js", "lyrics.js"]
+    )
+
+    static func parse(_ text: String) -> MacScraperImportPreview? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        let decoder = JSONDecoder()
+        if let config = try? decoder.decode(ScraperConfig.self, from: data) {
+            return from(config)
+        }
+        if let configs = try? decoder.decode([ScraperConfig].self, from: data),
+           let first = configs.first {
+            return from(first)
+        }
+        return nil
+    }
+
+    private static func from(_ config: ScraperConfig) -> MacScraperImportPreview {
+        let scripts = [config.search?.script, config.detail?.script, config.cover?.script, config.lyrics?.script]
+            .compactMap { $0 }
+        return MacScraperImportPreview(
+            name: config.name,
+            version: versionText(config.version),
+            capabilities: config.capabilities,
+            rateLimitMs: config.rateLimit,
+            headers: config.headers ?? [:],
+            sslDomains: config.sslTrustDomains ?? [],
+            endpointScripts: scripts.isEmpty ? ["search.js", "detail.js", "cover.js", "lyrics.js"] : scripts
+        )
+    }
+
+    private static func versionText(_ version: Int) -> String {
+        if version >= 100 {
+            let major = version / 100
+            let minor = (version / 10) % 10
+            let patch = version % 10
+            return "\(major).\(minor).\(patch)"
+        }
+        if version >= 10 {
+            return "1.\(version % 10).0"
+        }
+        return "\(version)"
+    }
+
+    var capabilityLabels: [String] {
+        let mapping: [(String, String)] = [
+            ("metadata", Lz("Metadata")),
+            ("cover", Lz("Cover")),
+            ("lyrics", Lz("Lyrics"))
+        ]
+        let labels = mapping.compactMap { key, label in capabilities.contains(key) ? label : nil }
+        return labels.isEmpty ? [Lz("Metadata"), Lz("Cover"), Lz("Lyrics")] : labels
+    }
+
+    var rateLimitText: String {
+        guard let rateLimitMs, rateLimitMs > 0 else { return "60 rpm · burst 8" }
+        let rpm = max(1, (60_000.0 / Double(rateLimitMs)).rounded().finiteInt(or: 1))
+        return "\(rpm) rpm · burst 8"
+    }
+
+    var headerRows: [String] {
+        let rows = headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value.replacingOccurrences(of: "https://", with: ""))" }
+        return rows.isEmpty ? ["User-Agent: Primuse/3.8", "Referer: music.163.com"] : rows
+    }
+}
+
+private struct MacJSONEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor(red: 0.12, green: 0.105, blue: 0.09, alpha: 1)
+
+        let textView = NSTextView()
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.backgroundColor = .clear
+        textView.insertionPointColor = .white
+        textView.textColor = MacJSONHighlighter.baseColor
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        context.coordinator.apply(text)
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard context.coordinator.textView?.string != text else { return }
+        context.coordinator.apply(text)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MacJSONEditor
+        weak var textView: NSTextView?
+        private var isApplying = false
+
+        init(_ parent: MacJSONEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard !isApplying, let textView else { return }
+            parent.text = textView.string
+            apply(textView.string, preservingSelection: true)
+        }
+
+        func apply(_ value: String, preservingSelection: Bool = false) {
+            guard let textView else { return }
+            isApplying = true
+            let selection = textView.selectedRange()
+            textView.textStorage?.setAttributedString(MacJSONHighlighter.highlight(value))
+            if preservingSelection {
+                let length = (textView.string as NSString).length
+                let location = min(selection.location, length)
+                let selectedLength = min(selection.length, max(0, length - location))
+                textView.setSelectedRange(NSRange(location: location, length: selectedLength))
+            }
+            isApplying = false
+        }
+    }
+}
+
+private enum MacJSONHighlighter {
+    static let baseColor = NSColor(red: 0.91, green: 0.89, blue: 0.84, alpha: 1)
+    private static let keyColor = NSColor(red: 0.90, green: 0.63, blue: 0.42, alpha: 1)
+    private static let stringColor = NSColor(red: 0.56, green: 0.81, blue: 0.56, alpha: 1)
+    private static let numberColor = NSColor(red: 0.47, green: 0.71, blue: 0.88, alpha: 1)
+    private static let boolColor = NSColor(red: 0.77, green: 0.56, blue: 0.88, alpha: 1)
+
+    static func highlight(_ source: String) -> NSAttributedString {
+        let fullRange = NSRange(location: 0, length: (source as NSString).length)
+        let attributed = NSMutableAttributedString(
+            string: source,
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: baseColor,
+            ]
+        )
+        let pattern = #""(?:[^"\\]|\\.)*"\s*:|"(?:[^"\\]|\\.)*"|\b\d+(?:\.\d+)?\b|\btrue\b|\bfalse\b|\bnull\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return attributed }
+        regex.enumerateMatches(in: source, range: fullRange) { match, _, _ in
+            guard let match else { return }
+            let token = (source as NSString).substring(with: match.range)
+            let color: NSColor
+            if token.trimmingCharacters(in: .whitespaces).hasSuffix(":") {
+                color = keyColor
+            } else if token.hasPrefix("\"") {
+                color = stringColor
+            } else if token == "true" || token == "false" || token == "null" {
+                color = boolColor
+            } else {
+                color = numberColor
+            }
+            attributed.addAttribute(.foregroundColor, value: color, range: match.range)
+        }
+        return attributed
+    }
+}
+
+private struct MacScraperSourceRow: View {
+    let source: ScraperSourceConfig
+    let index: Int
+    let sourceCount: Int
+    @Binding var isEnabled: Bool
+    let move: (IndexSet, Int) -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            MacScraperReorderHandle(
+                index: index,
+                sourceCount: sourceCount,
+                move: move
+            )
+            .frame(width: 18, height: 22)
+            .help(Lz("Drag to Reorder"))
+            Text(verbatim: "\(index + 1)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(PMColor.textFaint)
+                .frame(width: 16)
+
+            HStack(spacing: 8) {
+                Image(systemName: source.type.iconName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isEnabled ? source.type.themeColor : PMColor.textFaint)
+                    .frame(width: 16)
+                Text(verbatim: source.type.displayName)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+                if source.type.isBuiltIn {
+                    Text(verbatim: Lz("Built-In"))
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .tracking(0.5)
+                        .foregroundStyle(PMColor.textFaint)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 4) {
+                ForEach(capabilities, id: \.self) { cap in
+                    MacSTBadge(text: cap, color: source.type.themeColor)
+                }
+            }
+
+            if !source.type.isBuiltIn {
+                MacSTButton(title: Lz("Delete"), destructive: true, action: remove)
+            }
+
+            MacSTToggle(isOn: $isEnabled)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(PMColor.bgElev, in: .rect(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+    }
+
+    private var capabilities: [String] {
+        var result: [String] = []
+        if source.type.supportsMetadata { result.append(Lz("Metadata")) }
+        if source.type.supportsCover { result.append(Lz("Cover")) }
+        if source.type.supportsLyrics { result.append(source.type.supportsWordLevelLyrics ? Lz("Word-by-Word Lyrics") : Lz("Lyrics")) }
+        return result.isEmpty ? [Lz("Extension")] : result
+    }
+}
+
+private struct MacScraperReorderHandle: NSViewRepresentable {
+    let index: Int
+    let sourceCount: Int
+    let move: (IndexSet, Int) -> Void
+
+    func makeNSView(context: Context) -> ScraperReorderHandleNSView {
+        let view = ScraperReorderHandleNSView()
+        view.index = index
+        view.sourceCount = sourceCount
+        view.onMove = move
+        return view
+    }
+
+    func updateNSView(_ nsView: ScraperReorderHandleNSView, context: Context) {
+        nsView.index = index
+        nsView.sourceCount = sourceCount
+        nsView.onMove = move
+        nsView.needsDisplay = true
+    }
+}
+
+private final class ScraperReorderHandleNSView: NSView {
+    var index = 0
+    var sourceCount = 0
+    var onMove: ((IndexSet, Int) -> Void)?
+
+    private var dragAnchorY: CGFloat = 0
+    private var dragIndex = 0
+    private let rowStep: CGFloat = 34
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        // 语义自适应色 —— 旧实现写死 white@0.34, 浅色主题下白点画在近白行背景上
+        // 等于隐形 (拖拽手柄看不见)。tertiaryLabelColor 在深/浅两套外观下都可见。
+        NSColor.tertiaryLabelColor.setFill()
+        let dotSize: CGFloat = 3
+        let gap: CGFloat = 3
+        let totalWidth = dotSize * 2 + gap
+        let totalHeight = dotSize * 3 + gap * 2
+        let startX = (bounds.width - totalWidth) / 2
+        let startY = (bounds.height - totalHeight) / 2
+        for row in 0..<3 {
+            for col in 0..<2 {
+                let rect = NSRect(
+                    x: startX + CGFloat(col) * (dotSize + gap),
+                    y: startY + CGFloat(row) * (dotSize + gap),
+                    width: dotSize,
+                    height: dotSize
+                )
+                NSBezierPath(ovalIn: rect).fill()
+            }
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        dragAnchorY = event.locationInWindow.y
+        dragIndex = index
+        NSCursor.closedHand.push()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard sourceCount > 1 else { return }
+        let delta = event.locationInWindow.y - dragAnchorY
+        guard abs(delta) >= rowStep else { return }
+        let direction = delta < 0 ? 1 : -1
+        let nextIndex = min(max(dragIndex + direction, 0), sourceCount - 1)
+        guard nextIndex != dragIndex else {
+            dragAnchorY = event.locationInWindow.y
+            return
+        }
+        let destination = direction > 0 ? nextIndex + 1 : nextIndex
+        onMove?(IndexSet(integer: dragIndex), destination)
+        dragIndex = nextIndex
+        dragAnchorY = event.locationInWindow.y
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        NSCursor.pop()
+    }
+}
+
+// MARK: - ST-05 Lyrics Translation
+
+private struct MacSTLyricsView: View {
+    @Environment(MusicIntelligenceService.self) private var intelligence
+    @State private var settings = LyricsTranslationSettingsStore.shared
+    @State private var languageCatalog = LyricsTranslationLanguageCatalog.shared
+    @AppStorage("lyricsFontScale") private var lyricsFontScale = 1.0
+    @AppStorage(PlayerAppearancePreferences.tapLyricsToSeekKey)
+    private var tapLyricsToSeek = PlayerAppearancePreferences.tapLyricsToSeekByDefault
+    @State private var showTranscriptionSettings = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MacSTSection(String(localized: "lyrics_translation_section")) {
+                MacSTGroup {
+                    MacSTRow(String(localized: "lyrics_translation_enabled"), divider: false) {
+                        MacSTToggle(isOn: Binding(
+                            get: { settings.isEnabled },
+                            set: { settings.isEnabled = $0 }
+                        ))
+                    }
+                    .settingsAnchor("lyrics.translationEnabled")
+                    MacSTRow(String(localized: "lyrics_translation_mode")) {
+                        MacSTPicker(
+                            selection: Binding(
+                                get: {
+                                    intelligence.shouldExposeRemoteConfiguration
+                                        ? settings.mode.rawValue : LyricsTranslationMode.system.rawValue
+                                },
+                                set: { settings.mode = LyricsTranslationMode(rawValue: $0) ?? .system }
+                            ),
+                            options: lyricsTranslationModeOptions
+                        )
+                    }
+                    MacSTRow(String(localized: "lyrics_translation_target")) {
+                        MacSTPicker(
+                            selection: Binding(
+                                get: { settings.targetLanguageCode },
+                                set: { settings.targetLanguageCode = $0 }
+                            ),
+                            options: languageCatalog
+                                .options(including: settings.targetLanguageCode)
+                                .map {
+                                    ($0, languageCatalog.displayName(for: $0))
+                                }
+                        )
+                    }
+                }
+            }
+
+            MacSTSection(
+                String(localized: "lyrics_audio_tools_section"),
+                hint: String(localized: "lyrics_audio_tools_footer")
+            ) {
+                MacSTGroup {
+                    MacSTRow(
+                        String(localized: "lyrics_transcription_settings_title"),
+                        divider: false
+                    ) {
+                        MacSTButton(
+                            title: intelligence.isAudioTranscriptionConfigured
+                                ? String(localized: "lyrics_transcription_status_ready")
+                                : String(localized: "lyrics_transcription_configure"),
+                            systemImage: "waveform.badge.mic"
+                        ) {
+                            showTranscriptionSettings = true
+                        }
+                    }
+                    .settingsAnchor("lyrics.transcription")
+                }
+            }
+
+            MacSTSection(String(localized: "lyrics_display_section")) {
+                MacSTGroup {
+                    MacSTRow(String(localized: "lyrics_font_size")) {
+                        MacSTSlider(
+                            value: Binding(
+                                get: { lyricsFontScale * 100 },
+                                set: { lyricsFontScale = $0 / 100 }
+                            ),
+                            in: 70...180,
+                            formatter: { String(format: "%.0f%%", $0) }
+                        )
+                    }
+                    .settingsAnchor("lyrics.fontSize")
+                    MacSTRow(
+                        String(localized: "player_tap_lyrics_to_seek"),
+                        divider: false
+                    ) {
+                        MacSTToggle(isOn: $tapLyricsToSeek)
+                            .accessibilityLabel(Text("player_tap_lyrics_to_seek"))
+                            .accessibilityHint(Text("player_tap_lyrics_to_seek_description"))
+                            .accessibilityValue(Text(
+                                tapLyricsToSeek
+                                    ? "desktop_widget_sync_status_enabled"
+                                    : "desktop_widget_sync_status_disabled"
+                            ))
+                    }
+                    .settingsAnchor("lyrics.tapToSeek")
+                }
+            }
+        }
+        .task { await languageCatalog.refresh() }
+        .sheet(isPresented: $showTranscriptionSettings) {
+            NavigationStack {
+                GoogleLyricsTranscriptionSettingsView()
+            }
+        }
+    }
+
+    private var lyricsTranslationModeOptions: [(String, String)] {
+        var options = [(
+            LyricsTranslationMode.system.rawValue,
+            String(localized: "lyrics_translation_mode_system")
+        )]
+        if intelligence.shouldExposeRemoteConfiguration {
+            options.append((
+                LyricsTranslationMode.intelligentWithSystemFallback.rawValue,
+                String(localized: "lyrics_translation_mode_intelligent")
+            ))
+        }
+        return options
+    }
+}
+
+// MARK: - ST-06 Apple Music
+
+private struct MacSTAppleMusicView: View {
+    @Environment(AppleMusicService.self) private var appleMusic
+    @Environment(AppleMusicLibraryService.self) private var library
+    @Environment(MusicLibrary.self) private var musicLibrary
+    @AppStorage(AppleMusicFeatureSettings.syncUserLibraryKey) private var syncUserLibrary = true
+    @AppStorage(AppleMusicFeatureSettings.catalogSearchEnabledKey) private var catalogSearchEnabled = true
+    @AppStorage(AppleMusicFeatureSettings.autoAddToSmartPlaylistsKey) private var autoAddToSmartPlaylists = false
+
+    var body: some View {
+        MacSTSection(Lz("Account")) {
+            HStack(spacing: 14) {
+                Circle()
+                    .fill(LinearGradient(colors: [Color(red: 0.98, green: 0.14, blue: 0.23),
+                                                  Color(red: 0.76, green: 0.04, blue: 0.09)],
+                                         startPoint: .topLeading,
+                                         endPoint: .bottomTrailing))
+                    .frame(width: 44, height: 44)
+                    .overlay {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: accountTitle)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: accountSubtitle)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+
+                Spacer()
+
+                // 未授权 → "授权" 按钮; 已授权 → "去系统设置" (macOS 不让 app 主动撤销)
+                if appleMusic.authState == .authorized {
+                    MacSTButton(title: Lz("Open System Settings")) {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleAccount") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                } else {
+                    MacSTButton(title: Lz("Authorize"), prominent: true) {
+                        Task { await appleMusic.requestAuthorization() }
+                    }
+                }
+            }
+            .padding(16)
+            .background(PMColor.bgElev, in: .rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+            }
+        }
+        .settingsAnchor("appleMusic.authorize")
+
+        if appleMusic.authState == .authorized {
+            MacSTSection(Lz("Library Sync")) {
+                MacSTGroup {
+                    MacSTRow(Lz("Sync User Library"), divider: false) {
+                        MacSTToggle(isOn: syncUserLibraryBinding)
+                    }
+                    .settingsAnchor("appleMusic.syncUserLibrary")
+                    MacSTRow(Lz("Catalog Search")) {
+                        MacSTToggle(isOn: catalogSearchBinding)
+                    }
+                    .settingsAnchor("appleMusic.catalogSearch")
+                    MacSTRow(Lz("Auto Add to Smart Playlists")) {
+                        MacSTToggle(isOn: $autoAddToSmartPlaylists)
+                    }
+                    .settingsAnchor("appleMusic.autoSmartPlaylists")
+                    MacSTRow(Lz("Sync Status")) {
+                        MacSTInfoText(text: syncStateText,
+                                      color: syncStateColor)
+                    }
+                    MacSTRow(Lz("Last Synced")) {
+                        MacSTInfoText(text: lastSyncText)
+                        MacSTButton(title: Lz("Re-Sync"), systemImage: "arrow.clockwise") {
+                            library.sync()
+                        }
+                        .disabled(!syncUserLibrary)
+                    }
+                    .settingsAnchor("appleMusic.sync")
+                }
+            }
+        }
+
+        if let err = appleMusic.lastPlaybackError {
+            MacSTSection(Lz("Recent Playback Errors")) {
+                MacSTGroup {
+                    MacSTRow(Lz("Error Message"), divider: false) {
+                        MacSTInfoText(text: err, color: PMColor.bad)
+                    }
+                }
+            }
+        }
+    }
+
+    private var syncUserLibraryBinding: Binding<Bool> {
+        Binding(
+            get: { syncUserLibrary },
+            set: { newValue in
+                syncUserLibrary = newValue
+                musicLibrary.updateAppleMusicLibrarySyncEnabled(newValue)
+                if newValue {
+                    library.sync()
+                } else {
+                    library.cancel()
+                }
+            }
+        )
+    }
+
+    private var catalogSearchBinding: Binding<Bool> {
+        Binding(
+            get: { catalogSearchEnabled },
+            set: { newValue in
+                catalogSearchEnabled = newValue
+                if !newValue {
+                    appleMusic.clearCatalogSearchResults()
+                }
+            }
+        )
+    }
+
+    private var accountTitle: String {
+        switch appleMusic.authState {
+        case .notDetermined: return Lz("Apple Music · Not Authorized")
+        case .denied:        return Lz("Apple Music · Denied")
+        case .restricted:    return Lz("Apple Music · Restricted")
+        case .authorized:    return Lz("Apple Music · Authorized")
+        }
+    }
+
+    private var accountSubtitle: String {
+        switch appleMusic.authState {
+        case .notDetermined: return Lz("Authorize on the right to connect your subscription")
+        case .denied:        return Lz("Go to System Settings → Privacy to re-enable")
+        case .restricted:    return Lz("Restricted by Screen Time or MDM")
+        case .authorized:    return Lz("MusicKit Connected")
+        }
+    }
+
+    private var syncStateText: String {
+        switch library.state {
+        case .idle:                 return Lz("● Ready")
+        case .syncing:              return Lz("● Syncing…")
+        case .done(let count, _):   return "● \(Lz("Synced")) · \(count) \(Lz("songs"))"
+        case .failed(let msg):      return "● \(Lz("Failed")): \(msg)"
+        }
+    }
+
+    private var syncStateColor: Color {
+        switch library.state {
+        case .idle, .done: return PMColor.ok
+        case .syncing:     return PMColor.warn
+        case .failed:      return PMColor.bad
+        }
+    }
+
+    private var lastSyncText: String {
+        guard let at = library.lastSyncAt else { return "—" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: at, relativeTo: Date())
+    }
+}
+
+// MARK: - ST-07 Widgets
+
+private extension WidgetRefreshMode {
+    var label: String {
+        switch self {
+        case .adaptive:    return Lz("Adaptive (Recommended)")
+        case .minute:      return Lz("Every Minute")
+        case .fiveMinutes: return Lz("Every 5 Minutes")
+        case .manual:      return Lz("Manual Only")
+        }
+    }
+}
+
+private struct MacSTWidgetView: View {
+    @Environment(AudioPlayerService.self) private var player
+    @Environment(SourceManager.self) private var sourceManager
+    // 直接写 App Group, 让 widget 扩展读到同一份开关/刷新设置。
+    @AppStorage(PrimuseConstants.widgetSyncEnabledKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var widgetSyncEnabled = true
+    @AppStorage(PrimuseConstants.widgetRefreshModeKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var refreshMode = WidgetRefreshMode.adaptive
+    @AppStorage(PrimuseConstants.widgetSharedDataScopeKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var sharedDataScope = "titleArtistCoverProgressLyrics"
+    @AppStorage(PrimuseConstants.widgetClickableInteractionKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var clickableInteraction = true
+    @AppStorage(PrimuseConstants.widgetNowPlayingEnabledKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var nowPlayingWidgetEnabled = true
+    @AppStorage(PrimuseConstants.widgetLyricsEnabledKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var lyricsWidgetEnabled = true
+    @AppStorage(PrimuseConstants.widgetListeningStatsEnabledKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var statsWidgetEnabled = true
+    @AppStorage(PrimuseConstants.widgetRecentAlbumsEnabledKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var recentWidgetEnabled = true
+    @AppStorage(PrimuseConstants.widgetSourcesEnabledKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var sourcesWidgetEnabled = true
+    @AppStorage(PrimuseConstants.widgetWrappedEnabledKey, store: UserDefaults(suiteName: PrimuseConstants.appGroupIdentifier))
+    private var wrappedWidgetEnabled = true
+
+    var body: some View {
+        MacSTSection(Lz("Widgets"),
+                     hint: String(localized: "desktop_widget_sync_footer")) {
+            MacSTGroup {
+                MacSTRow(String(localized: "desktop_widget_sync_enabled"),
+                         hint: String(localized: "desktop_widget_sync_privacy_footer"),
+                         divider: false) {
+                    MacSTToggle(isOn: $widgetSyncEnabled)
+                }
+                .settingsAnchor("widgets.enabled")
+                MacSTRow(Lz("Refresh Frequency"), hint: Lz("Higher frequency updates sooner but uses more energy")) {
+                    MacSTPicker(
+                        selection: $refreshMode,
+                        options: WidgetRefreshMode.allCases.map { ($0, $0.label) },
+                        width: 180
+                    )
+                }
+                .settingsAnchor("widgets.refreshFrequency")
+                MacSTRow(Lz("Shared Data Scope")) {
+                    MacSTPicker(
+                        selection: $sharedDataScope,
+                        options: [
+                            ("titleArtistCoverProgressLyrics", Lz("Title + Artist + Cover + Progress + Lyrics")),
+                            ("titleArtistCoverProgress", Lz("Title + Artist + Cover + Progress")),
+                            ("minimal", Lz("Title + Artist"))
+                        ],
+                        width: 280
+                    )
+                }
+                .settingsAnchor("widgets.sharedData")
+                MacSTRow(Lz("Clickable Interaction")) {
+                    MacSTToggle(isOn: $clickableInteraction)
+                }
+                .settingsAnchor("widgets.clickable")
+                MacSTRow(Lz("Refresh Now")) {
+                    MacSTButton(title: String(localized: "desktop_widget_sync_update_now"), systemImage: "arrow.triangle.2.circlepath") {
+                        MacWidgetDataPublisher.publishFromSettings(
+                            player: player,
+                            sourceManager: sourceManager
+                        )
+                    }
+                }
+                .settingsAnchor("widgets.refreshNow")
+            }
+        }
+
+        MacSTSection(Lz("Available Widgets")) {
+            MacSTGroup {
+                MacSTWidgetChecklistRow(
+                    title: Lz("Now Playing"),
+                    detail: Lz("Small / Medium / Large"),
+                    isOn: $nowPlayingWidgetEnabled,
+                    divider: false
+                )
+                .settingsAnchor("widgets.nowPlaying")
+                MacSTWidgetChecklistRow(
+                    title: Lz("Lyrics"),
+                    detail: Lz("Medium / Large"),
+                    isOn: $lyricsWidgetEnabled
+                )
+                .settingsAnchor("widgets.lyrics")
+                MacSTWidgetChecklistRow(
+                    title: Lz("Listening Stats"),
+                    detail: Lz("Medium"),
+                    isOn: $statsWidgetEnabled
+                )
+                .settingsAnchor("widgets.stats")
+                MacSTWidgetChecklistRow(
+                    title: String(localized: "carplay_tab_recent"),
+                    detail: Lz("Medium / Large"),
+                    isOn: $recentWidgetEnabled
+                )
+                .settingsAnchor("widgets.recent")
+                MacSTWidgetChecklistRow(
+                    title: String(localized: "sources_title"),
+                    detail: Lz("Small"),
+                    isOn: $sourcesWidgetEnabled
+                )
+                .settingsAnchor("widgets.sources")
+                MacSTWidgetChecklistRow(
+                    title: Lz("Wrapped"),
+                    detail: Lz("Medium"),
+                    isOn: $wrappedWidgetEnabled
+                )
+                .settingsAnchor("widgets.wrapped")
+            }
+        }
+
+        MacSTSection(Lz("Widget Gallery"),
+                     hint: Lz("Small 155×155 · Medium 342×155 · Large 342×342 · Matches design ST-07 sizes")) {
+            MacWidgetGalleryPreview()
+        }
+        .onChange(of: refreshMode) { _, _ in
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+        .onChange(of: widgetSyncEnabled) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: sharedDataScope) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: clickableInteraction) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: nowPlayingWidgetEnabled) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: lyricsWidgetEnabled) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: statsWidgetEnabled) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: recentWidgetEnabled) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: sourcesWidgetEnabled) { _, _ in
+            pushWidgetSettingsChange()
+        }
+        .onChange(of: wrappedWidgetEnabled) { _, _ in
+            pushWidgetSettingsChange()
+        }
+    }
+
+    private func pushWidgetSettingsChange() {
+        MacWidgetDataPublisher.publishFromSettings(
+            player: player,
+            sourceManager: sourceManager
+        )
+    }
+}
+
+private struct MacSTWidgetChecklistRow: View {
+    let title: String
+    let detail: String
+    @Binding var isOn: Bool
+    var divider = true
+
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.18, dampingFraction: 0.9)) {
+                isOn.toggle()
+            }
+        } label: {
+            VStack(spacing: 0) {
+                if divider {
+                    Rectangle().fill(PMColor.divider).frame(height: 0.5)
+                }
+                HStack(spacing: 12) {
+                    Image(systemName: isOn ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(isOn ? PMColor.brand : PMColor.textFaint)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: title)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(PMColor.text)
+                        Text(verbatim: detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Gathers macOS-side data into the App Group snapshots the widget extension
+/// reads. Playback / recent albums are already published by AudioPlayerService;
+/// this adds listening-stats, year-in-review, music-sources and lyrics. All
+/// secondary publishing is gated by the "Push to Widget" toggle.
+@MainActor
+enum MacWidgetDataPublisher {
+    private static var lyricsSharingEnabled: Bool {
+        WidgetSettings.syncEnabled()
+            && WidgetSettings.widgetEnabled(PrimuseConstants.widgetLyricsEnabledKey)
+            && WidgetSettings.sharedDataScope().includesLyrics
+    }
+
+    /// Full publish — call from a context that has every service (the main scene).
+    static func publishAll(player: AudioPlayerService, sources: SourcesStore, sourceManager: SourceManager) {
+        player.publishWidgetStateForMacWidgetSync()
+        guard WidgetSettings.syncEnabled() else {
+            LyricsSnapshot.clear()
+            ListeningStatsSnapshot.clear()
+            SourcesSnapshot.clear()
+            WrappedSnapshot.clear()
+            RecentAlbumsStore.clear()
+            WidgetCenter.shared.reloadAllTimelines()
+            return
+        }
+        if WidgetSettings.widgetEnabled(PrimuseConstants.widgetListeningStatsEnabledKey) {
+            publishStats()
+        } else {
+            ListeningStatsSnapshot.clear()
+        }
+        if WidgetSettings.widgetEnabled(PrimuseConstants.widgetWrappedEnabledKey) {
+            publishWrapped()
+        } else {
+            WrappedSnapshot.clear()
+        }
+        if WidgetSettings.widgetEnabled(PrimuseConstants.widgetSourcesEnabledKey) {
+            publishSources(sources)
+        } else {
+            SourcesSnapshot.clear()
+        }
+        if lyricsSharingEnabled {
+            Task { await publishLyrics(player: player, sourceManager: sourceManager) }
+        } else {
+            LyricsSnapshot.clear()
+        }
+        if !WidgetSettings.widgetEnabled(PrimuseConstants.widgetRecentAlbumsEnabledKey) {
+            RecentAlbumsStore.clear()
+        }
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    /// Settings-window safe subset that does not require `SourcesStore`.
+    static func publishFromSettings(
+        player: AudioPlayerService,
+        sourceManager: SourceManager
+    ) {
+        player.publishWidgetStateForMacWidgetSync()
+        if WidgetSettings.syncEnabled() {
+            if WidgetSettings.widgetEnabled(PrimuseConstants.widgetListeningStatsEnabledKey) {
+                publishStats()
+            } else {
+                ListeningStatsSnapshot.clear()
+            }
+            if WidgetSettings.widgetEnabled(PrimuseConstants.widgetWrappedEnabledKey) {
+                publishWrapped()
+            } else {
+                WrappedSnapshot.clear()
+            }
+        } else {
+            ListeningStatsSnapshot.clear()
+            WrappedSnapshot.clear()
+        }
+        if lyricsSharingEnabled {
+            Task { await publishLyrics(player: player, sourceManager: sourceManager) }
+        } else {
+            LyricsSnapshot.clear()
+        }
+        if !WidgetSettings.widgetEnabled(PrimuseConstants.widgetSourcesEnabledKey) {
+            SourcesSnapshot.clear()
+        }
+        if !WidgetSettings.widgetEnabled(PrimuseConstants.widgetRecentAlbumsEnabledKey) {
+            RecentAlbumsStore.clear()
+        }
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    static func publishStats() {
+        let store = PlayHistoryStore.shared
+        let summary = store.summary(in: .month)
+        let daily = store.dailyPlayCounts(in: .month).map(\.count)
+        let top = store.topSongs(in: .month, limit: 1).first
+        ListeningStatsSnapshot(
+            totalPlays: summary.totalPlays,
+            totalSeconds: summary.totalSec,
+            dailyCounts: Array(daily.suffix(30)),
+            topSongTitle: top?.title,
+            topSongArtist: top?.subtitle
+        ).save()
+    }
+
+    static func publishWrapped() {
+        let store = PlayHistoryStore.shared
+        let year = Calendar.current.component(.year, from: Date())
+        let summary = store.summary(in: .year)
+        WrappedSnapshot(
+            year: year,
+            totalHours: (summary.totalSec / 3600).rounded().finiteInt(),
+            topArtist: store.topArtists(in: .year, limit: 1).first?.title,
+            topSong: store.topSongs(in: .year, limit: 1).first?.title
+        ).save()
+    }
+
+    static func publishSources(_ sources: SourcesStore) {
+        let entries = sources.sources.map { source in
+            WidgetSourceEntry(
+                id: source.id,
+                name: source.name,
+                iconName: source.type.iconName,
+                songCount: source.songCount,
+                status: source.isEnabled ? .online : .disabled
+            )
+        }
+        SourcesSnapshot(
+            totalIndexed: entries.reduce(0) { $0 + $1.songCount },
+            sources: entries
+        ).save()
+    }
+
+    static func publishLyrics(player: AudioPlayerService, sourceManager: SourceManager) async {
+        guard lyricsSharingEnabled,
+              let song = player.currentSong else {
+            LyricsSnapshot.clear()
+            return
+        }
+        let artist = AppServices.shared.musicLibrary.artistDisplayName(for: song)
+            ?? song.artistName
+            ?? ""
+        let lines = await LyricsLoader.load(for: song, sourceManager: sourceManager)
+        guard lyricsSharingEnabled else {
+            LyricsSnapshot.clear()
+            return
+        }
+        // A slower load for the previous track must never clear or overwrite a
+        // newer snapshot that has already won the race.
+        guard player.currentSong?.id == song.id else { return }
+        guard !lines.isEmpty else { LyricsSnapshot.clear(); return }
+        let widgetLines = lines.map { WidgetLyricLine(time: $0.timestamp, text: $0.text) }
+        let now = player.currentTime
+        let anchor = WidgetLyricsPresentationPolicy.anchorIndex(
+            for: now,
+            in: widgetLines
+        )
+        let playback = PlaybackState.load()
+        let matchingCoverImageName = playback?.currentSongID == song.id
+            ? playback?.coverImageName
+            : nil
+        LyricsSnapshot(
+            songID: song.id,
+            title: song.title,
+            artist: artist,
+            coverImageName: matchingCoverImageName,
+            lines: widgetLines,
+            anchorIndex: anchor,
+            playbackPosition: now,
+            isPlaying: player.isPlaying,
+            writingDirection: LyricWritingDirectionPolicy.resolve(in: lines)
+        ).save()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+}
+
+private struct MacWidgetGalleryPreview: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            macWidgetSection(Lz("Now Playing · Playing"), sub: Lz("3 Sizes · Glanceable + Interactive")) {
+                MacWidgetTile(label: Lz("Small 155")) { MacWidgetNPSmallPreview() }
+                MacWidgetTile(label: Lz("Medium 342×155")) { MacWidgetNPMediumPreview() }
+                MacWidgetTile(label: Lz("Large 342×342")) { MacWidgetNPLargePreview() }
+            }
+
+            macWidgetSection(Lz("Live Data"), sub: Lz("Lyrics / Stats / Music Sources")) {
+                MacWidgetTile(label: Lz("Lyrics · Medium")) { MacWidgetLyricsPreview() }
+                MacWidgetTile(label: Lz("Listening Stats · Medium")) { MacWidgetStatsPreview() }
+                MacWidgetTile(label: Lz("Music Sources · Small")) { MacWidgetSourcesPreview() }
+            }
+
+            macWidgetSection(Lz("Sidebar Widget"), sub: Lz("Compact info · Great for stacking in a screen corner")) {
+                MacWidgetTile(label: Lz("Recently Played · Small")) { MacWidgetRecentPreview() }
+                MacWidgetTile(label: Lz("Year in Review · Medium")) { MacWidgetWrappedPreview() }
+                MacWidgetTile(label: Lz("Dark · Medium")) { MacWidgetNPMediumPreview(dark: true) }
+            }
+        }
+    }
+
+    private func macWidgetSection<Content: View>(_ label: String,
+                                                 sub: String,
+                                                 @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(verbatim: label)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(PMColor.text)
+                Text(verbatim: sub)
+                    .font(.system(size: 11))
+                    .foregroundStyle(PMColor.textFaint)
+                Rectangle()
+                    .fill(PMColor.divider)
+                    .frame(height: 0.5)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 18) {
+                    content()
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+}
+
+private struct MacWidgetTile<Content: View>: View {
+    let label: String
+    private let content: Content
+
+    init(label: String, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            content
+            Text(verbatim: label)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(PMColor.textFaint)
+                .lineLimit(1)
+        }
+        .fixedSize()
+    }
+}
+
+private struct MacWidgetShell<Content: View>: View {
+    enum Size {
+        case small, medium, large
+
+        /// 真实 macOS widget 点尺寸 (Apple HIG): small 155²、medium 342×155、
+        /// large 342²。内部内容(封面 127、字号等)都是按这个真尺寸画的, 所以 shell
+        /// 必须用真尺寸, 否则内容会溢出。整块再用 previewScale 等比缩小放进设置页。
+        var width: CGFloat {
+            switch self {
+            case .small: return 155
+            case .medium, .large: return 342
+            }
+        }
+
+        var height: CGFloat {
+            switch self {
+            case .small, .medium: return 155
+            case .large: return 342
+            }
+        }
+    }
+
+    var size: Size
+    var dark = false
+    var padding: CGFloat = 14
+    private let content: Content
+
+    /// 设置页预览缩放 — 真尺寸太大, 等比缩到 ~0.66 让一行能放下 2~3 个 medium。
+    private let previewScale: CGFloat = 0.66
+
+    init(size: Size, dark: Bool = false, padding: CGFloat = 14, @ViewBuilder content: () -> Content) {
+        self.size = size
+        self.dark = dark
+        self.padding = padding
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack {
+            (dark ? Color(red: 0.11, green: 0.095, blue: 0.085).opacity(0.82) : Color.white.opacity(0.80))
+            LinearGradient(
+                colors: [
+                    PMColor.brand.opacity(dark ? 0.28 : 0.10),
+                    Color.clear,
+                    Color(red: 0.16, green: 0.29, blue: 0.43).opacity(dark ? 0.28 : 0.08),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            content
+                .padding(padding)
+        }
+        .foregroundStyle(dark ? Color(red: 0.95, green: 0.93, blue: 0.91) : Color(red: 0.12, green: 0.11, blue: 0.10))
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(dark ? Color.white.opacity(0.10) : Color.white.opacity(0.50), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.16), radius: 18, y: 10)
+        // 真尺寸渲染完再等比缩小, 内容比例保持精确, 占位也按缩放后尺寸预留。
+        .scaleEffect(previewScale)
+        .frame(width: size.width * previewScale, height: size.height * previewScale)
+    }
+}
+
+private struct MacWidgetNPSmallPreview: View {
+    var body: some View {
+        MacWidgetShell(size: .small, padding: 0) {
+            ZStack(alignment: .bottomLeading) {
+                MacWidgetCover(radius: 0, glyph: "猿")
+                LinearGradient(colors: [.clear, .black.opacity(0.78)], startPoint: .top, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Lz("Throwback Mix"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(Lz("Yu Xi Tan"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.80))
+                        .lineLimit(1)
+                    MacWidgetProgress(value: 0.36, tint: .white, height: 2)
+                }
+                .padding(12)
+                MacWidgetRoundButton(symbol: "pause.fill", size: 30, dark: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            }
+        }
+    }
+}
+
+private struct MacWidgetNPMediumPreview: View {
+    var dark = false
+
+    var body: some View {
+        MacWidgetShell(size: .medium, dark: dark, padding: 14) {
+            HStack(spacing: 12) {
+                MacWidgetCover(radius: 10, glyph: "猿")
+                    .frame(width: 127, height: 127)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(Lz("Now Playing · FLAC"))
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(faint)
+                    Text(Lz("Throwback Mix"))
+                        .font(.system(size: 14, weight: .bold))
+                        .lineLimit(1)
+                        .padding(.top, 4)
+                    Text(Lz("Yu Xi Tan"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(muted)
+                        .lineLimit(1)
+                    Text(Lz("Shui Diao Ge Tou"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(faint)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 8)
+                    MacWidgetProgress(value: 0.36, tint: PMColor.brand, height: 2.5)
+                        .padding(.bottom, 8)
+                    HStack {
+                        MacWidgetRoundButton(symbol: "heart.fill", size: 26, primary: true, dark: dark)
+                        Spacer()
+                        MacWidgetRoundButton(symbol: "backward.fill", size: 26, dark: dark)
+                        MacWidgetRoundButton(symbol: "pause.fill", size: 32, primary: true, dark: dark)
+                        MacWidgetRoundButton(symbol: "forward.fill", size: 26, dark: dark)
+                        Spacer()
+                        MacWidgetRoundButton(symbol: "ellipsis", size: 26, dark: dark)
+                    }
+                }
+            }
+        }
+    }
+
+    private var muted: Color { dark ? .white.opacity(0.72) : .black.opacity(0.58) }
+    private var faint: Color { dark ? .white.opacity(0.55) : .black.opacity(0.44) }
+}
+
+private struct MacWidgetNPLargePreview: View {
+    var body: some View {
+        MacWidgetShell(size: .large, padding: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    MacWidgetCover(radius: 10, glyph: "猿")
+                        .frame(width: 88, height: 88)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(Lz("Now Playing"))
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.black.opacity(0.50))
+                        Text(Lz("Throwback Mix"))
+                            .font(.system(size: 16, weight: .bold))
+                            .lineLimit(1)
+                        Text(Lz("Yu Xi Tan"))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.black.opacity(0.65))
+                        Text(Lz("Shui Diao Ge Tou · FLAC 988 kbps"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.black.opacity(0.45))
+                            .lineLimit(1)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(Lz("When will the moon be bright"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.black.opacity(0.42))
+                    Text(Lz("Wine in hand, I ask the sky"))
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(PMColor.brand)
+                    Text(Lz("Unknown halls of heaven"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.black.opacity(0.42))
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
+
+                MacWidgetProgress(value: 0.36, tint: PMColor.brand, height: 3)
+                HStack {
+                    MacWidgetRoundButton(symbol: "shuffle", size: 28)
+                    Spacer()
+                    MacWidgetRoundButton(symbol: "backward.fill", size: 32)
+                    MacWidgetRoundButton(symbol: "pause.fill", size: 42, primary: true)
+                    MacWidgetRoundButton(symbol: "forward.fill", size: 32)
+                    Spacer()
+                    MacWidgetRoundButton(symbol: "repeat", size: 28)
+                }
+            }
+        }
+    }
+}
+
+private struct MacWidgetLyricsPreview: View {
+    var body: some View {
+        MacWidgetShell(size: .medium, padding: 0) {
+            ZStack {
+                LinearGradient(colors: [PMColor.brand.opacity(0.20), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 8) {
+                        MacWidgetCover(radius: 4, glyph: "猿")
+                            .frame(width: 22, height: 22)
+                        Text(Lz("Throwback Mix"))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .lineLimit(1)
+                        Text(Lz("· Yu Xi Tan"))
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.black.opacity(0.50))
+                            .lineLimit(1)
+                    }
+                    .padding(.bottom, 8)
+
+                    Text(Lz("When will the moon be bright"))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.black.opacity(0.45))
+                        .padding(.bottom, 5)
+                    Text(Lz("Wine in hand, I ask the sky"))
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(PMColor.brand)
+                        .padding(.bottom, 5)
+                    Text(Lz("Unknown halls of heaven"))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.black.opacity(0.45))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .padding(16)
+            }
+        }
+    }
+}
+
+private struct MacWidgetStatsPreview: View {
+    private let values = [1, 0, 4, 2, 8, 12, 5, 0, 3, 6, 9, 1, 0, 4, 7, 5, 10, 12, 3, 6, 4, 0, 8, 11, 2, 5, 9, 1, 4, 6]
+
+    var body: some View {
+        MacWidgetShell(size: .medium) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(Lz("This Month's Listening"))
+                        .font(.system(size: 11, weight: .bold))
+                    Spacer()
+                    Text(Lz("Last 30 Days"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.black.opacity(0.48))
+                }
+                HStack(alignment: .top, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("246")
+                            .font(.system(size: 30, weight: .bold, design: .monospaced))
+                            .foregroundStyle(PMColor.brand)
+                        Text(Lz("Tracks Played"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.black.opacity(0.52))
+                        Text(String(format: String(localized: "widget_preview_hours_format"), 17))
+                            .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                            .padding(.top, 8)
+                        Text(Lz("Total Duration"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.black.opacity(0.52))
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(9), spacing: 3), count: 15), spacing: 3) {
+                            ForEach(Array(values.enumerated()), id: \.offset) { _, value in
+                                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                    .fill(value == 0 ? Color.black.opacity(0.06) : PMColor.brand.opacity(0.18 + Double(value) * 0.045))
+                                    .frame(width: 9, height: 9)
+                            }
+                        }
+                        Text(Lz("Most Played This Month"))
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(Lz("1. Ten Years · Eason Chan"))
+                            .font(.system(size: 10.5))
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct MacWidgetRecentPreview: View {
+    var body: some View {
+        // 标题 + 56pt 方格在 155 的 small 里会竖向溢出。改成铺满的 2×2 网格,
+        // 封面随宽度自适应(≈64pt), 标题交给下方 MacWidgetTile 的尺寸标签承担。
+        MacWidgetShell(size: .small, padding: 10) {
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
+                spacing: 6
+            ) {
+                ForEach(0..<4, id: \.self) { idx in
+                    MacWidgetCover(
+                        radius: 8,
+                        glyph: idx == 0 ? "猿" : "",
+                        systemImage: idx == 0 ? nil : "music.note"
+                    )
+                    .aspectRatio(1, contentMode: .fit)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+}
+
+private struct MacWidgetSourcesPreview: View {
+    var body: some View {
+        MacWidgetShell(size: .small) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text(Lz("Music Sources"))
+                        .font(.system(size: 10.5, weight: .bold))
+                    Spacer()
+                    Text("4")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.black.opacity(0.45))
+                }
+                Text("10,737")
+                    .font(.system(size: 24, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color(red: 0.24, green: 0.60, blue: 0.31))
+                    .padding(.top, 10)
+                Text(Lz("Tracks Indexed"))
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.black.opacity(0.56))
+                    .padding(.bottom, 8)
+                ForEach([Lz("Baidu Netdisk"), "Apple Music", "cqNas", "Synology"], id: \.self) { source in
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(source == "Apple Music" ? Color.purple : source == "cqNas" ? Color.blue : PMColor.brand)
+                            .frame(width: 6, height: 6)
+                        Text(verbatim: source)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct MacWidgetWrappedPreview: View {
+    var body: some View {
+        MacWidgetShell(size: .medium, dark: true, padding: 0) {
+            ZStack {
+                LinearGradient(colors: [PMColor.brand, Color(red: 0.16, green: 0.11, blue: 0.22), Color.black], startPoint: .topLeading, endPoint: .bottomTrailing)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(Lz("yearly_wrapped_brand"))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.70))
+                    Text(Lz("Your 2026\n847 hours listened"))
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.top, 6)
+                    Spacer()
+                    Label(Lz("View Year in Review"), systemImage: "sparkles")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.86))
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+private struct MacWidgetCover: View {
+    var radius: CGFloat
+    /// 文本字形 (品牌字"猿"用这个)。需要真实图标时改传 systemImage。
+    var glyph: String = ""
+    /// SF Symbol 名 —— 设置后优先渲染图标 (如音乐封面用 music.note), 不再用文本字形。
+    var systemImage: String? = nil
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [PMColor.brand, Color(red: 0.15, green: 0.42, blue: 0.45), Color(red: 0.94, green: 0.70, blue: 0.35)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Circle()
+                .strokeBorder(Color.white.opacity(0.25), lineWidth: 3)
+                .frame(width: 66, height: 66)
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.88))
+            } else {
+                Text(verbatim: glyph)
+                    .font(.system(size: glyph == "猿" ? 28 : 22, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.88))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+    }
+}
+
+private struct MacWidgetRoundButton: View {
+    var symbol: String
+    var size: CGFloat
+    var primary = false
+    var dark = false
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: max(11, size * 0.42), weight: .semibold))
+            .foregroundStyle(primary ? (dark ? Color.black : Color.white) : (dark ? Color.white.opacity(0.88) : Color.black.opacity(0.82)))
+            .frame(width: size, height: size)
+            .background(primary ? PMColor.brand : (dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)), in: .circle)
+    }
+}
+
+private struct MacWidgetProgress: View {
+    var value: CGFloat
+    var tint: Color
+    var height: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(tint.opacity(0.22))
+                Capsule()
+                    .fill(tint)
+                    .frame(width: max(0, geo.size.width * min(max(value, 0), 1)))
+            }
+        }
+        .frame(height: height)
+    }
+}
+
+// MARK: - ST-08 iCloud
+
+private struct MacSTCloudView: View {
+    @Environment(CloudKitSyncService.self) private var sync
+    @AppStorage("primuse.iCloudSyncEnabled") private var enabled: Bool = true
+    @AppStorage(CloudSyncChannel.playlists.defaultsKey) private var syncPlaylists: Bool = true
+    @AppStorage(CloudSyncChannel.sources.defaultsKey) private var syncSources: Bool = true
+    @AppStorage(CloudSyncChannel.playbackHistory.defaultsKey) private var syncPlaybackHistory: Bool = true
+    @AppStorage(CloudSyncChannel.settings.defaultsKey) private var syncSettings: Bool = true
+    @AppStorage(CloudSyncChannel.credentials.defaultsKey) private var syncCredentials: Bool = true
+    @AppStorage(CloudSyncChannel.listeningStats.defaultsKey) private var syncListeningStats: Bool = true
+    @State private var isSyncingNow = false
+    @State private var familyEnabled = CloudKitSyncService.familySharingEnabled
+    @State private var familyBusy = false
+    @State private var familyError: String?
+    @State private var pendingShareURL: URL?
+
+    var body: some View {
+        MacSTSection(String(localized: "icloud_sync_title")) {
+            MacSTGroup {
+                MacSTRow(String(localized: "icloud_sync_enabled"),
+                         hint: String(localized: "icloud_sync_footer"),
+                         divider: false) {
+                    MacSTToggle(isOn: Binding(
+                        get: { enabled },
+                        set: { newValue in
+                            enabled = newValue
+                            Task {
+                                if newValue { await sync.start() } else { sync.stop() }
+                            }
+                        }
+                    ))
+                    .disabled(!sync.isAvailableInCurrentBuild)
+                }
+                .settingsAnchor("cloud.enabled")
+                MacSTRow(Lz("Sync Status")) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
+                    MacSTInfoText(text: statusText, color: statusColor)
+                    if let last = sync.lastSyncedAt {
+                        MacSTInfoText(text: last.formatted(.relative(presentation: .named)))
+                    }
+                    if case .accountUnavailable(.noAccount) = sync.status {
+                        MacSTButton(title: Lz("Open System Settings"), systemImage: "gear") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.systempreferences.AppleIDSettings") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                    MacSTButton(title: isSyncingNow ? Lz("Syncing…") : Lz("Sync Now"),
+                                systemImage: "arrow.triangle.2.circlepath",
+                                prominent: true) {
+                        isSyncingNow = true
+                        Task {
+                            await sync.syncNow()
+                            isSyncingNow = false
+                        }
+                    }
+                    .disabled(isSyncingNow || !enabled || !sync.isAvailableInCurrentBuild)
+                }
+                .settingsAnchor("cloud.status")
+            }
+        }
+
+        MacSTSection(String(localized: "synced_items"), hint: String(localized: "synced_items_footer")) {
+            MacSTGroup {
+                channelRow(String(localized: "synced_playlists"), channel: .playlists, isOn: $syncPlaylists, divider: false)
+                .settingsAnchor("cloud.playlists")
+                channelRow(String(localized: "synced_sources"), channel: .sources, isOn: $syncSources)
+                .settingsAnchor("cloud.sources")
+                channelRow(String(localized: "synced_playback_history"), channel: .playbackHistory, isOn: $syncPlaybackHistory)
+                .settingsAnchor("cloud.playbackHistory")
+                channelRow(String(localized: "synced_settings"), channel: .settings, isOn: $syncSettings)
+                .settingsAnchor("cloud.settings")
+                channelRow(String(localized: "synced_credentials"), channel: .credentials, isOn: $syncCredentials)
+                .settingsAnchor("cloud.credentials")
+                channelRow(String(localized: "stats_title"), channel: .listeningStats, isOn: $syncListeningStats)
+                .settingsAnchor("cloud.listeningStats")
+            }
+        }
+
+        MacSTSection(String(localized: "family_sharing_title")) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(systemName: familyEnabled ? "person.2.badge.gearshape.fill" : "person.2.badge.plus")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(familyEnabled ? PMColor.ok : PMColor.brand)
+                        .frame(width: 36, height: 36)
+                        .background((familyEnabled ? PMColor.ok : PMColor.brand).opacity(0.14), in: .rect(cornerRadius: 9))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: familyEnabled ? Lz("Family Sharing Enabled") : Lz("Create Family Shared Library"))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(PMColor.text)
+                        Text(verbatim: familyEnabled
+                             ? Lz("Share playlists, smart playlists, and family music sources")
+                             : String(localized: "family_sharing_footer"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(PMColor.textMuted)
+                    }
+
+                    Spacer()
+
+                    if familyEnabled {
+                        MacSTButton(title: familyBusy ? Lz("Processing…") : Lz("Invite…"), systemImage: "square.and.arrow.up") {
+                            Task { await inviteFamily() }
+                        }
+                        .disabled(familyBusy || !sync.isAvailableInCurrentBuild)
+                        MacSTButton(title: Lz("Off"), destructive: true) {
+                            Task { await disableFamily() }
+                        }
+                        .disabled(familyBusy || !sync.isAvailableInCurrentBuild)
+                    } else {
+                        MacSTButton(title: familyBusy ? Lz("Creating…") : Lz("Create"), systemImage: "person.2.badge.plus", prominent: true) {
+                            Task { await inviteFamily() }
+                        }
+                        .disabled(familyBusy || !sync.isAvailableInCurrentBuild)
+                    }
+                }
+
+                if let familyError {
+                    Text(verbatim: familyError)
+                        .font(PMFont.caption)
+                        .foregroundStyle(PMColor.bad)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(14)
+            .background(PMColor.bgElev, in: .rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+            }
+            .background(MacSTSharePickerAnchor(url: $pendingShareURL))
+        }
+        .settingsAnchor("family.create")
+    }
+
+    private func channelRow(_ label: String,
+                            channel: CloudSyncChannel,
+                            isOn: Binding<Bool>,
+                            divider: Bool = true) -> some View {
+        MacSTRow(label, divider: divider) {
+            MacSTToggle(isOn: Binding(
+                get: { isOn.wrappedValue },
+                set: { newValue in
+                    isOn.wrappedValue = newValue
+                    guard newValue, enabled else { return }
+                    Task { await sync.catchUp(channel: channel) }
+                }
+            ))
+            .disabled(!enabled || !sync.isAvailableInCurrentBuild)
+        }
+    }
+
+    private var statusText: String {
+        switch sync.status {
+        case .disabled: return String(localized: "status_disabled")
+        case .unavailableInBuild: return String(localized: "status_icloud_unavailable_in_build")
+        case .idle: return String(localized: "status_idle")
+        case .syncing: return String(localized: "status_syncing")
+        case .upToDate: return String(localized: "status_up_to_date")
+        case .error(let message): return message
+        case .accountUnavailable(let reason): return accountReasonText(reason)
+        case .quotaExceeded: return String(localized: "status_quota_exceeded")
+        case .networkUnavailable: return String(localized: "status_network_unavailable")
+        }
+    }
+
+    private var statusColor: Color {
+        switch sync.status {
+        case .upToDate: return PMColor.ok
+        case .syncing: return PMColor.brand
+        case .error, .quotaExceeded: return PMColor.bad
+        case .accountUnavailable, .networkUnavailable, .unavailableInBuild: return PMColor.warn
+        case .disabled, .idle: return PMColor.textMuted
+        }
+    }
+
+    private func accountReasonText(_ reason: AccountUnavailableReason) -> String {
+        switch reason {
+        case .noAccount: return String(localized: "status_no_icloud_account")
+        case .restricted: return String(localized: "status_icloud_restricted")
+        case .temporarilyUnavailable: return String(localized: "status_icloud_temporarily_unavailable")
+        case .unknown: return String(localized: "status_icloud_unknown")
+        }
+    }
+
+    @MainActor
+    private func inviteFamily() async {
+        familyBusy = true
+        familyError = nil
+        defer { familyBusy = false }
+        do {
+            let share = try await sync.enableFamilySharing()
+            familyEnabled = true
+            if let url = share.url {
+                pendingShareURL = url
+            } else {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                pendingShareURL = share.url
+            }
+        } catch {
+            familyError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func disableFamily() async {
+        familyBusy = true
+        defer { familyBusy = false }
+        await sync.disableFamilySharing()
+        familyEnabled = false
+    }
+}
+
+private struct MacSTSharePickerAnchor: NSViewRepresentable {
+    @Binding var url: URL?
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let url else { return }
+        DispatchQueue.main.async {
+            let picker = NSSharingServicePicker(items: [url])
+            let anchor = NSApp.keyWindow?.contentView ?? nsView
+            picker.show(relativeTo: .zero, of: anchor, preferredEdge: .minY)
+            self.url = nil
+        }
+    }
+}
+
+// MARK: - ST-12 Theme
+
+private struct MacSTThemeView: View {
+    @AppStorage(QuickAccessCoverStyle.storageKey) private var quickAccessCoverStyle = QuickAccessCoverStyle.automatic
+    @State private var preferences = MacUIPreferences.shared
+    @Environment(ThemeService.self) private var themeService
+    @Environment(AudioPlayerService.self) private var player
+    @State private var autoDetectMaterial = true
+    @AppStorage("primuse.home.showRadio") private var showRadioOnHome = true
+    @AppStorage("primuse.home.showRecentlyAdded") private var showRecentlyAddedOnHome = true
+    @AppStorage(LibrarySongBrowseModePreference.storageKey)
+    private var libraryBrowseModeRawValue = LibrarySongBrowseMode.flat.rawValue
+    @AppStorage(LibraryDisplayConfiguration.quickAccessLimitKey)
+    private var configuredQuickAccessLimit = LibraryDisplayConfiguration.defaultQuickAccessLimit
+    @AppStorage(LibraryDisplayConfiguration.sectionOrderKey)
+    private var librarySectionOrderRawValue = ""
+    @AppStorage(LibraryDisplayConfiguration.hiddenSectionsKey)
+    private var hiddenLibrarySectionsRawValue = ""
+    @AppStorage(AIRecommendationIntentStoragePolicy.storageKey)
+    private var customRecommendationIntentsRawValue = ""
+    @AppStorage(AIRecommendationIntentPresetVisibilityPolicy.storageKey)
+    private var hiddenRecommendationPresetsRawValue = ""
+    @AppStorage(AIRecommendationIntentSelectionPolicy.storageKey)
+    private var selectedRecommendationIntentID =
+        AIRecommendationIntentSelectionPolicy.defaultSelectionID
+    @State private var customRecommendationIntentTitle = ""
+    @State private var customRecommendationIntentPrompt = ""
+    @State private var inspectedRecommendationIntent: AIRecommendationIntentDetails?
+    @AppStorage(FullscreenPlayerEffect.storageKey)
+    private var fullscreenEffectRawValue = FullscreenPlayerEffect.defaultValue.rawValue
+    @AppStorage(PlayerAppearancePreferences.showsVolumeBarKey)
+    private var showsPlayerVolumeBar = PlayerAppearancePreferences.showsVolumeBarByDefault
+    @AppStorage(PlayerAppearancePreferences.animatedArtworkEnabledKey)
+    private var animatedArtworkEnabled = PlayerAppearancePreferences.animatedArtworkEnabledByDefault
+    @AppStorage(PlayerAppearancePreferences.animatedArtworkUnmeteredOnlyKey)
+    private var animatedArtworkUnmeteredOnly = PlayerAppearancePreferences.animatedArtworkUnmeteredOnlyByDefault
+    @AppStorage(PlayerAppearancePreferences.motionArtworkServiceEnabledKey)
+    private var motionArtworkServiceEnabled = PlayerAppearancePreferences.motionArtworkServiceEnabledByDefault
+    @AppStorage(PlayerAppearancePreferences.motionArtworkServiceEndpointKey)
+    private var motionArtworkServiceEndpoint = PlayerAppearancePreferences.motionArtworkServiceEndpointByDefault
+
+    private var swatches: [(hex: String, name: String, sub: String, color: Color)] {
+        AppThemePreferences.swatches.map { swatch in
+            (
+                hex: "#\(swatch.id.lowercased())",
+                name: PMString(swatch.localizationKey),
+                sub: "",
+                color: Color(hex: swatch.id)
+            )
+        }
+    }
+
+    /// 把色板 hex ("#c96442") 归一成存储用格式 (大写无 #)。
+    private func normHex(_ hex: String) -> String {
+        hex.replacingOccurrences(of: "#", with: "").uppercased()
+    }
+
+    private var defaultFlatBrowseBinding: Binding<Bool> {
+        Binding(
+            get: {
+                LibrarySongBrowseMode(rawValue: libraryBrowseModeRawValue) == .flat
+            },
+            set: { isEnabled in
+                libraryBrowseModeRawValue = LibrarySongBrowseModePreference
+                    .mode(flatViewEnabled: isEnabled)
+                    .rawValue
+            }
+        )
+    }
+
+    private var quickAccessLimit: Int {
+        LibraryDisplayConfiguration.normalizedQuickAccessLimit(configuredQuickAccessLimit)
+    }
+
+    private var quickAccessLimitBinding: Binding<Double> {
+        Binding(
+            get: { Double(quickAccessLimit) },
+            set: { configuredQuickAccessLimit = Int($0.rounded()) }
+        )
+    }
+
+    private func setThemeColorMode(_ mode: AppThemeColorMode) {
+        guard preferences.themeColorMode != mode else { return }
+        preferences.themeColorMode = mode
+        themeService.setColorMode(mode)
+        if mode == .automatic {
+            refreshThemeFromCurrentSong()
+        } else if !preferences.coverDrivenAmbient {
+            themeService.resetToDefault()
+        }
+    }
+
+    private func refreshThemeFromCurrentSong() {
+        guard let song = player.currentSong else {
+            themeService.resetToDefault()
+            return
+        }
+        themeService.updateFromCoverArt(
+            fileName: song.coverArtFileName,
+            songID: song.id,
+            appleMusicID: song.sourceID == AppleMusicLibraryService.systemSourceID
+                ? song.filePath
+                : nil
+        )
+    }
+
+    private var librarySectionOrder: [LibrarySection] {
+        LibraryDisplayConfiguration.decodeSectionOrder(librarySectionOrderRawValue)
+    }
+
+    private var customRecommendationIntents: [AICustomRecommendationIntent] {
+        AIRecommendationIntentStoragePolicy.decode(customRecommendationIntentsRawValue)
+    }
+
+    private var visibleRecommendationPresets: [AIRecommendationIntentPreset] {
+        AIRecommendationIntentPresetVisibilityPolicy.visiblePresets(
+            hiddenRecommendationPresetsRawValue
+        )
+    }
+
+    var body: some View {
+        MacSTSection(Lz("Appearance")) {
+            MacSTGroup {
+                MacSTRow(Lz("Theme"), block: true) {
+                    HStack(spacing: 8) {
+                        MacThemeChoiceCard(title: PMString("ext.tv.settings.appearance.light"), icon: "sun.max", selected: preferences.colorScheme == .light) {
+                            preferences.colorScheme = .light
+                        }
+                        MacThemeChoiceCard(title: PMString("ext.tv.settings.appearance.dark"), icon: "moon", selected: preferences.colorScheme == .dark) {
+                            preferences.colorScheme = .dark
+                        }
+                        MacThemeChoiceCard(title: PMString("ext.tv.settings.appearance.system"), icon: "desktopcomputer", selected: preferences.colorScheme == .system) {
+                            preferences.colorScheme = .system
+                        }
+                    }
+                }
+                .settingsAnchor("appearance.scheme")
+                MacSTRow(String(localized: "fullscreen_effect_settings_title"),
+                         hint: Lz("Shown when the player window goes full screen"),
+                         divider: false,
+                         block: true) {
+                    MacFullscreenEffectGallery(
+                        selection: $fullscreenEffectRawValue,
+                        palette: ImmersiveArtworkPalette(
+                            primary: themeService.accentColor,
+                            secondary: themeService.secondaryDarkAccent
+                        )
+                    )
+                }
+                .settingsAnchor("appearance.fullscreenEffect")
+            }
+        }
+
+        MacSTSection(String(localized: "player_appearance_title")) {
+            MacSTGroup {
+                MacSTRow(
+                    String(localized: "player_animated_artwork")
+                ) {
+                    MacSTToggle(isOn: $animatedArtworkEnabled)
+                        .accessibilityHint(Text("player_animated_artwork_description"))
+                }
+                .settingsAnchor("appearance.animatedArtwork")
+                MacSTRow(
+                    String(localized: "player_animated_artwork_unmetered_only")
+                ) {
+                    MacSTToggle(isOn: $animatedArtworkUnmeteredOnly)
+                        .accessibilityHint(Text("player_animated_artwork_unmetered_only_description"))
+                        .disabled(!animatedArtworkEnabled)
+                }
+                .settingsAnchor("appearance.animatedArtworkUnmeteredOnly")
+                MacSTRow(
+                    String(localized: "motion_artwork_service_enabled"),
+                    hint: String(localized: "motion_artwork_service_description")
+                ) {
+                    MacSTToggle(isOn: $motionArtworkServiceEnabled)
+                }
+                .settingsAnchor("appearance.motionArtworkService")
+                MacSTRow(
+                    String(localized: "motion_artwork_service_endpoint"),
+                    divider: false,
+                    block: true
+                ) {
+                    MacSTTextField(
+                        text: $motionArtworkServiceEndpoint,
+                        prompt: "https://artwork.example.com/v1/lookup",
+                        width: 520
+                    )
+                    .disabled(!motionArtworkServiceEnabled)
+                }
+                .settingsAnchor("appearance.motionArtworkEndpoint")
+                MacSTRow(
+                    String(localized: "player_volume_bar")
+                ) {
+                    MacSTToggle(isOn: $showsPlayerVolumeBar)
+                        .accessibilityHint(Text("player_volume_bar_description"))
+                }
+                .settingsAnchor("appearance.volumeBar")
+            }
+        }
+
+        MacSTSection(Lz("Material")) {
+            HStack(spacing: 8) {
+                MacMaterialCard(
+                    title: String(localized: "material_liquid_glass"),
+                    sub: String(localized: "material_liquid_glass_desc"),
+                    macos: String(localized: "material_macos_26_or_later"),
+                    selected: preferences.appearance == .glass
+                ) {
+                    preferences.appearance = .glass
+                }
+                MacMaterialCard(
+                    title: String(localized: "material_classic"),
+                    sub: String(localized: "material_classic_desc"),
+                    macos: String(localized: "material_macos_14_or_later"),
+                    selected: preferences.appearance == .classic
+                ) {
+                    preferences.appearance = .classic
+                }
+            }
+
+            MacSTGroup {
+                MacSTRow(Lz("Detect macOS version automatically at launch"),
+                         hint: String(localized: "material_auto_desc"),
+                         divider: false) {
+                    MacSTToggle(isOn: $autoDetectMaterial)
+                }
+                .settingsAnchor("appearance.autoMaterial")
+            }
+        }
+        .settingsAnchor("appearance.material")
+        .onAppear { FullscreenPlayerEffectSync.shared.install() }
+        .onChange(of: fullscreenEffectRawValue) { _, rawValue in
+            guard let effect = FullscreenPlayerEffect(rawValue: rawValue) else { return }
+            FullscreenPlayerEffectSync.shared.select(effect)
+        }
+
+        MacSTSection(Lz("Brand Color")) {
+            MacSTGroup {
+                MacSTRow(String(localized: "theme_color_mode"), block: true) {
+                    HStack(spacing: 8) {
+                        MacThemeChoiceCard(
+                            title: String(localized: "theme_color_mode_auto"),
+                            icon: "photo.on.rectangle.angled",
+                            selected: preferences.themeColorMode == .automatic
+                        ) {
+                            setThemeColorMode(.automatic)
+                        }
+                        MacThemeChoiceCard(
+                            title: String(localized: "theme_color_mode_fixed"),
+                            icon: "paintpalette",
+                            selected: preferences.themeColorMode == .fixed
+                        ) {
+                            setThemeColorMode(.fixed)
+                        }
+                    }
+                }
+                .settingsAnchor("appearance.themeMode")
+            }
+
+            MacSTGroup {
+                ForEach(Array(swatches.enumerated()), id: \.offset) { index, swatch in
+                    MacBrandSwatchRow(
+                        swatch: swatch,
+                        selected: preferences.themeColorMode == .fixed
+                            && normHex(swatch.hex) == preferences.brandColorHex,
+                        divider: index != 0
+                    ) {
+                        setThemeColorMode(.fixed)
+                        preferences.brandColorHex = normHex(swatch.hex)
+                        // 同步 ambient fallback, 让 NowPlaying / 桌面歌词没有封面取色时
+                        // 也跟着换成新品牌色。
+                        themeService.setBaseAccent(swatch.color)
+                    }
+                }
+            }
+        }
+        .settingsAnchor("appearance.palette")
+
+        MacSTSection(PMString("ext.tv.settings.coverColor")) {
+            MacSTGroup {
+                MacSTRow(PMString("ext.tv.settings.coverColor"), hint: Lz("Use artwork palette for NowPlaying / Mini / Desktop Lyrics"), divider: false) {
+                    MacSTToggle(isOn: Binding(
+                        get: { preferences.coverDrivenAmbient },
+                        set: {
+                            preferences.coverDrivenAmbient = $0
+                            themeService.setCoverDrivenAmbient($0)
+                            if $0, let song = player.currentSong {
+                                themeService.updateFromCoverArt(
+                                    fileName: song.coverArtFileName,
+                                    songID: song.id,
+                                    appleMusicID: song.sourceID == AppleMusicLibraryService.systemSourceID
+                                        ? song.filePath
+                                        : nil
+                                )
+                            } else if !$0, preferences.themeColorMode == .fixed {
+                                themeService.resetToDefault()
+                            }
+                        }
+                    ))
+                }
+                .settingsAnchor("appearance.coverAmbient")
+                MacSTRow(PMString("ext.tv.settings.ambientIntensity"), divider: true) {
+                    MacSTSlider(
+                        value: Binding(
+                            get: { preferences.ambientStrength * 100 },
+                            set: { preferences.ambientStrength = $0 / 100 }
+                        ),
+                        in: 0...100,
+                        formatter: { String(format: "%.0f%%", $0) }
+                    )
+                }
+                .settingsAnchor("appearance.ambientStrength")
+            }
+        }
+
+        MacSTSection(String(localized: "app_icon")) {
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+                spacing: 16
+            ) {
+                ForEach(MacAppIcon.all) { icon in
+                    MacAppIconCell(icon: icon, selected: preferences.appIconID == icon.id) {
+                        preferences.appIconID = icon.id
+                    }
+                }
+            }
+        }
+        .settingsAnchor("appearance.appIcon")
+
+        MacSTSection(String(localized: "home_settings_title")) {
+            MacSTGroup {
+                MacSTRow(
+                    String(localized: "radio_home_visibility"),
+                    divider: false
+                ) {
+                    MacSTToggle(isOn: $showRadioOnHome)
+                        .accessibilityHint(Text("radio_home_visibility_description"))
+                }
+                .settingsAnchor("home.radio")
+                MacSTRow(HomeDiscoveryText.string("recent_albums")) {
+                    MacSTToggle(isOn: $showRecentlyAddedOnHome)
+                }
+                .settingsAnchor("home.recentlyAdded")
+            }
+        }
+
+        MacSTSection(String(localized: "library_display_settings_title")) {
+            MacSTGroup {
+                MacSTRow(
+                    String(localized: "library_quick_access_count"),
+                    divider: false
+                ) {
+                    MacSTSlider(
+                        value: quickAccessLimitBinding,
+                        in: Double(LibraryDisplayConfiguration.quickAccessLimitRange.lowerBound)...Double(
+                            LibraryDisplayConfiguration.quickAccessLimitRange.upperBound
+                        ),
+                        formatter: { "\(Int($0.rounded()))" }
+                    )
+                    .accessibilityHint(Text("library_quick_access_count_description"))
+                }
+                .settingsAnchor("library.quickAccessCount")
+                MacSTRow(String(localized: "library_quick_access_cover_style")) {
+                    MacSTPicker(
+                        selection: $quickAccessCoverStyle,
+                        options: QuickAccessCoverStyle.allCases.map { ($0, $0.localizedTitle) }
+                    )
+                    .accessibilityHint(Text("library_quick_access_cover_description"))
+                }
+                .settingsAnchor("library.quickAccessCoverStyle")
+                MacSTRow(
+                    String(localized: "library_default_flat_view")
+                ) {
+                    MacSTToggle(isOn: defaultFlatBrowseBinding)
+                        .accessibilityHint(Text("library_default_flat_view_description"))
+                }
+                .settingsAnchor("library.flatBrowse")
+            }
+
+            MacSTGroup {
+                ForEach(Array(librarySectionOrder.enumerated()), id: \.element.id) { index, section in
+                    MacSTRow(section.localizedTitle, divider: index != 0) {
+                        HStack(spacing: 8) {
+                            Button {
+                                moveLibrarySection(at: index, offset: -1)
+                            } label: {
+                                Image(systemName: "chevron.up")
+                                    .frame(width: 18, height: 18)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(index == librarySectionOrder.startIndex)
+
+                            Button {
+                                moveLibrarySection(at: index, offset: 1)
+                            } label: {
+                                Image(systemName: "chevron.down")
+                                    .frame(width: 18, height: 18)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(index == librarySectionOrder.index(before: librarySectionOrder.endIndex))
+
+                            MacSTToggle(isOn: librarySectionVisibilityBinding(for: section))
+                        }
+                        .foregroundStyle(PMColor.textMuted)
+                    }
+                    .settingsAnchor("library.show." + section.rawValue)
+                }
+
+                MacSTRow(
+                    String(localized: "library_sections_settings_label")
+                ) {
+                    MacSTButton(title: String(localized: "library_sections_restore_default_order")) {
+                        librarySectionOrderRawValue = LibraryDisplayConfiguration.encodeSectionOrder(
+                            LibraryDisplayConfiguration.defaultSectionOrder
+                        )
+                    }
+                    .accessibilityHint(Text("library_sections_settings_footer"))
+                }
+                .settingsAnchor("library.sectionOrder")
+            }
+
+            MacSTGroup {
+                MacSTRow(
+                    String(localized: "ai_recommendation_intents_settings_title"),
+                    hint: String(localized: "ai_recommendation_intents_settings_footer"),
+                    divider: false,
+                    block: true
+                ) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(visibleRecommendationPresets, id: \.self) { preset in
+                            HStack(alignment: .center, spacing: 10) {
+                                Button {
+                                    inspectedRecommendationIntent = preset.intentDetails
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(verbatim: preset.localizedTitle)
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(PMColor.text)
+                                            Text(verbatim: preset.localizedDetail)
+                                                .font(.system(size: 10.5))
+                                                .foregroundStyle(PMColor.textMuted)
+                                                .lineLimit(2)
+                                        }
+                                        Spacer(minLength: 12)
+                                        Image(systemName: "info.circle")
+                                            .foregroundStyle(PMColor.textMuted)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                MacSTButton(
+                                    title: String(localized: "ai_recommendation_custom_remove"),
+                                    systemImage: "trash",
+                                    destructive: true
+                                ) {
+                                    removeRecommendationPreset(preset)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+
+                        ForEach(customRecommendationIntents) { intent in
+                            HStack(alignment: .top, spacing: 10) {
+                                Button {
+                                    inspectedRecommendationIntent = intent.intentDetails
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(verbatim: intent.title)
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(PMColor.text)
+                                            Text(verbatim: intent.prompt)
+                                                .font(.system(size: 10.5))
+                                                .foregroundStyle(PMColor.textMuted)
+                                                .lineLimit(2)
+                                        }
+                                        Spacer(minLength: 12)
+                                        Image(systemName: "info.circle")
+                                            .foregroundStyle(PMColor.textMuted)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                MacSTButton(
+                                    title: String(localized: "ai_recommendation_custom_remove"),
+                                    systemImage: "trash",
+                                    destructive: true
+                                ) {
+                                    removeCustomRecommendationIntent(id: intent.id)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+
+                        if !AIRecommendationIntentPresetVisibilityPolicy
+                            .hiddenPresets(hiddenRecommendationPresetsRawValue).isEmpty {
+                            MacSTButton(
+                                title: String(localized: "ai_recommendation_presets_restore"),
+                                systemImage: "arrow.counterclockwise"
+                            ) {
+                                restoreRecommendationPresets()
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            MacSTTextField(
+                                text: $customRecommendationIntentTitle,
+                                prompt: String(localized: "ai_recommendation_custom_title_placeholder"),
+                                width: 180
+                            )
+                            MacSTTextField(
+                                text: $customRecommendationIntentPrompt,
+                                prompt: String(localized: "ai_recommendation_custom_prompt_placeholder"),
+                                width: 360
+                            )
+                            MacSTButton(
+                                title: String(localized: "ai_recommendation_custom_add"),
+                                systemImage: "plus",
+                                prominent: true
+                            ) {
+                                addCustomRecommendationIntent()
+                            }
+                            .disabled(!canAddCustomRecommendationIntent)
+                        }
+                    }
+                }
+                .settingsAnchor("library.recommendationDirections")
+            }
+        }
+        .sheet(item: $inspectedRecommendationIntent) { details in
+            MacAIRecommendationIntentDetailSheet(details: details)
+        }
+    }
+
+    private func librarySectionVisibilityBinding(for section: LibrarySection) -> Binding<Bool> {
+        Binding(
+            get: {
+                !LibraryDisplayConfiguration.decodeHiddenSections(hiddenLibrarySectionsRawValue)
+                    .contains(section)
+            },
+            set: { isVisible in
+                var hidden = LibraryDisplayConfiguration.decodeHiddenSections(
+                    hiddenLibrarySectionsRawValue
+                )
+                if isVisible {
+                    hidden.remove(section)
+                } else {
+                    hidden.insert(section)
+                }
+                hiddenLibrarySectionsRawValue = LibraryDisplayConfiguration.encodeHiddenSections(hidden)
+            }
+        )
+    }
+
+    private func moveLibrarySection(at index: Int, offset: Int) {
+        let destination = index + offset
+        guard librarySectionOrder.indices.contains(index),
+              librarySectionOrder.indices.contains(destination) else { return }
+        var updated = librarySectionOrder
+        let section = updated.remove(at: index)
+        updated.insert(section, at: destination)
+        librarySectionOrderRawValue = LibraryDisplayConfiguration.encodeSectionOrder(updated)
+    }
+
+    private func removeRecommendationPreset(_ preset: AIRecommendationIntentPreset) {
+        hiddenRecommendationPresetsRawValue =
+            AIRecommendationIntentPresetVisibilityPolicy.hiding(
+                preset,
+                in: hiddenRecommendationPresetsRawValue
+            )
+        CloudKVSSync.shared.markChanged(
+            key: AIRecommendationIntentPresetVisibilityPolicy.storageKey
+        )
+        resetRecommendationSelectionIfNeeded(removing: preset.selectionID)
+    }
+
+    private func restoreRecommendationPresets() {
+        hiddenRecommendationPresetsRawValue =
+            AIRecommendationIntentPresetVisibilityPolicy.restoringAll()
+        CloudKVSSync.shared.markChanged(
+            key: AIRecommendationIntentPresetVisibilityPolicy.storageKey
+        )
+    }
+
+    private var canAddCustomRecommendationIntent: Bool {
+        customRecommendationIntents.count
+            < AIRecommendationIntentStoragePolicy.maximumCustomIntents
+            && AIRecommendationIntentStoragePolicy.makeIntent(
+                title: customRecommendationIntentTitle,
+                prompt: customRecommendationIntentPrompt
+            ) != nil
+    }
+
+    private func addCustomRecommendationIntent() {
+        guard canAddCustomRecommendationIntent,
+              let intent = AIRecommendationIntentStoragePolicy.makeIntent(
+                title: customRecommendationIntentTitle,
+                prompt: customRecommendationIntentPrompt
+              ) else { return }
+        customRecommendationIntentsRawValue = AIRecommendationIntentStoragePolicy.encode(
+            customRecommendationIntents + [intent]
+        )
+        customRecommendationIntentTitle = ""
+        customRecommendationIntentPrompt = ""
+        CloudKVSSync.shared.markChanged(key: AIRecommendationIntentStoragePolicy.storageKey)
+    }
+
+    private func removeCustomRecommendationIntent(id: UUID) {
+        customRecommendationIntentsRawValue = AIRecommendationIntentStoragePolicy.encode(
+            customRecommendationIntents.filter { $0.id != id }
+        )
+        CloudKVSSync.shared.markChanged(key: AIRecommendationIntentStoragePolicy.storageKey)
+        resetRecommendationSelectionIfNeeded(removing: "custom:\(id.uuidString)")
+    }
+
+    private func resetRecommendationSelectionIfNeeded(removing selectionID: String) {
+        guard selectedRecommendationIntentID == selectionID else { return }
+        selectedRecommendationIntentID = AIRecommendationIntentSelectionPolicy.defaultSelectionID
+        CloudKVSSync.shared.markChanged(
+            key: AIRecommendationIntentSelectionPolicy.storageKey
+        )
+    }
+}
+
+private struct MacAIRecommendationIntentDetailSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let details: AIRecommendationIntentDetails
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(verbatim: details.title)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(PMColor.text)
+                Spacer()
+                MacSTButton(title: String(localized: "done")) { dismiss() }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ai_recommendation_intent_description_label")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PMColor.textMuted)
+                Text(verbatim: details.detail)
+                    .font(.system(size: 13))
+                    .foregroundStyle(PMColor.text)
+                    .textSelection(.enabled)
+            }
+
+            if let prompt = details.prompt {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("ai_recommendation_intent_prompt_label")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PMColor.textMuted)
+                    Text(verbatim: prompt)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(PMColor.text)
+                        .textSelection(.enabled)
+                }
+                .padding(12)
+                .background(PMColor.bg, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+        .background(PMColor.bgElev)
+    }
+}
+
+private struct MacFullscreenEffectGallery: View {
+    @Binding var selection: String
+    let palette: ImmersiveArtworkPalette
+
+    private let columns = [
+        GridItem(.adaptive(minimum: 205), spacing: 10, alignment: .top),
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+            ForEach(FullscreenPlayerEffect.allCases) { effect in
+                MacFullscreenEffectPreviewCard(
+                    effect: effect,
+                    selected: selection == effect.rawValue,
+                    palette: palette
+                ) {
+                    selection = effect.rawValue
+                }
+            }
+        }
+    }
+}
+
+private struct MacFullscreenEffectPreviewCard: View {
+    let effect: FullscreenPlayerEffect
+    let selected: Bool
+    let palette: ImmersiveArtworkPalette
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                ImmersiveEffectPreview(
+                    effect: effect,
+                    isActive: selected || hovering,
+                    palette: palette
+                )
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(alignment: .topTrailing) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(selected ? palette.primary : .white.opacity(0.56))
+                        .symbolRenderingMode(.hierarchical)
+                        .padding(7)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: effect.localizedTitle)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(selected ? PMColor.brand : PMColor.text)
+                        .lineLimit(1)
+                    Text(verbatim: effect.localizedSubtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(PMColor.textFaint)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+            .padding(7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selected ? PMColor.brand.opacity(0.11) : PMColor.glassBtn,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        selected ? PMColor.brand : PMColor.dividerStrong,
+                        lineWidth: selected ? 1.3 : 0.5
+                    )
+            }
+            .scaleEffect(hovering ? 1.012 : 1)
+            .animation(.easeOut(duration: 0.16), value: hovering)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityLabel(Text(verbatim: effect.localizedTitle))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+private struct MacThemeChoiceCard: View {
+    let title: String
+    let icon: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .medium))
+                Text(verbatim: title)
+                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
+            }
+            .foregroundStyle(selected ? PMColor.brand : PMColor.text)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(selected ? PMColor.brand.opacity(0.14) : PMColor.glassBtn, in: .rect(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(selected ? PMColor.brand : PMColor.dividerStrong, lineWidth: selected ? 1.5 : 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct MacBrandSwatchRow: View {
+    let swatch: (hex: String, name: String, sub: String, color: Color)
+    let selected: Bool
+    let divider: Bool
+    let action: () -> Void
+
+    @State private var hover = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if divider {
+                Rectangle().fill(PMColor.divider).frame(height: 0.5)
+            }
+
+            Button(action: action) {
+                HStack(spacing: 12) {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(swatch.color)
+                        .frame(width: 28, height: 28)
+                        .shadow(color: swatch.color.opacity(0.28), radius: 3, y: 1)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: swatch.name)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(PMColor.text)
+                        if !swatch.sub.isEmpty {
+                            Text(verbatim: swatch.sub)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(PMColor.textFaint)
+                        }
+                    }
+
+                    Spacer()
+
+                    Text(verbatim: swatch.hex)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(PMColor.textFaint)
+
+                    if selected {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(PMColor.brand)
+                    } else {
+                        Circle()
+                            .strokeBorder(PMColor.dividerStrong, lineWidth: 1.5)
+                            .frame(width: 14, height: 14)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(hover ? PMColor.rowHover : .clear)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hover = $0 }
+        }
+    }
+}
+
+private struct MacAppIconCell: View {
+    let icon: MacAppIcon
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(icon.previewAsset)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .shadow(color: .black.opacity(0.16), radius: selected ? 8 : 4, y: 3)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(selected ? PMColor.brand : Color.clear, lineWidth: 2)
+                    }
+
+                Text(LocalizedStringKey(icon.nameKey))
+                    .font(.system(size: 10.5, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? PMColor.text : PMColor.textFaint)
+                    .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct MacMaterialCard: View {
+    let title: String
+    let sub: String
+    let macos: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(verbatim: title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(selected ? PMColor.brand : PMColor.text)
+                    Spacer()
+                    if selected {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PMColor.brand)
+                    }
+                }
+                Text(verbatim: sub)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(PMColor.textFaint)
+                Text(verbatim: macos)
+                    .font(.system(size: 10))
+                    .foregroundStyle(PMColor.textFaint)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? PMColor.brand.opacity(0.14) : PMColor.bgElev, in: .rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(selected ? PMColor.brand : PMColor.cardBorder, lineWidth: selected ? 1.5 : 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - ST-09 Deleted
+
+private struct MacSTDeletedView: View {
+    @Environment(MusicLibrary.self) private var library
+    @Environment(SourcesStore.self) private var sourcesStore
+    @State private var configsTick: Int = 0
+    @State private var showClearAllConfirmation = false
+    @State private var pendingPurgePlan: RecentlyDeletedPurgePlan?
+    @State private var clearAllFailureCount = 0
+    @State private var isClearingAll = false
+
+    private var purgePlan: RecentlyDeletedPurgePlan {
+        let _ = configsTick
+        return RecentlyDeletedPurgePlan(
+            playlistIDs: Set(library.recentlyDeletedPlaylists.map(\.id)),
+            smartPlaylistIDs: Set(library.recentlyDeletedSmartPlaylists.map(\.id)),
+            sourceIDs: Set(sourcesStore.recentlyDeletedSources.map(\.id)),
+            scraperConfigurationIDs: Set(
+                ScraperConfigStore.shared.recentlyDeletedConfigs.map(\.id)
+            )
+        )
+    }
+
+    private var hasAny: Bool {
+        let _ = configsTick
+        return !library.recentlyDeletedPlaylists.isEmpty
+            || !library.recentlyDeletedSmartPlaylists.isEmpty
+            || !library.hiddenMirrorPlaylists.isEmpty
+            || !sourcesStore.recentlyDeletedSources.isEmpty
+            || !ScraperConfigStore.shared.recentlyDeletedConfigs.isEmpty
+    }
+
+    var body: some View {
+        Group {
+            if !purgePlan.isEmpty {
+                HStack {
+                    Spacer()
+                    if isClearingAll {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Button("clear_all", role: .destructive) {
+                            pendingPurgePlan = purgePlan
+                            showClearAllConfirmation = true
+                        }
+                        .settingsAnchor("deleted.clearAll")
+                        .buttonStyle(.bordered)
+                        .disabled(!sourcesStore.permanentDeletionInProgressIDs.isDisjoint(
+                            with: purgePlan.sourceIDs
+                        ))
+                    }
+                }
+                .padding(.bottom, 12)
+            }
+
+            if !hasAny {
+                VStack(spacing: 14) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 44))
+                        .foregroundStyle(PMColor.textFaint)
+                    Text("recently_deleted_empty")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text("recently_deleted_empty_desc")
+                        .font(PMFont.caption)
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 80)
+            }
+
+            let playlists = library.recentlyDeletedPlaylists
+            if !playlists.isEmpty {
+                MacSTSection("recently_deleted_playlists",
+                             hint: Lz("ST-09 · Recoverable Within 7 Days")) {
+                    MacSTGroup {
+                        ForEach(Array(playlists.enumerated()), id: \.element.id) { index, p in
+                            MacDeletedRealRow(
+                                title: p.name,
+                                sub: deletedAtText(p.deletedAt),
+                                icon: "music.note.list",
+                                divider: index != 0,
+                                restore: { library.restorePlaylist(id: p.id) },
+                                purge:   { library.permanentlyDeletePlaylist(id: p.id) }
+                            )
+                        }
+                    }
+                }
+                .settingsAnchor("deleted.playlists")
+            }
+
+            let smartPlaylists = library.recentlyDeletedSmartPlaylists
+            if !smartPlaylists.isEmpty {
+                MacSTSection("recently_deleted_smart_playlists") {
+                    MacSTGroup {
+                        ForEach(Array(smartPlaylists.enumerated()), id: \.element.id) { index, p in
+                            MacDeletedRealRow(
+                                title: p.name,
+                                sub: deletedAtText(p.deletedAt),
+                                icon: "sparkles",
+                                divider: index != 0,
+                                restore: { library.restoreSmartPlaylist(id: p.id) },
+                                purge: { library.permanentlyDeleteSmartPlaylist(id: p.id) }
+                            )
+                        }
+                    }
+                }
+                .settingsAnchor("deleted.smartPlaylists")
+            }
+
+            let hiddenMirrors = library.hiddenMirrorPlaylists
+            if !hiddenMirrors.isEmpty {
+                MacSTSection("hidden_source_playlists",
+                             hint: String(localized: "hidden_source_playlists_desc")) {
+                    MacSTGroup {
+                        ForEach(Array(hiddenMirrors.enumerated()), id: \.element.id) { index, suppression in
+                            MacDeletedRealRow(
+                                title: suppression.displayName,
+                                sub: String(localized: "restore_hidden_playlist"),
+                                icon: "eye.slash",
+                                divider: index != 0,
+                                restore: { library.restoreHiddenMirrorPlaylist(suppression) },
+                                purge: nil
+                            )
+                        }
+                    }
+                }
+                .settingsAnchor("deleted.hiddenPlaylists")
+            }
+
+            let sources = sourcesStore.recentlyDeletedSources
+            if !sources.isEmpty {
+                MacSTSection("recently_deleted_sources",
+                             hint: Lz("ST-09 · Includes Connection Credentials")) {
+                    MacSTGroup {
+                        ForEach(Array(sources.enumerated()), id: \.element.id) { index, s in
+                            let isDeleting = sourcesStore.permanentDeletionInProgressIDs.contains(s.id)
+                            MacDeletedRealRow(
+                                title: s.name,
+                                sub: sourcesStore.permanentDeletionFailureIDs.contains(s.id)
+                                    ? "\(String(localized: "status_unavailable")) · \(String(localized: "retry"))"
+                                    : deletedAtText(s.deletedAt),
+                                icon: s.type.iconName,
+                                divider: index != 0,
+                                isBusy: isDeleting,
+                                restore: { sourcesStore.restore(id: s.id) },
+                                purge: {
+                                    Task { await sourcesStore.permanentlyDelete(id: s.id) }
+                                }
+                            )
+                        }
+                    }
+                }
+                .settingsAnchor("deleted.sources")
+            }
+
+            let configs = ScraperConfigStore.shared.recentlyDeletedConfigs
+            if !configs.isEmpty {
+                MacSTSection("recently_deleted_scraper_configs",
+                             hint: Lz("ST-09 · Custom Metadata Scraping Sources")) {
+                    MacSTGroup {
+                        ForEach(Array(configs.enumerated()), id: \.element.id) { index, c in
+                            MacDeletedRealRow(
+                                title: c.name,
+                                sub: deletedAtText(c.deletedAt),
+                                icon: "wand.and.stars",
+                                divider: index != 0,
+                                restore: {
+                                    ScraperConfigStore.shared.restore(id: c.id)
+                                    configsTick &+= 1
+                                },
+                                purge: {
+                                    ScraperConfigStore.shared.permanentlyDelete(id: c.id)
+                                    configsTick &+= 1
+                                }
+                            )
+                        }
+                    }
+                }
+                .settingsAnchor("deleted.scraperConfigs")
+            }
+        }
+        .confirmationDialog(
+            "recently_deleted_clear_all_confirm_title",
+            isPresented: $showClearAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("clear_all", role: .destructive) {
+                if let pendingPurgePlan {
+                    Task { await clearAll(pendingPurgePlan) }
+                }
+                pendingPurgePlan = nil
+            }
+            Button("cancel", role: .cancel) { pendingPurgePlan = nil }
+        } message: {
+            Text(verbatim: String(
+                format: String(localized: "recently_deleted_clear_all_confirm_message_format"),
+                pendingPurgePlan?.count ?? 0
+            ))
+        }
+        .alert(
+            "recently_deleted_clear_all_failed_title",
+            isPresented: Binding(
+                get: { clearAllFailureCount > 0 },
+                set: { if !$0 { clearAllFailureCount = 0 } }
+            )
+        ) {
+            Button("ok", role: .cancel) {}
+        } message: {
+            Text(verbatim: String(
+                format: String(localized: "recently_deleted_clear_all_failed_format"),
+                clearAllFailureCount
+            ))
+        }
+    }
+
+    private func deletedAtText(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return String(format: String(localized: "deleted_at_format"),
+                      f.localizedString(for: date, relativeTo: Date()))
+    }
+
+    @MainActor
+    private func clearAll(_ plan: RecentlyDeletedPurgePlan) async {
+        guard !plan.isEmpty, !isClearingAll else { return }
+        isClearingAll = true
+        defer { isClearingAll = false }
+
+        library.permanentlyDeletePlaylists(ids: plan.playlistIDs)
+        library.permanentlyDeleteSmartPlaylists(ids: plan.smartPlaylistIDs)
+        let deletedConfigIDs = ScraperConfigStore.shared.permanentlyDelete(
+            ids: plan.scraperConfigurationIDs
+        )
+        configsTick &+= 1
+        let sourceResults = await sourcesStore.permanentlyDelete(ids: plan.sourceIDs)
+
+        clearAllFailureCount = sourceResults.values.filter {
+            $0 != .deleted && $0 != .sourceNotFound
+        }.count
+            + library.recentlyDeletedPlaylists.filter {
+                plan.playlistIDs.contains($0.id)
+            }.count
+            + library.recentlyDeletedSmartPlaylists.filter {
+                plan.smartPlaylistIDs.contains($0.id)
+            }.count
+            + plan.scraperConfigurationIDs.subtracting(deletedConfigIDs).count
+    }
+}
+
+private struct MacDeletedRealRow: View {
+    let title: String
+    let sub: String
+    let icon: String
+    let divider: Bool
+    var isBusy = false
+    let restore: () -> Void
+    let purge: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if divider {
+                Rectangle().fill(PMColor.divider).frame(height: 0.5)
+            }
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(PMColor.glassBtn)
+                    .frame(width: 32, height: 32)
+                    .overlay {
+                        Image(systemName: icon)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(PMColor.text)
+                        .lineLimit(1)
+                    Text(verbatim: sub)
+                        .font(.system(size: 11))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+
+                Spacer()
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                MacSTButton(title: "restore", action: restore)
+                    .disabled(isBusy)
+                if let purge {
+                    MacSTButton(title: "delete_forever", destructive: true, action: purge)
+                        .disabled(isBusy)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+    }
+}
+
+private struct MacDeletedRow: View {
+    let title: String
+    let sub: String
+    let divider: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if divider {
+                Rectangle().fill(PMColor.divider).frame(height: 0.5)
+            }
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(PMColor.glassBtn)
+                    .frame(width: 32, height: 32)
+                    .overlay {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(PMColor.text)
+                        .lineLimit(1)
+                    Text(verbatim: sub)
+                        .font(.system(size: 11))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+
+                Spacer()
+                MacSTButton(title: Lz("Restore"))
+                MacSTButton(title: Lz("Delete Permanently"), destructive: true)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+    }
+}
+
+// MARK: - ST-10 SSL
+
+private struct MacSTSSLView: View {
+    @State private var refreshTick = 0
+    @State private var showAddSheet = false
+    @State private var newDomain = ""
+
+    private var certificates: [SSLTrustStore.TrustedCertificateInfo] {
+        _ = refreshTick
+        return SSLTrustStore.shared.trustedCertificates
+    }
+
+    var body: some View {
+        MacSTSection(Lz("Trusted self-signed certificates"),
+                     hint: Lz("ST-10 · The SSL certificates for these domains aren't in the system Keychain — you've trusted them manually")) {
+            MacSTGroup {
+                if certificates.isEmpty {
+                    MacSTRow(Lz("No Trusted Domains"), hint: Lz("Add to the trust list during connection when you encounter a self-signed certificate source"), divider: false) {
+                        MacSTButton(title: Lz("Add…"), systemImage: "plus") {
+                            beginAdd()
+                        }
+                    }
+                } else {
+                    ForEach(Array(certificates.enumerated()), id: \.element.id) { index, info in
+                        MacSSLRow(info: info, divider: index != 0) {
+                            SSLTrustStore.shared.untrust(domain: info.domain)
+                            refreshTick &+= 1
+                        }
+                    }
+                    MacSTRow(Lz("Add Domain"), hint: "host.example.com", divider: true) {
+                        MacSTButton(title: Lz("Add…"), systemImage: "plus") {
+                            beginAdd()
+                        }
+                    }
+                    .settingsAnchor("security.addTrustedDomain")
+                }
+            }
+        }
+        .settingsAnchor("security.httpsTrust")
+        .sheet(isPresented: $showAddSheet) {
+            addDomainSheet
+        }
+    }
+
+    private var addDomainSheet: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(PMColor.brand)
+                    .frame(width: 34, height: 34)
+                    .background(PMColor.brand.opacity(0.14), in: .rect(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: Lz("Add Trusted Domain"))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: PMTextWithoutDesignCodes(Lz("ST-10 · Accept any certificate this domain presents")))
+                        .font(PMFont.caption)
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                Spacer()
+            }
+            .padding(18)
+
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(verbatim: Lz("Domain"))
+                    .font(PMFont.bodyM)
+                    .foregroundStyle(PMColor.text)
+                TextField("music.example.local", text: $newDomain)
+                    .textFieldStyle(.plain)
+                    .font(PMFont.bodyS)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(PMColor.bgElev, in: .rect(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+                    }
+                    .onSubmit { commitAdd() }
+                Text(verbatim: Lz("Enter only the host — no need to include https:// or a path."))
+                    .font(PMFont.caption)
+                    .foregroundStyle(PMColor.textFaint)
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(PMColor.warn)
+                    Text(verbatim: Lz("Trusting a domain accepts every certificate it presents, including one swapped in by an attacker on your network. Prefer trusting from the prompt shown during an actual connection so the certificate can be inspected."))
+                        .font(PMFont.caption)
+                        .foregroundStyle(PMColor.warn)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(18)
+
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+
+            HStack {
+                Spacer()
+                MacSTButton(title: Lz("Cancel")) {
+                    showAddSheet = false
+                    newDomain = ""
+                }
+                MacSTButton(title: Lz("Add"), prominent: true) {
+                    commitAdd()
+                }
+                .disabled(newDomain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(18)
+        }
+        .frame(width: 400)
+        .background(PMColor.bg)
+    }
+
+    private func beginAdd() {
+        newDomain = ""
+        showAddSheet = true
+    }
+
+    private func commitAdd() {
+        var domain = newDomain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let url = URL(string: domain), let host = url.host {
+            domain = host
+        }
+        guard !domain.isEmpty else { return }
+        SSLTrustStore.shared.trust(domain: domain)
+        refreshTick &+= 1
+        newDomain = ""
+        showAddSheet = false
+    }
+}
+
+private struct MacSSLRow: View {
+    let info: SSLTrustStore.TrustedCertificateInfo
+    let divider: Bool
+    let remove: () -> Void
+
+    private var certificateDetail: String {
+        let fingerprint = info.fingerprintSHA256.map {
+            "SHA256: \(Self.shortFingerprint($0))"
+        } ?? Lz("SHA256: Waiting for next connection")
+        let expiry = info.expiresAt.map {
+            "\(Lz("Expires")): \($0.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits)))"
+        }
+        return [fingerprint, expiry].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private static func shortFingerprint(_ fingerprint: String) -> String {
+        guard fingerprint.count > 28 else { return fingerprint }
+        return "\(fingerprint.prefix(16))…\(fingerprint.suffix(8))"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if divider {
+                Rectangle().fill(PMColor.divider).frame(height: 0.5)
+            }
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(PMColor.ok)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: info.domain)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: certificateDetail)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(PMColor.textFaint)
+                    if let subject = info.subjectSummary, subject != info.domain {
+                        Text(verbatim: subject)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(PMColor.textMuted)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+                MacSTButton(title: Lz("Remove"), destructive: true, action: remove)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+    }
+}
+
+// MARK: - ST-11 About
+
+@MainActor
+private final class MacUpdateCheckWindowController: NSObject, NSWindowDelegate {
+    static let shared = MacUpdateCheckWindowController()
+    private static let contentSize = NSSize(width: 520, height: 390)
+    private var window: NSWindow?
+
+    func show() {
+        if let window {
+            configure(window)
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(origin: .zero, size: Self.contentSize),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = Lz("Software Update")
+        win.isReleasedWhenClosed = false
+        win.contentViewController = NSHostingController(
+            rootView: MacUpdateCheckView { [weak self] in self?.close() }
+                .applyPrimuseEnvironments()
+        )
+        configure(win)
+        win.center()
+        win.delegate = self
+        window = win
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        window?.orderOut(nil)
+    }
+
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        Task { @MainActor in self.window?.orderOut(nil) }
+        return false
+    }
+
+    nonisolated func windowShouldZoom(_ window: NSWindow, toFrame newFrame: NSRect) -> Bool {
+        false
+    }
+
+    private func configure(_ win: NSWindow) {
+        win.setContentSize(Self.contentSize)
+        win.contentMinSize = Self.contentSize
+        win.contentMaxSize = Self.contentSize
+        win.styleMask.remove([.miniaturizable, .resizable])
+        win.collectionBehavior.insert(.fullScreenNone)
+        win.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        win.standardWindowButton(.zoomButton)?.isHidden = true
+    }
+}
+
+@MainActor
+private final class MacDiagnosticsWindowController: NSObject, NSWindowDelegate {
+    static let shared = MacDiagnosticsWindowController()
+    private var window: NSWindow?
+
+    func show() {
+        if let window {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = Lz("Diagnostic Logs")
+        win.minSize = NSSize(width: 640, height: 480)
+        win.center()
+        win.isReleasedWhenClosed = false
+        win.contentViewController = NSHostingController(
+            rootView: MacDiagnosticsWindowView()
+                .applyPrimuseEnvironments()
+        )
+        win.delegate = self
+        window = win
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
+    }
+
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        Task { @MainActor in self.window?.orderOut(nil) }
+        return false
+    }
+}
+
+private struct MacUpdateCheckView: View {
+    var onClose: () -> Void
+
+    private static let contentSize = CGSize(width: 520, height: 390)
+
+    @Environment(AppUpdateChecker.self) private var checker
+
+    private var hasUpdate: Bool {
+        checker.availableUpdate != nil
+    }
+
+    private var latestVersion: String {
+        checker.availableUpdate?.version ?? checker.latestStoreVersion ?? checker.installedVersion
+    }
+
+    private var updateInfo: AppUpdateChecker.UpdateInfo? {
+        checker.availableUpdate ?? checker.latestUpdateInfo
+    }
+
+    private var currentVersion: String {
+        checker.installedVersion
+    }
+
+    private var statusTitle: String {
+        if hasUpdate { return Lz("Update Available") }
+        if checker.isChecking { return Lz("Checking for Updates") }
+        if checker.lastErrorMessage != nil { return Lz("Couldn't Check for Updates") }
+        return Lz("You're up to date")
+    }
+
+    private var statusSubtitle: String {
+        if hasUpdate {
+            return String(format: Lz("%@ · Current %@ · App Store %@"), checker.platformName, currentVersion, latestVersion)
+        }
+        return String(format: Lz("%@ · Current version %@"), checker.platformName, currentVersion)
+    }
+
+    private var lastCheckText: String {
+        guard let date = checker.lastCheckedAt else { return Lz("Not checked yet") }
+        if Date().timeIntervalSince(date) < 60 {
+            return Lz("Just now")
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private var releaseDateText: String? {
+        guard let date = updateInfo?.releaseDate else { return nil }
+        return date.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 16) {
+                BrandMonogram(slot: .update)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(verbatim: statusTitle)
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: statusSubtitle)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(PMColor.textMuted)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 12)
+
+                if hasUpdate || checker.storeURL != nil {
+                    Button {
+                        checker.openAppStore()
+                        if hasUpdate { onClose() }
+                    } label: {
+                        Label(hasUpdate ? Lz("Go to App Store") : Lz("Open App Store"),
+                              systemImage: hasUpdate ? "arrow.down.circle.fill" : "bag")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .frame(height: 32)
+                            .background(PMColor.brand, in: .rect(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(checker.isChecking)
+                    .opacity(checker.isChecking ? 0.55 : 1)
+                    .shadow(color: PMColor.brand.opacity(0.22), radius: 12, y: 4)
+                }
+            }
+
+            Rectangle()
+                .fill(PMColor.divider)
+                .frame(height: 0.5)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: checker.lastErrorMessage == nil ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(checker.lastErrorMessage == nil ? PMColor.ok : PMColor.bad)
+                    Text(verbatim: checker.lastErrorMessage ?? String(format: Lz("Last checked: %@"), lastCheckText))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(checker.lastErrorMessage == nil ? PMColor.textMuted : PMColor.bad)
+                        .lineLimit(2)
+                }
+
+                Text(verbatim: hasUpdate ? Lz("The update will be installed from the App Store.") : Lz("No updates available."))
+                    .font(.system(size: 12))
+                    .foregroundStyle(PMColor.textFaint)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    versionBadge(title: Lz("Current"), value: currentVersion)
+                    versionBadge(title: "App Store", value: latestVersion)
+                    if let minimumOS = updateInfo?.minimumOSVersion {
+                        versionBadge(title: Lz("Minimum OS"), value: minimumOS)
+                    }
+                    if let releaseDateText {
+                        versionBadge(title: Lz("Release Date"), value: releaseDateText)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(verbatim: updateInfo?.trackName ?? "Primuse")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(verbatim: updateInfo?.releaseNotes ?? Lz("App Store does not provide release notes yet."))
+                            .font(.system(size: 12))
+                            .foregroundStyle(PMColor.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 96)
+                }
+            }
+            .padding(12)
+            .background(PMColor.bgElev, in: .rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 10) {
+                Text(verbatim: Lz("Checks the App Store for new versions once a day."))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(PMColor.textFaint)
+                Spacer()
+                Button {
+                    Task { await checker.checkForUpdate(force: true) }
+                } label: {
+                    Text(verbatim: checker.isChecking ? Lz("Checking...") : Lz("Check Again"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(PMColor.brand)
+                }
+                .buttonStyle(.plain)
+                .disabled(checker.isChecking)
+            }
+        }
+        .padding(22)
+        .frame(width: Self.contentSize.width, height: Self.contentSize.height, alignment: .topLeading)
+        .background(PMColor.bg)
+        .task {
+            await checker.checkForUpdate(force: true)
+        }
+    }
+
+    private func versionBadge(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(verbatim: title)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(PMColor.textFaint)
+            Text(verbatim: value)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(PMColor.text)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(PMColor.glassBtn, in: .rect(cornerRadius: 7))
+    }
+}
+
+private struct MacLicensesPanel: View {
+    var onClose: () -> Void
+    @State private var selected: MacLicenseComponent?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: selected?.name ?? Lz("Open-Source Licenses"))
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: selected == nil ? Lz("Open-source components used by Primuse") : String(format: Lz("%@ · Full license text"), selected?.license ?? ""))
+                        .font(.system(size: 11))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                Spacer()
+                if selected != nil {
+                    Button {
+                        selected = nil
+                    } label: {
+                        Image(systemName: "chevron.backward")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PMColor.textMuted)
+                            .frame(width: 26, height: 26)
+                            .background(PMColor.glassBtn, in: .circle)
+                    }
+                    .buttonStyle(.plain)
+                    .help(Text("back_to_options"))
+                    .accessibilityLabel(Text("back_to_options"))
+                    .accessibilityIdentifier("licensesInlineBack")
+                }
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PMColor.textMuted)
+                        .frame(width: 26, height: 26)
+                        .background(PMColor.glassBtn, in: .circle)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+
+            if let selected {
+                ScrollView(.vertical, showsIndicators: false) {
+                    Text(verbatim: selected.fullText)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(PMColor.textMuted)
+                        .lineSpacing(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(18)
+                }
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(MacLicenseComponent.items.enumerated()), id: \.element.id) { index, item in
+                            Button {
+                                selected = item
+                            } label: {
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(verbatim: item.name)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(PMColor.text)
+                                            .lineLimit(1)
+                                        Text(verbatim: item.use)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(PMColor.textFaint)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Text(verbatim: item.license)
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(PMColor.textMuted)
+                                        .padding(.horizontal, 8)
+                                        .frame(height: 18)
+                                        .background(PMColor.rowHover, in: .rect(cornerRadius: 4))
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(PMColor.textFaint)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .overlay(alignment: .bottom) {
+                                    if index < MacLicenseComponent.items.count - 1 {
+                                        Rectangle().fill(PMColor.divider).frame(height: 0.5)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                }
+            }
+
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+            Text(verbatim: selected == nil ? Lz("Select an item to view the full license text") : Lz("License text follows component versions; distribution uses the LICENSE file in the repository."))
+                .font(.system(size: 10.5))
+                .foregroundStyle(PMColor.textFaint)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+        }
+        .frame(width: 520, height: 580)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(PMColor.bg.opacity(0.86))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+        }
+    }
+}
+
+private struct MacLicenseComponent: Identifiable, Hashable {
+    var id: String { name }
+    let name: String
+    let license: String
+    let use: String
+
+    static let items: [MacLicenseComponent] = [
+        .init(name: "SFBAudioEngine", license: "MIT", use: Lz("Audio decoding engine")),
+        .init(name: "FFmpeg 8.1", license: "LGPL 2.1+", use: Lz("DTS / DTS-HD and additional format decoding")),
+        .init(name: "AMSMB2", license: "BSD-3", use: Lz("SMB / CIFS connection")),
+        .init(name: "Citadel", license: "MIT", use: Lz("SFTP client")),
+        .init(name: "NFSKit", license: "MIT", use: Lz("NFS browsing")),
+        .init(name: "GRDB.swift", license: "MIT", use: "SQLite + FTS5"),
+        .init(name: "Nuke", license: "MIT", use: Lz("Cover image loading and cache")),
+        .init(name: "Swift Collections", license: "Apache 2.0", use: Lz("Data structures")),
+        .init(name: "KeychainAccess", license: "MIT", use: Lz("Credential storage")),
+        .init(name: "swift-log", license: "Apache 2.0", use: Lz("Logging")),
+    ]
+
+    var fullText: String {
+        """
+        \(name)
+        License: \(license)
+        Usage: \(use)
+
+        This component is redistributed under its upstream open-source license.
+        The full authoritative license text is bundled with the component or
+        available from the upstream project repository. Primuse preserves the
+        copyright and license notices required by that project.
+        """
+    }
+}
+
+/// Live process metrics for the diagnostics window, read from the Mach kernel
+/// rather than hard-coded constants.
+private enum MacDiagnosticsMetrics {
+    /// Resident memory footprint of this process, in bytes.
+    static func residentMemoryBytes() -> Int64? {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return Int64(info.resident_size)
+    }
+
+    /// Aggregate CPU usage across all live threads of this process, in percent
+    /// (can exceed 100 on multi-core when several threads are busy).
+    static func processCPUUsage() -> Double? {
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        guard task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS,
+              let threads = threadList else { return nil }
+        defer {
+            vm_deallocate(mach_task_self_,
+                          vm_address_t(UInt(bitPattern: threads)),
+                          vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride))
+        }
+        var total = 0.0
+        for index in 0..<Int(threadCount) {
+            var info = thread_basic_info()
+            var infoCount = mach_msg_type_number_t(MemoryLayout<thread_basic_info>.size / MemoryLayout<natural_t>.size)
+            let result = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(infoCount)) {
+                    thread_info(threads[index], thread_flavor_t(THREAD_BASIC_INFO), $0, &infoCount)
+                }
+            }
+            guard result == KERN_SUCCESS,
+                  info.flags & TH_FLAGS_IDLE == 0 else { continue }
+            total += Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+        }
+        return total
+    }
+}
+
+private struct MacDiagnosticsWindowView: View {
+    @State private var tick = 0
+    @State private var selectedFilter: MacLogFilter = .all
+    @State private var copiedRowID: String?
+    @State private var memoryText = "—"
+    @State private var cpuText = "—"
+    @State private var cacheText = "—"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: Lz("Diagnostics"))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(verbatim: Lz("MetricKit + crash logs"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                Spacer()
+                MacSTButton(title: Lz("Export Logs"), systemImage: "square.and.arrow.up") {
+                    NSWorkspace.shared.activateFileViewerSelecting([FileLogger.shared.logFileURL])
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 12) {
+                healthMetric(Lz("Memory"), value: memoryText, color: PMColor.ok)
+                healthMetric(Lz("CPU (playback)"), value: cpuText, color: PMColor.ok)
+                healthMetric(Lz("Cache"), value: cacheText, color: PMColor.text)
+                healthMetric(Lz("Crashes (30 days)"), value: "\(AppServices.shared.crashDiagnostics.reports().count)", color: PMColor.ok)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+
+            HStack(spacing: 8) {
+                Text(verbatim: Lz("Live Logs"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.6)
+                    .textCase(.uppercase)
+                    .foregroundStyle(PMColor.textFaint)
+                logFilterButton(.all)
+                logFilterButton(.warn)
+                logFilterButton(.error)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
+
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if logRows.isEmpty {
+                        Text(verbatim: Lz("No logs yet"))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.45))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 6)
+                    }
+                    ForEach(Array(logRows.enumerated()), id: \.offset) { _, row in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(verbatim: row.time)
+                                .foregroundStyle(Color.white.opacity(0.45))
+                                .frame(width: 58, alignment: .leading)
+                            Text(verbatim: row.level)
+                                .fontWeight(.bold)
+                                .foregroundStyle(row.color)
+                                .frame(width: 44, alignment: .leading)
+                            Text(verbatim: row.module)
+                                .foregroundStyle(Color(red: 0.90, green: 0.63, blue: 0.42))
+                                .frame(width: 96, alignment: .leading)
+                            Text(verbatim: row.message)
+                                .foregroundStyle(Color(red: 0.85, green: 0.83, blue: 0.78))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if copiedRowID == row.id {
+                                Text(verbatim: Lz("Copied"))
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(PMColor.brand)
+                            }
+                        }
+                        .font(.system(size: 11, design: .monospaced))
+                        .lineSpacing(5)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 6)
+                        .background(copiedRowID == row.id ? PMColor.brand.opacity(0.12) : Color.clear,
+                                    in: .rect(cornerRadius: 5))
+                        .contentShape(Rectangle())
+                        .onTapGesture { copy(row) }
+                        .help(Lz("Click to copy this log line"))
+                    }
+                }
+                .padding(12)
+            }
+            .background(Color(red: 0.12, green: 0.105, blue: 0.09), in: .rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(PMColor.dividerStrong, lineWidth: 0.5)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+        }
+        .background(PMColor.bg)
+        .task {
+            await refreshMetrics()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                tick &+= 1
+                await refreshMetrics()
+            }
+        }
+    }
+
+    @MainActor
+    private func refreshMetrics() async {
+        if let bytes = MacDiagnosticsMetrics.residentMemoryBytes() {
+            memoryText = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+        } else {
+            memoryText = "—"
+        }
+        if let usage = MacDiagnosticsMetrics.processCPUUsage() {
+            cpuText = String(format: "%.1f%%", usage)
+        } else {
+            cpuText = "—"
+        }
+        let used = await AudioCacheManager.shared.totalCacheSize()
+        let limit = await AudioCacheManager.shared.cacheLimitBytes()
+        let usedStr = ByteCountFormatter.string(fromByteCount: used, countStyle: .file)
+        let limitStr = limit == AudioCacheLimitPolicy.unlimitedBytes
+            ? String(localized: "smart_limit_placeholder")
+            : ByteCountFormatter.string(fromByteCount: limit, countStyle: .binary)
+        cacheText = "\(usedStr) / \(limitStr)"
+    }
+
+    private func healthMetric(_ label: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(verbatim: value)
+                .font(.system(size: 18, weight: .bold, design: .monospaced))
+                .foregroundStyle(color)
+                .lineLimit(1)
+            Text(verbatim: label)
+                .font(.system(size: 10.5))
+                .foregroundStyle(PMColor.textFaint)
+                .lineLimit(1)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .pmCard(cornerRadius: 10)
+    }
+
+    private func logFilterButton(_ filter: MacLogFilter) -> some View {
+        Button {
+            selectedFilter = filter
+        } label: {
+            Text(verbatim: filter.title)
+                .font(.system(size: 10, weight: selectedFilter == filter ? .semibold : .medium))
+                .foregroundStyle(selectedFilter == filter ? Color.white : PMColor.textMuted)
+                .padding(.horizontal, 8)
+                .frame(height: 18)
+                .background(selectedFilter == filter ? PMColor.brand : PMColor.rowHover, in: .capsule)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var logRows: [MacLogRow] {
+        _ = tick
+        let recent = FileLogger.shared.recentContent(maxBytes: 12_000)
+            .split(separator: "\n")
+            .suffix(80)
+            .map(String.init)
+        let parsed = recent.compactMap(MacLogRow.parse)
+        return parsed.filter { selectedFilter.matches($0) }
+    }
+
+    private func copy(_ row: MacLogRow) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(row.pasteboardText, forType: .string)
+        copiedRowID = row.id
+    }
+}
+
+private enum MacLogFilter: CaseIterable, Equatable {
+    case all, warn, error
+
+    var title: String {
+        switch self {
+        case .all: return Lz("All")
+        case .warn: return String(localized: "log_filter_warning")
+        case .error: return String(localized: "log_filter_error")
+        }
+    }
+
+    func matches(_ row: MacLogRow) -> Bool {
+        switch self {
+        case .all: return true
+        case .warn: return row.level == "WARN"
+        case .error: return row.level == "ERROR"
+        }
+    }
+}
+
+private struct MacLogRow {
+    let time: String
+    let level: String
+    let module: String
+    let message: String
+
+    var id: String {
+        "\(time)|\(level)|\(module)|\(message)"
+    }
+
+    var pasteboardText: String {
+        "[\(time)] [\(level)] \(module) \(message)"
+    }
+
+    var color: Color {
+        switch level {
+        case "ERROR": return PMColor.bad
+        case "WARN": return PMColor.warn
+        default: return Color(red: 0.85, green: 0.83, blue: 0.78).opacity(0.78)
+        }
+    }
+
+    static func parse(_ line: String) -> MacLogRow? {
+        guard line.hasPrefix("[") else { return nil }
+        let parts = line.split(separator: "]", maxSplits: 2).map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let time = parts[0].replacingOccurrences(of: "[", with: "")
+        let rest = parts.dropFirst().joined(separator: "]").trimmingCharacters(in: .whitespaces)
+        let level: String
+        if rest.localizedCaseInsensitiveContains("error") || rest.contains("❌") {
+            level = "ERROR"
+        } else if rest.localizedCaseInsensitiveContains("warn") || rest.contains("⚠️") {
+            level = "WARN"
+        } else {
+            level = "INFO"
+        }
+        let module = rest.split(separator: " ").first.map(String.init) ?? "App"
+        return MacLogRow(time: String(time.prefix(8)), level: level, module: String(module.prefix(12)), message: rest)
+    }
+}
+
+private struct MacSTAboutView: View {
+    @State private var showLicenses = false
+
+    private let repositoryURL = URL(string: "https://github.com/chenqi92/primuse")!
+    private let issuesURL = URL(string: "https://github.com/chenqi92/primuse/issues/new/choose")!
+
+    private var version: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
+    }
+
+    private var build: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 22) {
+                BrandMonogram(slot: .feature)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(verbatim: PMAppDisplayName())
+                        .font(.system(size: 26, weight: .bold))
+                        .tracking(-0.5)
+                        .foregroundStyle(PMColor.text)
+
+                    Text(verbatim: "\(String(localized: "version")) \(version)  ·  \(String(localized: "build")) \(build)")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(PMColor.textMuted)
+
+                    Text(verbatim: String(localized: "onboarding_mac_welcome_desc"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(PMColor.textFaint)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .settingsAnchor("about.version")
+            }
+            .padding(22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PMColor.bgElev, in: .rect(cornerRadius: 16))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+            }
+
+            HStack(spacing: 12) {
+                aboutLinkCard(
+                    title: String(localized: "github_repository"),
+                    detail: "github.com/chenqi92/primuse",
+                    systemImage: "chevron.left.forwardslash.chevron.right"
+                ) {
+                    NSWorkspace.shared.open(repositoryURL)
+                }
+
+                aboutLinkCard(
+                    title: String(localized: "github_feedback"),
+                    detail: "GitHub Issues",
+                    systemImage: "exclamationmark.bubble",
+                    emphasized: true
+                ) {
+                    NSWorkspace.shared.open(issuesURL)
+                }
+            }
+            .settingsAnchor("about.repository")
+
+            HStack(alignment: .top, spacing: 7) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .padding(.top, 1)
+                Text(verbatim: String(localized: "github_feedback_hint"))
+                    .font(.system(size: 10.5))
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(PMColor.textFaint)
+            .padding(.horizontal, 4)
+
+            HStack(spacing: 10) {
+                aboutUtilityButton(
+                    title: Lz("Check for Updates"),
+                    systemImage: "arrow.triangle.2.circlepath"
+                ) {
+                    MacUpdateCheckWindowController.shared.show()
+                }
+                aboutUtilityButton(
+                    title: String(localized: "rate_on_app_store"),
+                    systemImage: "star.bubble"
+                ) {
+                    NSWorkspace.shared.open(PrimuseAppStore.reviewURL)
+                }
+                aboutUtilityButton(
+                    title: Lz("Open-Source Licenses…"),
+                    systemImage: "doc.text"
+                ) {
+                    showLicenses = true
+                }
+                aboutUtilityButton(
+                    title: Lz("Diagnostic Logs…"),
+                    systemImage: "stethoscope"
+                ) {
+                    MacDiagnosticsWindowController.shared.show()
+                }
+            }
+            .settingsAnchor("about.update")
+
+            Text(verbatim: "© 2026 Primuse Project")
+                .font(.system(size: 10.5))
+                .foregroundStyle(PMColor.textFaint)
+                .padding(.top, 2)
+                .padding(.horizontal, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(isPresented: $showLicenses) {
+            MacLicensesPanel {
+                showLicenses = false
+            }
+        }
+    }
+
+    private func aboutLinkCard(
+        title: String,
+        detail: String,
+        systemImage: String,
+        emphasized: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(emphasized ? Color.white : PMColor.brand)
+                    .frame(width: 36, height: 36)
+                    .background(emphasized ? PMColor.brand : PMColor.brand.opacity(0.13), in: .rect(cornerRadius: 9))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                        .lineLimit(1)
+                    Text(verbatim: detail)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(PMColor.textFaint)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(emphasized ? PMColor.brand : PMColor.textFaint)
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+            .background(emphasized ? PMColor.brand.opacity(0.10) : PMColor.bgElev, in: .rect(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(emphasized ? PMColor.brand.opacity(0.7) : PMColor.cardBorder,
+                                  lineWidth: emphasized ? 1 : 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func aboutUtilityButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PMColor.brand)
+                Text(verbatim: title)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(PMColor.text)
+            .frame(maxWidth: .infinity)
+            .frame(height: 42)
+            .background(PMColor.bgElev, in: .rect(cornerRadius: 9))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+extension View {
+    func macReadablePane(maxWidth: CGFloat = 860) -> some View {
+        self
+            .formStyle(.grouped)
+            .frame(maxWidth: maxWidth, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+#endif

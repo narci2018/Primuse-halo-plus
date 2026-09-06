@@ -1,0 +1,27 @@
+import SwiftUI
+import PrimuseKit
+
+struct SFTPBrowserView: View {
+    let source: MusicSource
+    @Binding var selectedDirectories: [String]
+
+    private let connector: any MusicSourceConnector
+
+    init(
+        source: MusicSource,
+        connector: any MusicSourceConnector,
+        selectedDirectories: Binding<[String]>
+    ) {
+        self.source = source
+        self._selectedDirectories = selectedDirectories
+        self.connector = connector
+    }
+
+    var body: some View {
+        ConnectorDirectoryBrowserView(
+            source: source,
+            connector: connector,
+            selectedDirectories: $selectedDirectories
+        )
+    }
+}

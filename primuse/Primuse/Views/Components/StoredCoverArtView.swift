@@ -1,0 +1,1568 @@
+import SwiftUI
+import MusicKit
+import PrimuseKit
+#if os(iOS)
+import PhotosUI
+#endif
+#if os(iOS) || os(macOS)
+import UniformTypeIdentifiers
+#endif
+
+extension QuickAccessCoverStyle {
+    var localizedTitle: String {
+        switch self {
+        case .automatic: return String(localized: "library_quick_access_cover_default")
+        case .circle: return String(localized: "library_quick_access_cover_circle")
+        case .square: return String(localized: "library_quick_access_cover_square")
+        case .collage: return String(localized: "library_quick_access_cover_collage")
+        }
+    }
+}
+
+enum QuickAccessArtworkItem {
+    case album(PrimuseKit.Album)
+    case artist(PrimuseKit.Artist)
+    case playlist(PrimuseKit.Playlist)
+
+    var id: String {
+        switch self {
+        case .album(let album): return "album:" + album.id
+        case .artist(let artist): return "artist:" + artist.id
+        case .playlist(let playlist): return "playlist:" + playlist.id
+        }
+    }
+}
+
+struct QuickAccessArtworkView<AutomaticArtwork: View>: View {
+    let item: QuickAccessArtworkItem
+    let size: CGFloat
+    let cornerRadius: CGFloat
+    @ViewBuilder var automaticArtwork: () -> AutomaticArtwork
+
+    @AppStorage(QuickAccessCoverStyle.storageKey) private var style = QuickAccessCoverStyle.automatic
+
+    var body: some View {
+        if style == .automatic {
+            automaticArtwork()
+        } else {
+            QuickAccessCustomArtworkView(
+                item: item, style: style, size: size, cornerRadius: cornerRadius
+            )
+        }
+    }
+}
+
+private struct QuickAccessCustomArtworkView: View {
+    let item: QuickAccessArtworkItem
+    let style: QuickAccessCoverStyle
+    let size: CGFloat
+    let cornerRadius: CGFloat
+
+    @Environment(MusicLibrary.self) private var library
+    @Environment(SourceManager.self) private var sourceManager
+    @State private var collage: [PlaylistArtworkResource] = []
+    @State private var watchedArtworkTokens = Set<String>()
+    @State private var reloadRevision = 0
+
+    private var radius: CGFloat { style == .circle ? size / 2 : cornerRadius }
+
+    private var loadIdentity: String {
+        [item.id, style.rawValue, library.songReplacementToken.uuidString,
+         String(library.playlistCollectionRevision), String(library.albumArtworkLookupRevision),
+         String(NetworkMonitor.shared.pathGeneration), String(reloadRevision)].joined(separator: "#")
+    }
+
+    var body: some View {
+        ZStack {
+            singleArtwork
+            if style == .collage, !collage.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(0..<2) { row in
+                        HStack(spacing: 0) {
+                            ForEach(0..<2) { column in
+                                artwork(collage[(row * 2 + column) % collage.count], side: size / 2)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        .task(id: loadIdentity) {
+            guard style == .collage else { return }
+            let identity = loadIdentity
+            // Collapse metadata/cache bursts before collecting member artwork.
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            let songs = memberSongs()
+            let itemID = item.id
+            watchedArtworkTokens = Set(songs.flatMap { [$0.id] + [$0.coverArtFileName].compactMap { $0 } })
+            let plan = await Task.detached(priority: .utility) {
+                QuickAccessArtworkPolicy.makePlan(itemID: itemID, songs: songs)
+            }.value
+            guard !Task.isCancelled, identity == loadIdentity else { return }
+            let songsByID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let resolved = await QuickAccessArtworkPolicy.resolveCollage(plan: plan, songs: songs) { candidate in
+                guard let songID = candidate.songID, let song = songsByID[songID] else { return nil as PlaylistArtworkResource? }
+                return await PlaylistArtworkResourceResolver.resolve(
+                    playlist: PrimuseKit.Playlist(id: item.id, name: ""),
+                    plan: PlaylistArtworkResolutionPlan(signature: plan.signature, candidates: [candidate]),
+                    songs: [song], size: size / 2, sourceManager: sourceManager,
+                    cacheDiscriminator: identity
+                )?.value
+            }
+            guard !Task.isCancelled, identity == loadIdentity else { return }
+            collage = resolved
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidCache), perform: artworkChanged)
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidInvalidate), perform: artworkChanged)
+    }
+
+    @ViewBuilder
+    private var singleArtwork: some View {
+        switch item {
+        case .album(let album):
+            AlbumArtworkView(album: album, size: size, cornerRadius: 0)
+        case .artist(let artist):
+            ArtistArtworkView(artist: artist, size: size, cornerRadius: 0)
+        case .playlist(let playlist):
+            PlaylistArtworkView(
+                playlist: playlist, size: size, cornerRadius: 0,
+                placeholderIcon: playlist.id == MusicLibrary.likedSongsPlaylistID ? "heart.fill" : "music.note.list"
+            )
+        }
+    }
+
+    private func memberSongs() -> [PrimuseKit.Song] {
+        switch item {
+        case .album(let album): return library.songs(forAlbum: album.id)
+        case .artist(let artist): return library.songs(forArtist: artist.id)
+        case .playlist(let playlist): return library.songs(forPlaylist: playlist.id)
+        }
+    }
+
+    @ViewBuilder
+    private func artwork(_ resource: PlaylistArtworkResource, side: CGFloat) -> some View {
+        switch resource {
+        case .image(let image):
+            Image(platformImage: image)
+                .resizable().aspectRatio(contentMode: .fill)
+                .frame(width: side, height: side).clipped()
+        case .musicKit(let artwork):
+            ArtworkImage(artwork, width: side, height: side)
+                .frame(width: side, height: side).clipped()
+        }
+    }
+
+    private func artworkChanged(_ notification: Notification) {
+        guard style == .collage else { return }
+        var tokens = notification.userInfo?["tokens"] as? [String] ?? []
+        tokens += notification.userInfo?["songIDs"] as? [String] ?? []
+        if let token = notification.object as? String { tokens.append(token) }
+        if let token = notification.userInfo?["songID"] as? String { tokens.append(token) }
+        if tokens.contains(where: watchedArtworkTokens.contains) { reloadRevision &+= 1 }
+    }
+}
+
+enum PlaylistArtworkResource {
+    case image(PlatformImage)
+    case musicKit(MusicKit.Artwork)
+}
+
+/// App-layer half of the shared playlist artwork resolver. PrimuseKit owns the
+/// deterministic ordering; this adapter proves that each candidate can really
+/// be displayed by the same cache/source/MusicKit chain used for song covers.
+@MainActor
+enum PlaylistArtworkResourceResolver {
+    static func resolve(
+        playlist: PrimuseKit.Playlist,
+        plan: PlaylistArtworkResolutionPlan,
+        songs: [PrimuseKit.Song],
+        size: CGFloat,
+        sourceManager: SourceManager,
+        allowsMusicKitArtwork: Bool = true,
+        cacheDiscriminator: String = "",
+        appleMusicLibrary: AppleMusicLibraryService = AppServices.shared.appleMusicLibrary
+    ) async -> PlaylistArtworkResolution<PlaylistArtworkResource>? {
+        let songsByID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let dedicatedSourceID = MirrorPlaylistSuppressionPolicy
+            .key(forPlaylistID: playlist.id)?
+            .sourceID
+
+        return await PlaylistArtworkResolver.resolve(plan: plan) { candidate in
+            switch candidate.kind {
+            case .dedicated:
+                if allowsMusicKitArtwork,
+                   dedicatedSourceID == AppleMusicLibraryIdentity.sourceID,
+                   let artwork = appleMusicLibrary.cachedMusicKitPlaylistArtwork(
+                    playlistID: playlist.id
+                   ) {
+                    return .musicKit(artwork)
+                }
+                return await CachedArtworkView.resolveImage(
+                    coverRef: candidate.artworkReference,
+                    songID: nil,
+                    size: size,
+                    sourceID: dedicatedSourceID,
+                    filePath: nil,
+                    fileFormat: nil,
+                    sourceManager: sourceManager,
+                    cacheDiscriminator: cacheDiscriminator
+                ).map(PlaylistArtworkResource.image)
+
+            case .song:
+                guard let songID = candidate.songID,
+                      let song = songsByID[songID] else { return nil }
+                if allowsMusicKitArtwork,
+                   song.sourceID == AppleMusicLibraryIdentity.sourceID,
+                   !song.filePath.isEmpty,
+                   let artwork = await appleMusicLibrary.musicKitSong(amID: song.filePath)?.artwork {
+                    return .musicKit(artwork)
+                }
+                return await CachedArtworkView.resolveImage(
+                    coverRef: candidate.artworkReference,
+                    songID: song.id,
+                    size: size,
+                    sourceID: song.sourceID,
+                    filePath: song.filePath,
+                    fileFormat: song.fileFormat,
+                    sourceManager: sourceManager,
+                    cacheDiscriminator: cacheDiscriminator
+                ).map(PlaylistArtworkResource.image)
+            }
+        }
+    }
+}
+
+/// The single playlist artwork surface for iPhone, iPad, and macOS. It keeps a
+/// non-transparent placeholder underneath the async result and reruns the full
+/// fallback chain when membership, source artwork, the metadata cache, or the
+/// active network route changes.
+struct PlaylistArtworkView: View {
+    let playlist: PrimuseKit.Playlist
+    var size: CGFloat = 48
+    var cornerRadius: CGFloat = 8
+    var placeholderIcon: String = "music.note.list"
+
+    @Environment(MusicLibrary.self) private var library
+    @Environment(SourceManager.self) private var sourceManager
+    @State private var resource: PlaylistArtworkResource?
+    @State private var frameworkFallbackResource: PlaylistArtworkResource?
+    @State private var uploadedImage: PlatformImage?
+    #if os(macOS)
+    @State private var artworkLoadingRequest: UUID?
+    #endif
+    @State private var resolvedPlanSignature: String?
+    @State private var reloadRevision = 0
+
+    private var currentPlaylist: PrimuseKit.Playlist {
+        library.playlist(id: playlist.id) ?? playlist
+    }
+
+    private var songs: [PrimuseKit.Song] {
+        library.songs(forPlaylist: playlist.id)
+    }
+
+    private var overrideOwner: LibraryArtworkOwner {
+        LibraryArtworkOwner(kind: .playlist, id: playlist.id)
+    }
+
+    private var loadRevisionIdentity: String {
+        [
+            playlist.id,
+            String(library.playlistCollectionRevision),
+            library.songReplacementToken.uuidString,
+            String(library.artworkOverrideRevision),
+            String(NetworkMonitor.shared.pathGeneration),
+            String(reloadRevision),
+        ].joined(separator: "#")
+    }
+
+    var body: some View {
+        let presentation = library.artworkPresentation(for: overrideOwner)
+        let uploadedContentID = presentation.uploadedContentID
+
+        ZStack {
+            placeholder
+            resolvedArtwork
+            manualArtwork(presentation)
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .task(id: loadRevisionIdentity) {
+            #if os(macOS)
+            let request = UUID()
+            artworkLoadingRequest = request
+            defer {
+                if artworkLoadingRequest == request { artworkLoadingRequest = nil }
+            }
+            #endif
+            let identity = loadRevisionIdentity
+            let playlistSnapshot = currentPlaylist
+            let currentSongs = songs
+            let currentPlan = await Task.detached(priority: .userInitiated) {
+                PlaylistArtworkResolutionPolicy.makePlan(
+                    playlist: playlistSnapshot,
+                    songs: currentSongs
+                )
+            }.value
+            guard !Task.isCancelled, loadRevisionIdentity == identity else { return }
+            let cacheDiscriminator = [
+                String(playlistSnapshot.updatedAt.timeIntervalSinceReferenceDate),
+                library.songReplacementToken.uuidString,
+                String(reloadRevision),
+            ].joined(separator: "#")
+            if resolvedPlanSignature != currentPlan.signature {
+                resource = nil
+                frameworkFallbackResource = nil
+            }
+            let resolved = await PlaylistArtworkResourceResolver.resolve(
+                playlist: playlistSnapshot,
+                plan: currentPlan,
+                songs: currentSongs,
+                size: size,
+                sourceManager: sourceManager,
+                cacheDiscriminator: cacheDiscriminator
+            )
+            // ArtworkImage has no public load/failure callback. Keep the next
+            // actually resolvable candidate underneath it so a failed or
+            // temporarily transparent MusicKit render never becomes a blank.
+            let frameworkFallback: PlaylistArtworkResource?
+            if let resolved,
+               case .musicKit = resolved.value,
+               let index = currentPlan.candidates.firstIndex(of: resolved.candidate),
+               currentPlan.candidates.indices.contains(index + 1) {
+                let fallbackPlan = PlaylistArtworkResolutionPlan(
+                    signature: "\(currentPlan.signature)#framework-fallback",
+                    candidates: Array(currentPlan.candidates[(index + 1)...])
+                )
+                frameworkFallback = await PlaylistArtworkResourceResolver.resolve(
+                    playlist: playlistSnapshot,
+                    plan: fallbackPlan,
+                    songs: currentSongs,
+                    size: size,
+                    sourceManager: sourceManager,
+                    cacheDiscriminator: cacheDiscriminator
+                )?.value
+            } else {
+                frameworkFallback = nil
+            }
+            guard !Task.isCancelled, loadRevisionIdentity == identity else { return }
+            resource = resolved?.value
+            frameworkFallbackResource = frameworkFallback
+            resolvedPlanSignature = currentPlan.signature
+        }
+        .task(id: "\(uploadedContentID ?? "")#\(library.artworkOverrideRevision)#\(reloadRevision)") {
+            guard let contentID = uploadedContentID else {
+                uploadedImage = nil
+                return
+            }
+            let data = await Task.detached(priority: .utility) {
+                MetadataAssetStore.shared.customArtworkData(contentID: contentID)
+            }.value
+            guard !Task.isCancelled, let data else {
+                uploadedImage = nil
+                return
+            }
+            uploadedImage = PlatformImage(data: data)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidCache)) { note in
+            guard notification(
+                note,
+                affects: currentPlaylist,
+                songs: songs,
+                uploadedContentID: uploadedContentID
+            ) else { return }
+            reloadRevision &+= 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidInvalidate)) { note in
+            guard notification(
+                note,
+                affects: currentPlaylist,
+                songs: songs,
+                uploadedContentID: uploadedContentID
+            ) else { return }
+            reloadRevision &+= 1
+        }
+    }
+
+    @ViewBuilder
+    private func manualArtwork(_ presentation: MusicLibrary.ArtworkPresentation) -> some View {
+        if let uploadedImage, presentation.uploadedContentID != nil {
+            Image(platformImage: uploadedImage)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size, height: size)
+                .clipped()
+        } else if let song = presentation.selectedSong {
+            CachedArtworkView(
+                coverRef: song.coverArtFileName,
+                songID: song.id,
+                size: size,
+                cornerRadius: 0,
+                sourceID: song.sourceID,
+                filePath: song.filePath,
+                fileFormat: song.fileFormat,
+                showsPlaceholder: false,
+                revisionToken: library.artworkOverrideRevision
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var placeholder: some View {
+        #if os(macOS)
+        if placeholderIcon == "music.note.list" {
+            MacDefaultArtwork(isLoading: artworkLoadingRequest != nil)
+        } else {
+            symbolicPlaceholder
+        }
+        #else
+        symbolicPlaceholder
+        #endif
+    }
+
+    private var symbolicPlaceholder: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color.secondary.opacity(0.18), Color.secondary.opacity(0.32)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            Image(systemName: placeholderIcon)
+                .font(.system(size: max(size * 0.25, 10), weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var resolvedArtwork: some View {
+        ZStack {
+            if let frameworkFallbackResource {
+                artwork(frameworkFallbackResource)
+            }
+            if let resource {
+                artwork(resource)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func artwork(_ resource: PlaylistArtworkResource) -> some View {
+        switch resource {
+        case .image(let image):
+            Image(platformImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size, height: size)
+                .clipped()
+        case .musicKit(let artwork):
+            ArtworkImage(artwork, width: size, height: size)
+                .frame(width: size, height: size)
+                .clipped()
+        }
+    }
+
+    private func notification(
+        _ notification: Notification,
+        affects playlist: PrimuseKit.Playlist,
+        songs: [PrimuseKit.Song],
+        uploadedContentID: String?
+    ) -> Bool {
+        if let contentID = uploadedContentID {
+            if notification.object as? String == contentID {
+                return true
+            }
+            if let tokens = notification.userInfo?["tokens"] as? [String],
+               tokens.contains(contentID) {
+                return true
+            }
+        }
+        let songIDs = Set(songs.map(\.id))
+        if let songID = notification.object as? String, songIDs.contains(songID) {
+            return true
+        }
+        if let songID = notification.userInfo?["songID"] as? String,
+           songIDs.contains(songID) {
+            return true
+        }
+        if let changedSongIDs = notification.userInfo?["songIDs"] as? [String],
+           changedSongIDs.contains(where: songIDs.contains) {
+            return true
+        }
+        var references = Set(songs.compactMap(\.coverArtFileName))
+        if playlist.hasDedicatedCoverArt, let dedicatedReference = playlist.coverArtPath {
+            references.insert(dedicatedReference)
+        }
+        if let tokens = notification.userInfo?["tokens"] as? [String],
+           tokens.contains(where: references.contains) {
+            return true
+        }
+        return false
+    }
+}
+
+/// Album artwork follows the same user override policy as playlists. The
+/// album resolver stays above a deterministic song fallback, so a missing
+/// album image can still use sidecar, embedded, remote, or MusicKit artwork
+/// from one of its tracks.
+struct AlbumArtworkView: View {
+    let album: PrimuseKit.Album
+    var size: CGFloat? = nil
+    var cornerRadius: CGFloat = 12
+    var showsPlaceholder = true
+    var presentationRole: ArtworkPresentationRole = .staticFirstFrame
+    var animationRequiresPlayback = false
+    var isPlaying = true
+    var isAnimationVisible = true
+
+    @Environment(MusicLibrary.self) private var library
+    @State private var uploadedImage: PlatformImage?
+    @State private var resolvedFallbackArtworkIdentity: String?
+    @State private var reloadRevision = 0
+
+    private var owner: LibraryArtworkOwner {
+        LibraryArtworkOwner(kind: .album, id: album.id)
+    }
+
+    private var fallbackSong: PrimuseKit.Song? {
+        library.preferredArtworkSong(forAlbumID: album.id)
+    }
+
+    var body: some View {
+        let presentation = library.artworkPresentation(for: owner)
+        let uploadedContentID = presentation.uploadedContentID
+
+        Group {
+            if let size {
+                artworkLayers(
+                    side: max(0, size),
+                    selectedSong: presentation.selectedSong,
+                    uploadedContentID: uploadedContentID
+                )
+            } else {
+                GeometryReader { proxy in
+                    let side = max(0, min(proxy.size.width, proxy.size.height))
+                    artworkLayers(
+                        side: side,
+                        selectedSong: presentation.selectedSong,
+                        uploadedContentID: uploadedContentID
+                    )
+                }
+                .aspectRatio(1, contentMode: .fit)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .task(id: "\(uploadedContentID ?? "")#\(library.artworkOverrideRevision)#\(reloadRevision)") {
+            guard let contentID = uploadedContentID else {
+                uploadedImage = nil
+                return
+            }
+            let data = await Task.detached(priority: .utility) {
+                MetadataAssetStore.shared.customArtworkData(contentID: contentID)
+            }.value
+            guard !Task.isCancelled, let data else {
+                uploadedImage = nil
+                return
+            }
+            uploadedImage = PlatformImage(data: data)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidCache)) { note in
+            guard let contentID = uploadedContentID else { return }
+            let objectMatches = note.object as? String == contentID
+            let tokensMatch = (note.userInfo?["tokens"] as? [String])?.contains(contentID) == true
+            guard objectMatches || tokensMatch else { return }
+            reloadRevision &+= 1
+        }
+    }
+
+    @ViewBuilder
+    private func artworkLayers(
+        side: CGFloat,
+        selectedSong: PrimuseKit.Song?,
+        uploadedContentID: String?
+    ) -> some View {
+        let overrideOwnsVisibleLayer = uploadedContentID != nil || selectedSong != nil
+        let automaticAnimationVisible = isAnimationVisible && !overrideOwnsVisibleLayer
+        let fallbackOwnsAutomaticLayer = fallbackSong.map { song in
+            resolvedFallbackArtworkIdentity == fallbackArtworkIdentity(for: song)
+        } ?? false
+
+        ZStack {
+            if showsPlaceholder {
+                CachedArtworkView(
+                    coverRef: nil,
+                    songID: nil,
+                    size: side,
+                    cornerRadius: cornerRadius,
+                    placeholderIcon: "square.stack",
+                    showsPlaceholder: true
+                )
+            }
+
+            if presentationRole == .animatedHero {
+                cachedAlbumArtwork(
+                    side: side,
+                    isAnimationVisible: automaticAnimationVisible
+                        && !fallbackOwnsAutomaticLayer
+                )
+                sourceFallbackArtwork(
+                    side: side,
+                    isAnimationVisible: automaticAnimationVisible
+                )
+            } else {
+                sourceFallbackArtwork(side: side, isAnimationVisible: false)
+                cachedAlbumArtwork(side: side, isAnimationVisible: false)
+            }
+
+            if let uploadedImage, uploadedContentID != nil {
+                Image(platformImage: uploadedImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: side, height: side)
+                    .clipped()
+            } else if let song = selectedSong {
+                CachedArtworkView(
+                    coverRef: song.coverArtFileName,
+                    songID: song.id,
+                    size: side,
+                    cornerRadius: 0,
+                    sourceID: song.sourceID,
+                    filePath: song.filePath,
+                    fileFormat: song.fileFormat,
+                    showsPlaceholder: false,
+                    presentationRole: presentationRole,
+                    animationRequiresPlayback: animationRequiresPlayback,
+                    isPlaying: isPlaying,
+                    isAnimationVisible: isAnimationVisible,
+                    revisionToken: library.artworkOverrideRevision
+                )
+            }
+        }
+        .frame(width: side, height: side)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func sourceFallbackArtwork(
+        side: CGFloat,
+        isAnimationVisible: Bool
+    ) -> some View {
+        if let song = fallbackSong {
+            let identity = fallbackArtworkIdentity(for: song)
+            CachedArtworkView(
+                coverRef: song.coverArtFileName,
+                songID: song.id,
+                size: side,
+                cornerRadius: 0,
+                sourceID: song.sourceID,
+                filePath: song.filePath,
+                fileFormat: song.fileFormat,
+                showsPlaceholder: false,
+                presentationRole: presentationRole,
+                animationRequiresPlayback: animationRequiresPlayback,
+                isPlaying: isPlaying,
+                isAnimationVisible: isAnimationVisible,
+                revisionToken: library.artworkOverrideRevision,
+                onResolutionChange: { isResolved in
+                    if isResolved {
+                        resolvedFallbackArtworkIdentity = identity
+                    } else if resolvedFallbackArtworkIdentity == identity {
+                        resolvedFallbackArtworkIdentity = nil
+                    }
+                }
+            )
+        }
+    }
+
+    private func fallbackArtworkIdentity(for song: PrimuseKit.Song) -> String {
+        ArtworkSourceRequestIdentity.key(
+            songID: song.id,
+            artworkReference: song.coverArtFileName,
+            sourceID: song.sourceID,
+            filePath: song.filePath,
+            fileFormat: song.fileFormat.rawValue,
+            revision: "\(song.revision ?? "")#\(library.artworkOverrideRevision)"
+        ) ?? song.id
+    }
+
+    private func cachedAlbumArtwork(
+        side: CGFloat,
+        isAnimationVisible: Bool
+    ) -> some View {
+        CachedArtworkView(
+            albumID: album.id,
+            albumTitle: album.title,
+            artistName: album.artistName,
+            year: album.year,
+            trackCount: album.songCount,
+            size: side,
+            cornerRadius: cornerRadius,
+            showsPlaceholder: false,
+            presentationRole: presentationRole,
+            animationRequiresPlayback: animationRequiresPlayback,
+            isPlaying: isPlaying,
+            isAnimationVisible: isAnimationVisible
+        )
+    }
+}
+
+/// Artist artwork keeps the source/scraped automatic image underneath a
+/// durable user override. The same view is used on tvOS so a choice synced
+/// from iPhone, iPad, or Mac is displayed there without exposing editing UI.
+struct ArtistArtworkView: View {
+    let artist: PrimuseKit.Artist
+    var size: CGFloat? = nil
+    var cornerRadius: CGFloat = 12
+    var showsPlaceholder = true
+
+    @Environment(MusicLibrary.self) private var library
+    @State private var uploadedImage: PlatformImage?
+    @State private var reloadRevision = 0
+
+    private var currentArtist: PrimuseKit.Artist {
+        library.visibleArtist(id: artist.id) ?? artist
+    }
+
+    private var owner: LibraryArtworkOwner {
+        LibraryArtworkOwner(kind: .artist, id: artist.id)
+    }
+
+    var body: some View {
+        let presentation = library.artworkPresentation(for: owner)
+        let uploadedContentID = presentation.uploadedContentID
+
+        Group {
+            if let size {
+                artworkLayers(
+                    side: max(0, size),
+                    presentation: presentation
+                )
+            } else {
+                GeometryReader { proxy in
+                    let side = max(0, min(proxy.size.width, proxy.size.height))
+                    artworkLayers(side: side, presentation: presentation)
+                }
+                .aspectRatio(1, contentMode: .fit)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .task(id: "\(uploadedContentID ?? "")#\(library.artworkOverrideRevision)#\(reloadRevision)") {
+            guard let contentID = uploadedContentID else {
+                uploadedImage = nil
+                return
+            }
+            let data = await Task.detached(priority: .utility) {
+                MetadataAssetStore.shared.customArtworkData(contentID: contentID)
+            }.value
+            guard !Task.isCancelled, let data else {
+                uploadedImage = nil
+                return
+            }
+            uploadedImage = PlatformImage(data: data)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidCache)) { note in
+            guard let contentID = uploadedContentID else { return }
+            let objectMatches = note.object as? String == contentID
+            let tokensMatch = (note.userInfo?["tokens"] as? [String])?.contains(contentID) == true
+            guard objectMatches || tokensMatch else { return }
+            reloadRevision &+= 1
+        }
+    }
+
+    private func artworkLayers(
+        side: CGFloat,
+        presentation: MusicLibrary.ArtworkPresentation
+    ) -> some View {
+        ZStack {
+            CachedArtworkView(
+                artistID: currentArtist.id,
+                artistName: currentArtist.name,
+                artworkReference: currentArtist.thumbnailPath,
+                size: side,
+                cornerRadius: 0,
+                showsPlaceholder: showsPlaceholder
+            )
+
+            if let uploadedImage, presentation.uploadedContentID != nil {
+                Image(platformImage: uploadedImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: side, height: side)
+                    .clipped()
+            } else if let song = presentation.selectedSong {
+                CachedArtworkView(
+                    coverRef: song.coverArtFileName,
+                    songID: song.id,
+                    size: side,
+                    cornerRadius: 0,
+                    sourceID: song.sourceID,
+                    filePath: song.filePath,
+                    fileFormat: song.fileFormat,
+                    showsPlaceholder: false,
+                    revisionToken: library.artworkOverrideRevision
+                )
+            }
+        }
+        .frame(width: side, height: side)
+        .clipped()
+    }
+}
+
+#if os(iOS) || os(macOS)
+/// Shared editor used by album, artist, and playlist detail pages. Choices are
+/// applied immediately and remain durable even when the underlying album is
+/// rebuilt from song metadata.
+struct LibraryArtworkEditorSheet: View {
+    let owner: LibraryArtworkOwner
+    let title: String
+    let songs: [PrimuseKit.Song]
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(MusicLibrary.self) private var library
+    @State private var artworkAvailability: [String: Bool] = [:]
+    @State private var isProcessing = false
+    @State private var errorMessage: String?
+    @State private var isFileImporterPresented = false
+    #if os(iOS)
+    @State private var selectedPhoto: PhotosPickerItem?
+    #else
+    @State private var macDraftChoice: MacArtworkChoice?
+    @State private var macPendingUploadData: Data?
+    @State private var macUploadedPreview: PlatformImage?
+    #endif
+
+    private var resolution: LibraryArtworkOverrideResolution {
+        library.artworkOverrideResolution(for: owner, eligibleSongs: songs)
+    }
+
+    var body: some View {
+        #if os(macOS)
+        macEditor
+        #else
+        iosEditor
+        #endif
+    }
+
+    #if os(iOS)
+    private var iosEditor: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        if library.setAutomaticArtwork(for: owner) {
+                            dismiss()
+                        }
+                    } label: {
+                        artworkActionLabel(
+                            titleKey: automaticTitleKey,
+                            systemImage: "wand.and.stars",
+                            isSelected: resolution == .automatic
+                        )
+                    }
+
+                    uploadControl
+                } footer: {
+                    Text("artwork_storage_hint")
+                }
+
+                Section("artwork_choose_song") {
+                    if songs.isEmpty {
+                        Text("artwork_no_songs")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(songs) { song in
+                            songChoice(song)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                #if os(iOS)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("cancel") { dismiss() }
+                }
+                #else
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("cancel") { dismiss() }
+                }
+                #endif
+            }
+            .disabled(isProcessing)
+            .overlay {
+                if isProcessing {
+                    ProgressView("artwork_processing")
+                        .padding(20)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+            .alert(
+                String(localized: "artwork_upload_failed"),
+                isPresented: Binding(
+                    get: { errorMessage != nil },
+                    set: { if !$0 { errorMessage = nil } }
+                )
+            ) {
+                Button("ok", role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "")
+            }
+        }
+        .onChange(of: selectedPhoto) { _, item in
+            guard let item else { return }
+            Task {
+                defer { selectedPhoto = nil }
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        errorMessage = String(localized: "artwork_invalid_image")
+                        return
+                    }
+                    processUpload(data)
+                } catch {
+                    if !isUserCancellation(error) {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            }
+        }
+        .fileImporter(
+            isPresented: $isFileImporterPresented,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false,
+            onCompletion: handleFileImport
+        )
+    }
+    #endif
+
+    #if os(macOS)
+    private enum MacArtworkChoice: Equatable {
+        case automatic
+        case selectedSong(String)
+        case uploaded(String)
+        case pendingUpload
+    }
+
+    private var resolvedMacChoice: MacArtworkChoice {
+        switch resolution {
+        case .automatic:
+            return .automatic
+        case .selectedSong(let songID):
+            return .selectedSong(songID)
+        case .uploaded(let contentID):
+            return .uploaded(contentID)
+        }
+    }
+
+    private var macChoice: MacArtworkChoice {
+        macDraftChoice ?? resolvedMacChoice
+    }
+
+    private var macHasChanges: Bool {
+        macChoice != resolvedMacChoice
+    }
+
+    private var macEditor: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(verbatim: title)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text("artwork_storage_hint")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(PMColor.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .background(PMColor.glassBtn, in: .circle)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("cancel"))
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 18)
+
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 14) {
+                    macArtworkPreview
+                        .frame(width: 176, height: 176)
+                        .background(PMColor.bgDeep, in: .rect(cornerRadius: PMRadius.l))
+                        .clipShape(RoundedRectangle(cornerRadius: PMRadius.l, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: PMRadius.l, style: .continuous)
+                                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+                        }
+                        .shadow(color: .black.opacity(0.18), radius: 16, y: 7)
+
+                    VStack(spacing: 8) {
+                        macChoiceButton(
+                            titleKey: automaticTitleKey,
+                            systemImage: "wand.and.stars",
+                            choice: .automatic
+                        )
+
+                        Button {
+                            isFileImporterPresented = true
+                        } label: {
+                            macChoiceLabel(
+                                titleKey: "artwork_choose_file",
+                                systemImage: "folder",
+                                isSelected: {
+                                    switch macChoice {
+                                    case .uploaded, .pendingUpload: true
+                                    default: false
+                                    }
+                                }()
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(width: 176)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("artwork_choose_song")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(PMColor.text)
+                        Spacer()
+                        Text(verbatim: songs.count.formatted())
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(PMColor.textFaint)
+                    }
+
+                    if songs.isEmpty {
+                        ContentUnavailableView(
+                            String(localized: "artwork_no_songs"),
+                            systemImage: "photo.on.rectangle.angled"
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView(.vertical) {
+                            LazyVGrid(
+                                columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+                                alignment: .leading,
+                                spacing: 14
+                            ) {
+                                ForEach(songs) { song in
+                                    macSongChoice(song)
+                                }
+                            }
+                            .padding(1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .padding(24)
+
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+
+            HStack(spacing: 10) {
+                if isProcessing {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("artwork_processing")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                Spacer()
+                Button("cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("save") { applyMacChoice() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(PMColor.brand)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!macHasChanges || isProcessing)
+            }
+            .controlSize(.regular)
+            .padding(.horizontal, 24)
+            .frame(height: 58)
+        }
+        .frame(width: 700, height: 540)
+        .background(PMColor.bg)
+        .disabled(isProcessing)
+        .fileImporter(
+            isPresented: $isFileImporterPresented,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false,
+            onCompletion: handleFileImport
+        )
+        .alert(
+            String(localized: "artwork_upload_failed"),
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )
+        ) {
+            Button("ok", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+        .onAppear {
+            macDraftChoice = resolvedMacChoice
+            if case .uploaded(let contentID) = resolvedMacChoice,
+               let data = MetadataAssetStore.shared.customArtworkData(contentID: contentID) {
+                macUploadedPreview = PlatformImage(data: data)
+            }
+        }
+    }
+
+    private func macChoiceButton(
+        titleKey: LocalizedStringKey,
+        systemImage: String,
+        choice: MacArtworkChoice
+    ) -> some View {
+        Button {
+            macDraftChoice = choice
+        } label: {
+            macChoiceLabel(
+                titleKey: titleKey,
+                systemImage: systemImage,
+                isSelected: macChoice == choice
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func macChoiceLabel(
+        titleKey: LocalizedStringKey,
+        systemImage: String,
+        isSelected: Bool
+    ) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isSelected ? PMColor.brand : PMColor.textMuted)
+                .frame(width: 16)
+            Text(titleKey)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(PMColor.text)
+            Spacer(minLength: 6)
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? PMColor.brand : PMColor.textFaint)
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 36)
+        .background(isSelected ? PMColor.brand.opacity(0.12) : PMColor.bgElev,
+                    in: .rect(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(isSelected ? PMColor.brand.opacity(0.5) : PMColor.cardBorder,
+                              lineWidth: 0.5)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var macArtworkPreview: some View {
+        Group {
+            switch macChoice {
+            case .automatic:
+                macAutomaticPreview
+            case .selectedSong(let songID):
+                if let song = songs.first(where: { $0.id == songID }) {
+                    macArtwork(for: song, size: 176)
+                } else {
+                    macPreviewPlaceholder
+                }
+            case .uploaded(let contentID):
+                if let image = macUploadedPreview
+                    ?? MetadataAssetStore.shared.customArtworkData(contentID: contentID).flatMap(PlatformImage.init(data:)) {
+                    Image(platformImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    macPreviewPlaceholder
+                }
+            case .pendingUpload:
+                if let image = macUploadedPreview {
+                    Image(platformImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    macPreviewPlaceholder
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var macAutomaticPreview: some View {
+        switch owner.kind {
+        case .album:
+            if let album = library.visibleAlbums.first(where: { $0.id == owner.id }) {
+                CachedArtworkView(
+                    albumID: album.id,
+                    albumTitle: album.title,
+                    artistName: album.artistName,
+                    size: 176,
+                    cornerRadius: 0
+                )
+            } else if let song = songs.first {
+                macArtwork(for: song, size: 176)
+            } else {
+                macPreviewPlaceholder
+            }
+        case .artist:
+            if let artist = library.visibleArtists.first(where: { $0.id == owner.id }) {
+                CachedArtworkView(
+                    artistID: artist.id,
+                    artistName: artist.name,
+                    artworkReference: artist.thumbnailPath,
+                    size: 176,
+                    cornerRadius: 0
+                )
+            } else if let song = songs.first {
+                macArtwork(for: song, size: 176)
+            } else {
+                macPreviewPlaceholder
+            }
+        case .playlist:
+            if resolution == .automatic, let playlist = library.playlist(id: owner.id) {
+                PlaylistArtworkView(playlist: playlist, size: 176, cornerRadius: 0)
+            } else if let song = songs.first {
+                macArtwork(for: song, size: 176)
+            } else {
+                macPreviewPlaceholder
+            }
+        }
+    }
+
+    private var macPreviewPlaceholder: some View {
+        ZStack {
+            PMColor.bgDeep
+            Image(systemName: "photo")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(PMColor.textFaint)
+        }
+    }
+
+    private func macSongChoice(_ song: PrimuseKit.Song) -> some View {
+        let isSelected: Bool = {
+            guard case .selectedSong(let songID) = macChoice else { return false }
+            return songID == song.id
+        }()
+        let isAvailable = artworkAvailability[song.id] == true
+        return Button {
+            macDraftChoice = .selectedSong(song.id)
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                ZStack(alignment: .topTrailing) {
+                    macArtwork(for: song, size: 86)
+                        .frame(width: 86, height: 86)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 17))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, PMColor.brand)
+                            .padding(6)
+                    }
+                }
+                Text(song.title)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+                Text(
+                    library.artistDisplayName(for: song)
+                        ?? String(localized: "unknown_artist")
+                )
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(PMColor.textMuted)
+                    .lineLimit(1)
+            }
+            .padding(7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? PMColor.brand.opacity(0.12) : .clear,
+                        in: .rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(isSelected ? PMColor.brand.opacity(0.55) : PMColor.cardBorder,
+                                  lineWidth: 0.5)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isAvailable)
+        .opacity(isAvailable ? 1 : 0.45)
+    }
+
+    private func macArtwork(for song: PrimuseKit.Song, size: CGFloat) -> some View {
+        CachedArtworkView(
+            coverRef: song.coverArtFileName,
+            songID: song.id,
+            size: size,
+            cornerRadius: 0,
+            sourceID: song.sourceID,
+            filePath: song.filePath,
+            fileFormat: song.fileFormat,
+            onResolutionChange: { available in
+                artworkAvailability[song.id] = available
+            }
+        )
+    }
+
+    private func applyMacChoice() {
+        switch macChoice {
+        case .automatic:
+            if library.setAutomaticArtwork(for: owner) { dismiss() }
+        case .selectedSong(let songID):
+            guard let song = songs.first(where: { $0.id == songID }) else { return }
+            if library.setArtwork(for: owner, to: song) { dismiss() }
+        case .uploaded(let contentID):
+            if library.setUploadedArtwork(contentID: contentID, for: owner) { dismiss() }
+        case .pendingUpload:
+            guard let data = macPendingUploadData else { return }
+            isProcessing = true
+            Task {
+                guard let contentID = await MetadataAssetStore.shared.storeCustomArtwork(data),
+                      library.setUploadedArtwork(contentID: contentID, for: owner) else {
+                    isProcessing = false
+                    errorMessage = String(localized: "artwork_invalid_image")
+                    return
+                }
+                isProcessing = false
+                dismiss()
+            }
+        }
+    }
+    #endif
+
+    @ViewBuilder
+    private var uploadControl: some View {
+        #if os(iOS)
+        let isUploaded: Bool = {
+            if case .uploaded = resolution { return true }
+            return false
+        }()
+        PhotosPicker(selection: $selectedPhoto, matching: .images) {
+            HStack(spacing: 12) {
+                Image(systemName: "photo.badge.plus")
+                    .frame(width: 28)
+                Text("artwork_choose_photo")
+                Spacer()
+                if isUploaded {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.tint)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+
+        Button {
+            isFileImporterPresented = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "folder")
+                    .frame(width: 28)
+                Text("artwork_choose_file")
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        #else
+        Button {
+            isFileImporterPresented = true
+        } label: {
+            artworkActionLabel(
+                titleKey: "artwork_upload",
+                systemImage: "photo.badge.plus",
+                isSelected: {
+                    if case .uploaded = resolution { return true }
+                    return false
+                }()
+            )
+        }
+        #endif
+    }
+
+    private func artworkActionLabel(
+        titleKey: LocalizedStringKey,
+        systemImage: String,
+        isSelected: Bool
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .frame(width: 28)
+            Text(titleKey)
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(.tint)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var automaticTitleKey: LocalizedStringKey {
+        resolution == .automatic
+            ? "artwork_mode_automatic"
+            : "artwork_restore_automatic"
+    }
+
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                errorMessage = String(localized: "artwork_invalid_image")
+                return
+            }
+            processUpload(data)
+        case .failure(let error):
+            guard !isUserCancellation(error) else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func isUserCancellation(_ error: Error) -> Bool {
+        error is CancellationError
+            || (error as? CocoaError)?.code == .userCancelled
+    }
+
+    private func songChoice(_ song: PrimuseKit.Song) -> some View {
+        let isAvailable = artworkAvailability[song.id] == true
+        let isSelected: Bool = {
+            guard case .selectedSong(let songID) = resolution else { return false }
+            return songID == song.id
+        }()
+        return Button {
+            if library.setArtwork(for: owner, to: song) {
+                dismiss()
+            }
+        } label: {
+            HStack(spacing: 12) {
+                CachedArtworkView(
+                    coverRef: song.coverArtFileName,
+                    songID: song.id,
+                    size: 44,
+                    cornerRadius: 6,
+                    sourceID: song.sourceID,
+                    filePath: song.filePath,
+                    fileFormat: song.fileFormat,
+                    onResolutionChange: { available in
+                        artworkAvailability[song.id] = available
+                    }
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(song.title)
+                        .lineLimit(1)
+                    Text(
+                        library.artistDisplayName(for: song)
+                            ?? String(localized: "unknown_artist")
+                    )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.tint)
+                } else if !isAvailable {
+                    Image(systemName: "photo.slash")
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isAvailable)
+    }
+
+    private func processUpload(_ data: Data) {
+        isProcessing = true
+        errorMessage = nil
+        Task {
+            let processed = await Task.detached(priority: .userInitiated) {
+                LibraryArtworkImageProcessor.process(data)
+            }.value
+            guard let processed else {
+                isProcessing = false
+                errorMessage = String(localized: "artwork_invalid_image")
+                return
+            }
+            #if os(macOS)
+            macPendingUploadData = processed
+            macUploadedPreview = PlatformImage(data: processed)
+            macDraftChoice = .pendingUpload
+            #else
+            guard let contentID = await MetadataAssetStore.shared.storeCustomArtwork(processed),
+                  library.setUploadedArtwork(contentID: contentID, for: owner) else {
+                isProcessing = false
+                errorMessage = String(localized: "artwork_invalid_image")
+                return
+            }
+            #endif
+            isProcessing = false
+            #if os(iOS)
+            dismiss()
+            #endif
+        }
+    }
+}
+#endif
+
+struct StoredCoverArtView: View {
+    let fileName: String?
+    var size: CGFloat = 48
+    var cornerRadius: CGFloat = 8
+
+    @State private var data: Data?
+
+    var body: some View {
+        CoverArtView(data: data, size: size, cornerRadius: cornerRadius)
+            .task(id: fileName) {
+                data = await loadData(for: fileName)
+            }
+    }
+}
+
+struct StoredArtworkView: View {
+    let fileName: String?
+    var cornerRadius: CGFloat = 16
+
+    @State private var data: Data?
+
+    var body: some View {
+        ArtworkView(data: data, cornerRadius: cornerRadius)
+            .task(id: fileName) {
+                data = await loadData(for: fileName)
+            }
+    }
+}
+
+private func loadData(for fileName: String?) async -> Data? {
+    guard let fileName, fileName.isEmpty == false else {
+        return nil
+    }
+
+    if let remoteURL = URL(string: fileName), remoteURL.scheme != nil {
+        do {
+            let (data, response) = try await URLSession.shared.data(from: remoteURL)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200...299).contains(httpResponse.statusCode) else {
+                return nil
+            }
+            return data
+        } catch {
+            return nil
+        }
+    }
+
+    return await MetadataAssetStore.shared.coverData(named: fileName)
+}

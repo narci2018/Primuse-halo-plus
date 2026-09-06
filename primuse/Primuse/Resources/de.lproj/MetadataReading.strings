@@ -1,0 +1,14 @@
+"title" = "Tempo beim Lesen von Tags";
+"automatic" = "Automatisch";
+"fast" = "Volle Geschwindigkeit";
+"energySaving" = "Energie sparen";
+"playback" = "Wiedergabe hat Vorrang";
+"lowPower" = "Stromsparmodus";
+"thermal" = "Zum Abkühlen verlangsamt";
+"cooling" = "Pausiert, bis das Gerät abgekühlt ist";
+"background" = "Lesen im Hintergrund";
+"rate" = "%.1f Titel/Min.";
+"fastWarningTitle" = "Volle Geschwindigkeit aktivieren?";
+"fastWarningMessage" = "Tags schneller einlesen. Dies kann mehr Wärme, höheren Akkuverbrauch und Ruckler verursachen. Bei erhöhter Temperatur, im Stromsparmodus oder während der Musikwiedergabe wird weiterhin gedrosselt und bei Bedarf pausiert. Der Modus lässt sich jederzeit wechseln.";
+"fastWarningConfirm" = "Starten";
+"cancel" = "Abbrechen";

@@ -1,0 +1,811 @@
+#!/usr/bin/env ruby
+
+require "json"
+require "open3"
+require "pathname"
+require "set"
+
+ROOT = Pathname(__dir__).parent.freeze
+SUPPORTED_LOCALES = %w[en de fr ja ko zh-Hans zh-Hant ru uk ar es-MX pt-BR hi th tr pl].freeze
+NON_ENGLISH_LOCALES = (SUPPORTED_LOCALES - ["en"]).freeze
+REQUIRED_SIRI_INTENTS = %w[
+  INPlayMediaIntent
+  INSearchForMediaIntent
+].freeze
+REQUIRED_SIRI_EXAMPLE_COUNT = 7
+APP_SHORTCUTS_CATALOG = ROOT / "Primuse/Resources/AppShortcuts.xcstrings"
+APP_SHORTCUT_SOURCE_PATHS = [
+  ROOT / "Primuse/App/PlayMediaIntentHandler.swift",
+  ROOT / "Primuse/Services/Intents/PrimuseAppIntents.swift"
+].freeze
+
+REQUIRED_APP_LOCALIZATION_KEYS = [
+  "ai_error_missing_openai_platform_key",
+  "ai_openai_platform_api_key",
+  "ai_openai_platform_billing_footer",
+  "ai_primuse_relay_enabled",
+  "ai_primuse_relay_consent_required",
+  "ai_primuse_relay_footer",
+  "ai_primuse_relay_name",
+  "ai_primuse_relay_ready",
+  "ai_primuse_relay_section",
+  "ai_primuse_relay_unsupported",
+  "audio_output_error_follow_system %d",
+  "audio_output_error_set_device %d",
+  "insecure_http_continue",
+  "insecure_http_warning_message %@",
+  "insecure_http_warning_title",
+  "radio_flac_error_allocate",
+  "radio_flac_error_configure",
+  "radio_flac_error_convert",
+  "radio_live_error_no_frames",
+  "radio_live_error_output",
+  "offline_wait_background_transfer",
+  "offline_wait_incompatible_transfer",
+  "source_unavailable",
+  "upnp_unknown_item"
+].freeze
+
+OPENAI_ACCOUNT_BOUNDARY_KEY = "ai_openai_platform_billing_footer"
+OPENAI_ACCOUNT_BOUNDARY_MARKERS = ["OpenAI Platform", "ChatGPT"].freeze
+OPENAI_ACCOUNT_BOUNDARY_BILLING_MARKERS = {
+  "en" => /separat/i,
+  "de" => /separat/i,
+  "fr" => /distinct/i,
+  "ja" => /別途/,
+  "ko" => /별도/,
+  "zh-Hans" => /单独/,
+  "zh-Hant" => /另外/,
+  "ru" => /отдельн/i,
+  "uk" => /окрем/i,
+  "ar" => /منفصل/,
+  "es-MX" => /separad|independient/i,
+  "pt-BR" => /separad/i,
+  "hi" => /अलग/,
+  "th" => /แยก/,
+  "tr" => /ayrı/i,
+  "pl" => /osobn|oddzieln/i
+}.freeze
+
+RESOURCE_GROUPS = [
+  ["Primuse Localizable.strings", ROOT / "Primuse/Resources", "Localizable.strings", false],
+  ["Primuse SettingsSearch.strings", ROOT / "Primuse/Resources", "SettingsSearch.strings", true],
+  ["Primuse CacheSync.strings", ROOT / "Primuse/Resources", "CacheSync.strings", true],
+  ["Primuse WiFiTransfer.strings", ROOT / "Primuse/Resources", "WiFiTransfer.strings", true],
+  ["PrimuseKit Localizable.strings", ROOT / "PrimuseKit/Sources/PrimuseKit/Resources", "Localizable.strings", true],
+  ["Primuse InfoPlist.strings", ROOT / "Primuse/Resources", "InfoPlist.strings", true],
+  ["Widget InfoPlist.strings", ROOT / "PrimuseWidgetExtension/Resources", "InfoPlist.strings", true],
+  ["Watch InfoPlist.strings", ROOT / "PrimuseWatch/Resources", "InfoPlist.strings", true],
+  ["Watch widget InfoPlist.strings", ROOT / "PrimuseWatchWidgets/Resources", "InfoPlist.strings", true]
+].freeze
+
+IDENTICAL_VALUE_PREFIXES = %w[
+  artwork_
+  baidu_snapshot_
+  cache_sync_
+  cloud_account_
+  fullscreen_effect_
+  home_
+  local_import_
+  lock_screen_
+  metadata_writeback_
+  relay_import_
+  relay_share_
+  reread_song_tags
+  server_favorite_
+  song_details_
+  tag_editor_lyrics_
+  tag_editor_metadata_writeback_
+  tag_editor_writeback_
+  drime_
+  cloud_permission_
+  fnmusic_
+  radio_
+  update_banner_
+].freeze
+
+IDENTICAL_VALUE_KEYS = %w[
+  tag_editor_footer
+  source_quick_sync
+  source_deep_scan
+  shuffle_all
+  sidebar_all_songs
+  sidebar_liked_songs
+  immersive_demo_title
+  immersive_demo_album
+  ssh_key
+  spatial_audio
+  stats_hours_minutes_format
+  ext.tv.immersive.style.lightField
+  ext.tv.immersive.style.deepField
+  ext.tv.immersive.style.ambientBloom
+  ext.tv.immersive.style.lyricStage
+  ext.tv.sources.form.host
+  ext.tv.radio.play
+  ext.tv.radio.stop
+  ext.tv.radio.stationCount
+  src.subtitle.fnMusic
+  src.subtitle.daoliyu
+].freeze
+
+IDENTICAL_VALUE_GLOBAL_ALLOWLIST = %w[
+  fnmusic_fnid
+  fnmusic_connection_fnconnect
+  drime_token_section
+  home_dashboard_title
+  radio_batch_status_playable
+  fullscreen_effect_cover_flow
+  fullscreen_effect_collection_native
+  fullscreen_effect_native
+  fullscreen_effect_vinyl
+  immersive_demo_album
+  immersive_demo_title
+  local_import_failure_item_format
+  relay_import_status
+  relay_share_format
+  relay_share_endpoint_placeholder
+  radio_batch_entry_file
+].freeze
+
+VERBATIM_SWIFTUI_LITERALS = %w[
+  192.168.1.8:12345
+  A-
+  A+
+  AM
+  Apple
+  ConfigurableScraper
+  Esc
+  Google
+  HTTP
+  Last.fm
+  ListenBrainz
+  MV
+  S3
+  Siri
+  music.example.local
+  us-east-1
+].freeze
+
+FORBIDDEN_VISIBLE_LITERALS = [
+  /\bText\([^\n]*(?:"LIVE"|"READY")/,
+  /\b(?:return|\?)\s*"LIVE"/,
+  /\baccessibilityLabel\([^\n]*"(?:Disable MV|Enable MV)"/,
+  /\bText\(\s*"SIRI REMOTE"/,
+  /\bText\(\s*"PRIMUSE WRAPPED"/,
+  /\bText\(\s*"17h"/,
+  /\bText\([^\n]*totalHours\)h"/,
+  /\bText\([^\n]*crossfadeDuration[^\n]*\)s"/,
+  /\bText\(\s*verbatim:\s*"d"/,
+  /\bmacSectionLabelText\(\s*"Apple Music · Catalog"/,
+  /\baccessibilityLabel:\s*String\s*=\s*"Volume"/,
+  /\bcase\s+\.[^:]+:\s*(?:return\s+)?"(?:Lossless|Standard|None|Implicit TLS \(FTPS\)|Explicit TLS \(FTPES\)|Auto|Plain|INVALID|WARN|ERROR)"/,
+  /\breturn\s+"(?:SSH, Key Auth|Auto Discovery|Open Source|Media Server|Plex Media|Built-in)"/,
+  /\?\?\s*"Device \\\([^)]*\)"/,
+  /\b(?:TextField|SecureField|Section|MacSTRow|MacSTSection)\(\s*"(?:Region|Bucket|Access Key|Secret Key|Client ID \/ App Key|Client Secret(?: \(optional\))?|User token|API Secret|Local Folder)"/,
+  /\b(?:errorMessage\s*=|return)\s*[^\n]*"(?:Unknown error|Pasted JSON|Shared music|NFS Exports|CloudKit unavailable)"/,
+  /\berrorMessage:\s*"Login failed"/,
+  /\bmessage:\s*"Unsupported SSH key/,
+  /\bString\(format:\s*"Track %02d"/,
+  /\bmessage:\s*"(?:Unable to configure live FLAC audio conversion\.|Unable to allocate live FLAC audio output\.|Unable to convert live FLAC audio\.)"/,
+  /NSLocalizedDescriptionKey:\s*"(?:Unable to configure live audio output\.|The radio stream returned no audio frames\.)"/,
+  /\bnode\.title\s*=\s*"Unknown"/,
+  /NSLocalizedDescriptionKey:\s*"Failed to (?:set output device|follow system output)/,
+  /\bmessage:\s*"Waiting for (?:a background|an incompatible) cache transfer to finish"/,
+  /\bmessage:\s*"Source not found"/
+].freeze
+
+JAPANESE_TRANSLATION_REQUIRED_PREFIXES = %w[
+  ai_
+  search_ai_
+].freeze
+
+IDENTICAL_VALUE_ALLOWLIST = {
+  "es-MX" => %w[home_mode_radio radio_title],
+  "pt-BR" => %w[stats_hours_minutes_format],
+  "pl" => %w[ext.tv.sources.form.host],
+  "de" => %w[
+    drime_token_section
+    fnmusic_connection_fnconnect
+    fnmusic_fnid
+    home_dashboard_title
+    home_mode_radio
+    home_radio_wall_badge
+    radio_title
+  ],
+  "fr" => %w[
+    drime_token_section
+    fnmusic_connection_fnconnect
+    fnmusic_fnid
+    home_dashboard_title
+    home_mode_radio
+    radio_title
+    radio_stations_count
+    home_pipeline_sources
+    home_sources_title
+    ext.tv.radio.stationCount
+  ],
+  "ja" => %w[
+    drime_token_section
+    fnmusic_connection_fnconnect
+    fnmusic_fnid
+    home_dashboard_title
+  ],
+  "ko" => %w[
+    drime_token_section
+    fnmusic_connection_fnconnect
+    fnmusic_fnid
+    home_dashboard_title
+  ],
+  "zh-Hans" => %w[
+    drime_token_section
+    fnmusic_connection_fnconnect
+    fnmusic_fnid
+  ],
+  "zh-Hant" => %w[
+    drime_token_section
+    fnmusic_connection_fnconnect
+    fnmusic_fnid
+  ]
+}.transform_values(&:freeze).freeze
+
+LOCALIZED_ERROR_ROOTS = %w[
+  Primuse
+  PrimuseKit/Sources
+  PrimuseTV
+  PrimuseWatch
+  PrimuseWidgetExtension
+  PrimuseActivityExtension
+].freeze
+
+PMSTRING_SOURCE_ROOTS = %w[
+  Primuse
+  PrimuseKit/Sources
+  PrimuseTV
+  PrimuseWatch
+  PrimuseWatchWidgets
+  PrimuseWidgetExtension
+  PrimuseActivityExtension
+  PrimuseTopShelf
+].freeze
+
+HAN_LITERAL_ALLOWLIST = {
+  "PrimuseKit/Sources/PrimuseKit/LyricsTextTools.swift" => [
+    /作词|作曲|编曲|填词|制作人|混音|母带|和声|吉他|贝斯|鼓|键盘|弦乐|录音|出品|发行|策划|统筹|演唱|原唱|翻唱/
+  ],
+  "PrimuseKit/Sources/PrimuseKit/LyricTranslationGroupingPolicy.swift" => [
+    /"男", "女", "主唱", "副唱", "合唱", "和声", "独唱", "对唱"/
+  ],
+  "PrimuseKit/Sources/PrimuseKit/SharedConstants.swift" => [
+    /未知|未知标题|未知標題|未知歌曲|无标题|無標題/
+  ],
+  "PrimuseKit/Sources/PrimuseKit/SiriRadioStationCatalog.swift" => [
+    /网络电台|網路電台|电台|電台|广播|廣播/
+  ],
+  "Primuse/Services/Metadata/Scrapers/ScraperTypes.swift" => [
+    /酷狗|网易云|QQ ?音乐|咪咕|千千/
+  ],
+  "Primuse/Views/Components/CachedArtworkView.swift" => [
+    /\["music", "音乐"/
+  ],
+  "Primuse/Views/Settings/DuplicateSongsView.swift" => [
+    /百度网盘|群晖|阿里云盘|本地文件|"本地"/
+  ],
+  "Primuse/Views/Mac/MacSettingsView.swift" => [
+    /"猿"/
+  ],
+  "Primuse/Views/Mac/Theme/PrimuseTheme.swift" => [
+    /与设计稿/
+  ],
+  "PrimuseTV/Model/TVStore.swift" => [
+    /"飞牛音乐"/
+  ],
+  "PrimuseTV/Views/TVLibraryView.swift" => [
+    /case all = "全部"/
+  ],
+  "Primuse/Services/Sources/CloudDrive/CloudDriveBase.swift" => [
+    /\["music", "音乐"/
+  ],
+  "Primuse/Services/Sources/SynologyScanner.swift" => [
+    /"音乐"/
+  ],
+  "Primuse/Services/Sources/NetworkDiscoveryService.swift" => [
+    /"飞牛音乐"/
+  ],
+  "Primuse/Services/Sources/SourceManager.swift" => [
+    /"登录"|"密码"|"超时"|"不存在"|"不可达"|"拒绝"|"限流"/
+  ],
+  "Primuse/Views/NowPlaying/NowPlayingView.swift" => [
+    /"音箱"|"群晖"/
+  ],
+  "Primuse/Views/NowPlaying/ImmersiveStageScenery.swift" => [
+    /"猿音"|"猿音 · PRIMUSE"|"PRIMUSE \/ 猿音"|音乐在此刻铺满整个空间|让声音拥有自己的光与形状|猿音，让聆听成为一场演出/
+  ],
+  "Primuse/Views/NowPlaying/ImmersivePlayerView.swift" => [
+    /"未知", "未知艺术家", "未知专辑"/
+  ],
+  "Primuse/Views/Mac/MacImmersivePlayerView.swift" => [
+    /"未知", "未知艺术家", "未知专辑"/
+  ],
+  "PrimuseTV/Views/TVImmersivePlayerView.swift" => [
+    /"未知", "未知标题", "未知艺术家", "未知专辑"/
+  ],
+  "Primuse/Views/Sources/BrowserChrome.swift" => [
+    /"网络"|"联网"|"连接"|"权限"|"不可达"|"超时"/
+  ]
+}.transform_values(&:freeze).freeze
+
+def load_strings(path)
+  output, error, status = Open3.capture3(
+    "/usr/bin/plutil", "-convert", "json", "-o", "-", path.to_s
+  )
+  raise "#{path.relative_path_from(ROOT)}: #{error.strip}" unless status.success?
+
+  JSON.parse(output)
+end
+
+def duplicate_string_keys(path)
+  keys = Hash.new { |entries, key| entries[key] = [] }
+  path.readlines.each_with_index do |line, index|
+    match = line.match(/^\s*"((?:\\.|[^"\\])*)"\s*=/)
+    keys[match[1]] << index + 1 if match
+  end
+  keys.select { |_key, lines| lines.length > 1 }
+end
+
+def localization_paths(root, file_name)
+  SUPPORTED_LOCALES.to_h do |locale|
+    [locale, root / "#{locale}.lproj" / file_name]
+  end
+end
+
+def format_signature(value)
+  value
+    .gsub("%%", "")
+    .scan(/%(?:\d+\$)?[-+0 #']*\d*(?:\.\d+)?(lld|llu|ld|lu|d|i|u|f|g|@)/)
+    .flatten
+    .sort
+end
+
+def check_resource_group(name, root, file_name, exact_english_parity, failures)
+  paths = localization_paths(root, file_name)
+  missing_files = paths.reject { |_locale, path| path.file? }.keys
+  unless missing_files.empty?
+    failures << "#{name}: missing locales: #{missing_files.join(', ')}"
+    return
+  end
+
+  values = paths.transform_values { |path| load_strings(path) }
+  paths.each do |locale, path|
+    duplicate_string_keys(path).each do |key, lines|
+      failures << "#{name} #{locale}: duplicate key #{key.inspect} on lines #{lines.join(', ')}"
+    end
+  end
+  union = values.values.reduce(Set.new) { |keys, dictionary| keys | dictionary.keys.to_set }
+
+  values.each do |locale, dictionary|
+    next if locale == "en" && !exact_english_parity
+
+    missing = union - dictionary.keys.to_set
+    extra = dictionary.keys.to_set - union
+    failures << "#{name} #{locale}: missing keys: #{missing.to_a.sort.join(', ')}" unless missing.empty?
+    failures << "#{name} #{locale}: unexpected keys: #{extra.to_a.sort.join(', ')}" unless extra.empty?
+  end
+
+  english = values.fetch("en")
+  values.each do |locale, dictionary|
+    next if locale == "en"
+
+    dictionary.each do |key, value|
+      next unless english.key?(key)
+
+      expected = format_signature(english.fetch(key))
+      actual = format_signature(value)
+      if expected != actual
+        failures << "#{name} #{locale}: placeholder mismatch for #{key.inspect}: " \
+                    "expected #{expected.inspect}, got #{actual.inspect}"
+      end
+    end
+
+    dictionary.each do |key, value|
+      next unless english[key] == value
+      next unless IDENTICAL_VALUE_KEYS.include?(key) ||
+                  IDENTICAL_VALUE_PREFIXES.any? { |prefix| key.start_with?(prefix) }
+      next if IDENTICAL_VALUE_GLOBAL_ALLOWLIST.include?(key)
+      next if IDENTICAL_VALUE_ALLOWLIST.fetch(locale, []).include?(key)
+
+      failures << "#{name} #{locale}: untranslated value for #{key.inspect}"
+    end
+
+    if locale == "ja"
+      dictionary.each do |key, value|
+        next unless JAPANESE_TRANSLATION_REQUIRED_PREFIXES.any? { |prefix| key.start_with?(prefix) }
+        next if value.match?(/[\p{Hiragana}\p{Katakana}\p{Han}]/)
+
+        failures << "#{name} ja: missing Japanese translation for #{key.inspect}"
+      end
+    end
+  end
+end
+
+def check_siri_vocabulary(failures)
+  paths = localization_paths(ROOT / "SiriVocabulary", "AppIntentVocabulary.plist")
+  missing_files = paths.reject { |_locale, path| path.file? }.keys
+  unless missing_files.empty?
+    failures << "Siri vocabulary: missing locales: #{missing_files.join(', ')}"
+    return
+  end
+
+  paths.each do |locale, path|
+    vocabulary = load_strings(path)
+    phrases = vocabulary["IntentPhrases"]
+    unless phrases.is_a?(Array)
+      failures << "Siri vocabulary #{locale}: IntentPhrases must be an array"
+      next
+    end
+
+    examples_by_intent = phrases.each_with_object({}) do |entry, result|
+      next unless entry.is_a?(Hash)
+
+      result[entry["IntentName"]] = entry["IntentExamples"]
+    end
+
+    REQUIRED_SIRI_INTENTS.each do |intent_name|
+      examples = examples_by_intent[intent_name]
+      unless examples.is_a?(Array)
+        failures << "Siri vocabulary #{locale}: missing example phrases for #{intent_name}"
+        next
+      end
+
+      normalized_examples = examples.each_with_object([]) do |example, result|
+        result << example.strip if example.is_a?(String) && !example.strip.empty?
+      end
+      if normalized_examples.length < REQUIRED_SIRI_EXAMPLE_COUNT
+        failures << "Siri vocabulary #{locale}: #{intent_name} needs at least #{REQUIRED_SIRI_EXAMPLE_COUNT} example phrases"
+      end
+      if normalized_examples.uniq.length != normalized_examples.length
+        failures << "Siri vocabulary #{locale}: duplicate example phrase for #{intent_name}"
+      end
+    end
+  end
+end
+
+def app_shortcut_source_keys
+  APP_SHORTCUT_SOURCE_PATHS.each_with_object(Set.new) do |path, keys|
+    source = path.read
+    source.scan(/phrases:\s*\[(.*?)\]/m).each do |(body)|
+      body.scan(/"((?:\\.|[^"\\])*)"/).each do |(phrase)|
+        next unless phrase.include?("\\(.applicationName)")
+
+        key = phrase
+          .gsub("\\(.applicationName)", "${applicationName}")
+          .gsub(/\\\(\\\.\$([a-zA-Z0-9_]+)\)/, '${\1}')
+        keys << key
+      end
+    end
+  end
+end
+
+def check_app_shortcuts_catalog(failures)
+  unless APP_SHORTCUTS_CATALOG.file?
+    failures << "App Shortcuts: missing Primuse/Resources/AppShortcuts.xcstrings"
+    return
+  end
+
+  catalog = JSON.parse(APP_SHORTCUTS_CATALOG.read)
+  strings = catalog["strings"]
+  unless catalog["sourceLanguage"] == "en" && strings.is_a?(Hash)
+    failures << "App Shortcuts: catalog must use English as its source language"
+    return
+  end
+
+  source_keys = app_shortcut_source_keys
+  catalog_keys = strings.keys.to_set
+  missing = source_keys - catalog_keys
+  stale = catalog_keys - source_keys
+  failures << "App Shortcuts: missing source phrases: #{missing.to_a.sort.join(', ')}" unless missing.empty?
+  failures << "App Shortcuts: stale catalog phrases: #{stale.to_a.sort.join(', ')}" unless stale.empty?
+
+  strings.each do |key, entry|
+    localizations = entry["localizations"]
+    unless localizations.is_a?(Hash)
+      failures << "App Shortcuts #{key.inspect}: missing localizations"
+      next
+    end
+
+    missing_locales = SUPPORTED_LOCALES.reject { |locale| localizations.key?(locale) }
+    unless missing_locales.empty?
+      failures << "App Shortcuts #{key.inspect}: missing locales: #{missing_locales.join(', ')}"
+    end
+
+    source_tokens = key.scan(/\$\{([a-zA-Z0-9_]+)\}/).flatten.to_set
+    SUPPORTED_LOCALES.each do |locale|
+      values = localizations.dig(locale, "stringSet", "values")
+      unless values.is_a?(Array) && values.all? { |value| value.is_a?(String) && !value.strip.empty? }
+        failures << "App Shortcuts #{key.inspect} #{locale}: phrase set must not be empty"
+        next
+      end
+
+      translated_tokens = values.flat_map { |value| value.scan(/\$\{([a-zA-Z0-9_]+)\}/).flatten }.to_set
+      unknown_tokens = translated_tokens - source_tokens
+      missing_tokens = source_tokens - translated_tokens
+      failures << "App Shortcuts #{key.inspect} #{locale}: unknown tokens: #{unknown_tokens.to_a.sort.join(', ')}" unless unknown_tokens.empty?
+      failures << "App Shortcuts #{key.inspect} #{locale}: missing tokens: #{missing_tokens.to_a.sort.join(', ')}" unless missing_tokens.empty?
+      unless values.all? { |value| value.include?("${applicationName}") }
+        failures << "App Shortcuts #{key.inspect} #{locale}: every phrase must include ${applicationName}"
+      end
+    end
+  end
+rescue JSON::ParserError => error
+  failures << "App Shortcuts: invalid catalog JSON: #{error.message}"
+end
+
+def localized_error_literals(path)
+  lines = path.readlines
+  findings = []
+
+  lines.each_index do |index|
+    next unless lines[index].match?(/\bvar\s+errorDescription\s*:\s*String\?/)
+
+    depth = 0
+    started = false
+    lines[index, 60].each_with_index do |line, offset|
+      opens = line.count("{")
+      closes = line.count("}")
+      started ||= opens.positive?
+      depth += opens - closes if started
+
+      stripped = line.strip
+      literal_probe = stripped.gsub('""', "")
+        .gsub(/\bWiFiTransferText\.string\("[a-zA-Z][a-zA-Z0-9]*"\)/, "WiFiTransferText.string()")
+      localization_argument = stripped.match?(/\A"[a-zA-Z0-9_. %@-]+",?\z/)
+      if literal_probe.include?('"') &&
+         !localization_argument &&
+         !stripped.include?("String(localized:") &&
+         !stripped.include?("PMString(") &&
+         !stripped.start_with?("//")
+        findings << [index + offset + 1, stripped]
+      end
+
+      break if started && depth <= 0
+    end
+  end
+
+  findings
+end
+
+def hard_coded_han_literals(path)
+  relative = path.relative_path_from(ROOT).to_s
+  allowlist = HAN_LITERAL_ALLOWLIST.fetch(relative, [])
+  findings = []
+
+  path.readlines.each_with_index do |line, index|
+    stripped = line.strip
+    next if stripped.start_with?("//")
+    next if stripped.include?("plog(")
+
+    # Removing the comment suffix also makes URL literals incomplete, so they
+    # cannot be mistaken for user-facing text by the string-literal matcher.
+    code = line.split("//", 2).first
+    if relative == "Primuse/Services/Settings/SettingsCatalogData.swift"
+      # Search aliases are metadata in multiple languages, never displayed as UI copy.
+      code = code.gsub(/keywords: \[(?:"(?:\\.|[^"\\])*"(?:, )?)*\]/, "")
+    end
+    literals = code.scan(/"(?:\\.|[^"\\])*"/).select { |literal| literal.match?(/\p{Han}/) }
+    next if literals.empty?
+    next if allowlist.any? { |pattern| line.match?(pattern) }
+
+    findings << [index + 1, literals.join(", ")]
+  end
+
+  findings
+end
+
+def decode_swift_string_literal(raw)
+  return nil if raw.include?("\\(")
+
+  JSON.parse(%("#{raw}"))
+rescue JSON::ParserError
+  nil
+end
+
+def source_literal_matches(path, pattern)
+  source = path.read
+  matches = []
+
+  source.to_enum(:scan, pattern).each do
+    match = Regexp.last_match
+    line_start = source.rindex("\n", match.begin(0)) || -1
+    line_end = source.index("\n", match.begin(0)) || source.length
+    next if source[(line_start + 1)...line_end].lstrip.start_with?("//")
+
+    key = decode_swift_string_literal(match[1])
+    next unless key
+
+    line = source[0...match.begin(0)].count("\n") + 1
+    matches << [key, line]
+  end
+
+  matches
+end
+
+def check_app_source_localization_coverage(dictionaries, failures)
+  usages = Hash.new do |hash, key|
+    hash[key] = { locales: Set.new, locations: Set.new }
+  end
+
+  explicit_patterns = [
+    /\bLz\(\s*"((?:\\.|[^"\\])*)"/,
+    /\bString\(\s*localized:\s*"((?:\\.|[^"\\])*)"/,
+    /\bLocalizedStringResource\s*=\s*"((?:\\.|[^"\\])*)"/,
+    /\bIntentDescription\(\s*"((?:\\.|[^"\\])*)"/,
+    /\bIntentDialog\(\s*"((?:\\.|[^"\\])*)"/,
+    /\bTypeDisplayRepresentation\(\s*name:\s*"((?:\\.|[^"\\])*)"/,
+    /@Parameter\(\s*title:\s*"((?:\\.|[^"\\])*)"/,
+    /@Parameter\([^\n]*\bdescription:\s*"((?:\\.|[^"\\])*)"/,
+    /\bshortTitle:\s*"((?:\\.|[^"\\])*)"/
+  ].freeze
+  localized_literal_pattern = /\A[a-z][a-z0-9_.]*\z/
+  opaque_key_pattern = /\A[a-z0-9]+(?:[_.][a-z0-9]+)+\z/
+  swiftui_key_pattern = /\b(?:Text|Toggle|Picker|Button|Label|Section|TextField|SecureField|NavigationLink|GroupBox|ContentUnavailableView)\(\s*"((?:\\.|[^"\\])*)"/
+  mac_component_pattern = /\b(?:MacSTRow|MacSTSection)\(\s*"((?:\\.|[^"\\])*)"/
+  mac_button_pattern = /\bMacSTButton\(\s*title:\s*"((?:\\.|[^"\\])*)"/
+
+  (ROOT / "Primuse").glob("**/*.swift").sort.each do |path|
+    explicit_patterns.each do |pattern|
+      source_literal_matches(path, pattern).each do |key, line|
+        required = key.match?(opaque_key_pattern) ? SUPPORTED_LOCALES : NON_ENGLISH_LOCALES
+        usages[key][:locales].merge(required)
+        usages[key][:locations] << "#{path.relative_path_from(ROOT)}:#{line}"
+      end
+    end
+
+    source_literal_matches(path, swiftui_key_pattern).each do |key, line|
+      next if VERBATIM_SWIFTUI_LITERALS.include?(key)
+      next if key.empty? || key.include?("\\(")
+      next if key.start_with?("http") || key.start_with?("©")
+      next if key.match?(/\A[\s·#—─]+\z/)
+      next if key.match?(/\A[+\-]?\d[\d,.]*(?:\.\d+)?\s*(?:dB|x|×|kHz)?\z/)
+
+      unless key.match?(localized_literal_pattern) || dictionaries.values.any? { |dictionary| dictionary.key?(key) }
+        failures << "#{path.relative_path_from(ROOT)}:#{line}: " \
+                    "user-facing SwiftUI literal is not localized: #{key.inspect}"
+        next
+      end
+
+      required = if key.match?(localized_literal_pattern) && key.match?(opaque_key_pattern)
+                   SUPPORTED_LOCALES
+                 else
+                   NON_ENGLISH_LOCALES
+                 end
+      usages[key][:locales].merge(required)
+      usages[key][:locations] << "#{path.relative_path_from(ROOT)}:#{line}"
+    end
+
+    [mac_component_pattern, mac_button_pattern].each do |pattern|
+      source_literal_matches(path, pattern).each do |key, line|
+        next if key.empty?
+
+        required = key.match?(opaque_key_pattern) ? SUPPORTED_LOCALES : NON_ENGLISH_LOCALES
+        usages[key][:locales].merge(required)
+        usages[key][:locations] << "#{path.relative_path_from(ROOT)}:#{line}"
+      end
+    end
+  end
+
+  usages.sort.each do |key, usage|
+    missing = usage[:locales].reject { |locale| dictionaries.fetch(locale).key?(key) }.sort
+    next if missing.empty?
+
+    failures << "Primuse source localization key #{key.inspect}: missing locales: " \
+                "#{missing.join(', ')} (#{usage[:locations].to_a.sort.first})"
+  end
+end
+
+def check_forbidden_visible_literals(failures)
+  PMSTRING_SOURCE_ROOTS.each do |relative_root|
+    (ROOT / relative_root).glob("**/*.swift").sort.each do |path|
+      path.readlines.each_with_index do |line, index|
+        next if line.lstrip.start_with?("//") || line.include?("plog(")
+
+        FORBIDDEN_VISIBLE_LITERALS.each do |pattern|
+          next unless line.match?(pattern)
+
+          failures << "#{path.relative_path_from(ROOT)}:#{index + 1}: " \
+                      "user-facing literal must use a localization key: #{line.strip}"
+        end
+      end
+    end
+  end
+end
+
+def check_pmstring_source_localization_coverage(dictionaries, failures)
+  usages = Hash.new { |hash, key| hash[key] = Set.new }
+  pattern = /\bPMString\(\s*"((?:\\.|[^"\\])*)"/
+
+  PMSTRING_SOURCE_ROOTS.each do |relative_root|
+    (ROOT / relative_root).glob("**/*.swift").sort.each do |path|
+      source_literal_matches(path, pattern).each do |key, line|
+        usages[key] << "#{path.relative_path_from(ROOT)}:#{line}"
+      end
+    end
+  end
+
+  usages.sort.each do |key, locations|
+    missing = SUPPORTED_LOCALES.reject { |locale| dictionaries.fetch(locale).key?(key) }
+    next if missing.empty?
+
+    failures << "PrimuseKit PMString key #{key.inspect}: missing locales: " \
+                "#{missing.join(', ')} (#{locations.to_a.sort.first})"
+  end
+end
+
+failures = []
+RESOURCE_GROUPS.each do |name, root, file_name, exact_english_parity|
+  check_resource_group(name, root, file_name, exact_english_parity, failures)
+end
+check_siri_vocabulary(failures)
+check_app_shortcuts_catalog(failures)
+
+app_localizations = localization_paths(ROOT / "Primuse/Resources", "Localizable.strings")
+  .transform_values { |path| load_strings(path) }
+check_app_source_localization_coverage(app_localizations, failures)
+check_forbidden_visible_literals(failures)
+
+app_localizations.each do |locale, dictionary|
+  value = dictionary[OPENAI_ACCOUNT_BOUNDARY_KEY]
+  next unless value
+
+  missing_markers = OPENAI_ACCOUNT_BOUNDARY_MARKERS.reject { |marker| value.include?(marker) }
+  unless missing_markers.empty?
+    failures << "Primuse Localizable.strings #{locale}: " \
+                "#{OPENAI_ACCOUNT_BOUNDARY_KEY.inspect} must include " \
+                "#{missing_markers.join(', ')}"
+  end
+  unless value.match?(OPENAI_ACCOUNT_BOUNDARY_BILLING_MARKERS.fetch(locale))
+    failures << "Primuse Localizable.strings #{locale}: " \
+                "#{OPENAI_ACCOUNT_BOUNDARY_KEY.inspect} must distinguish " \
+                "OpenAI Platform billing from ChatGPT plans"
+  end
+end
+
+kit_localizations = localization_paths(
+  ROOT / "PrimuseKit/Sources/PrimuseKit/Resources",
+  "Localizable.strings"
+).transform_values { |path| load_strings(path) }
+check_pmstring_source_localization_coverage(kit_localizations, failures)
+
+localization_paths(ROOT / "Primuse/Resources", "Localizable.strings").each do |locale, path|
+  next unless path.file?
+
+  dictionary = load_strings(path)
+  missing = REQUIRED_APP_LOCALIZATION_KEYS.reject { |key| dictionary.key?(key) }
+  unless missing.empty?
+    failures << "Primuse Localizable.strings #{locale}: missing required keys: #{missing.join(', ')}"
+  end
+end
+
+LOCALIZED_ERROR_ROOTS.each do |relative_root|
+  (ROOT / relative_root).glob("**/*.swift").sort.each do |path|
+    next unless path.read.include?("LocalizedError")
+
+    localized_error_literals(path).each do |line, literal|
+      failures << "#{path.relative_path_from(ROOT)}:#{line}: hard-coded LocalizedError text: #{literal}"
+    end
+  end
+end
+
+LOCALIZED_ERROR_ROOTS.each do |relative_root|
+  (ROOT / relative_root).glob("**/*.swift").sort.each do |path|
+    hard_coded_han_literals(path).each do |line, literals|
+      failures << "#{path.relative_path_from(ROOT)}:#{line}: hard-coded Han text: #{literals}"
+    end
+  end
+end
+
+if failures.empty?
+  puts "Localization check passed for #{SUPPORTED_LOCALES.join(', ')}."
+  exit 0
+end
+
+warn failures.join("\n")
+exit 1

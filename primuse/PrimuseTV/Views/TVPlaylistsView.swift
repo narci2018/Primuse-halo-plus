@@ -1,0 +1,253 @@
+#if os(tvOS)
+import SwiftUI
+import PrimuseKit
+
+/// tvOS 歌单 — 4 列磁贴网格(对应 tvos.jsx 的 TVPlaylistsArtboard)。
+struct TVPlaylistsView: View {
+    @Environment(TVStore.self) private var store
+    var openPlayer: () -> Void = {}
+
+    @State private var filter = 0
+    private let cols = 4
+    private let gap: CGFloat = 36
+
+    var body: some View {
+        let playlists = store.playlists.filter { filter == 0 || (filter == 2 ? $0.kind == .smart : $0.kind != .smart) }
+        ZStack {
+            TVColor.bg.ignoresSafeArea()
+            GeometryReader { geo in
+                let contentW = geo.size.width - TVSpace.pageH * 2
+                let cell = (contentW - gap * CGFloat(cols - 1)) / CGFloat(cols)
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 30) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            TVEyebrow(text: PMString("ext.tv.playlists.eyebrow"))
+                            Text(PMString("ext.tv.playlists.title", playlists.count))
+                                .tvFont(.pageTitle).foregroundStyle(TVColor.text)
+                        }
+                        HStack(spacing: 16) {
+                            TVSelectionButton(title: PMString("ext.tv.library.filter.all"), selected: filter == 0) { filter = 0 }
+                            TVSelectionButton(title: String(localized: "tab_playlists"), selected: filter == 1) { filter = 1 }
+                            TVSelectionButton(title: PMString("ext.tv.library.filter.smart"), selected: filter == 2) { filter = 2 }
+                        }.focusSection()
+                        if playlists.isEmpty {
+                            TVEmptyState(
+                                icon: "music.note.list",
+                                title: PMString("ext.tv.playlists.title", 0)
+                            )
+                            .frame(minHeight: 500)
+                        } else {
+                            LazyVGrid(columns: Array(repeating: GridItem(.fixed(cell), spacing: gap, alignment: .top), count: cols),
+                                      alignment: .leading, spacing: gap) {
+                                ForEach(playlists) { p in
+                                    TVPlaylistCard(playlist: p, width: cell, action: openPlayer)
+                                }
+                            }
+                        }
+                    }
+                    .tvPage()
+                }
+            }
+        }
+    }
+}
+
+/// 歌单磁贴 — 智能歌单右上角标、我喜欢的整块爱心覆层。
+struct TVPlaylistCard: View {
+    @Environment(TVStore.self) private var store
+    let playlist: TVPlaylist
+    var width: CGFloat = 300
+    var action: () -> Void = {}
+
+    var body: some View {
+        let h = width * 0.8
+        TVFocusButton(ring: false,
+                      action: { playTapped() }) { focused in
+            VStack(alignment: .leading, spacing: 0) {
+                ZStack {
+                    TVPlaylistArtworkView(playlist: playlist, size: width, height: h)
+                    if playlist.kind == .smart {
+                        VStack {
+                            HStack {
+                                Spacer()
+                                HStack(spacing: 5) {
+                                    Image(systemName: "sparkles").font(.system(size: 13))
+                                    Text(PMString("ext.tv.playlists.smart")).font(.system(size: 14, weight: .medium))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10).padding(.vertical, 4)
+                                .background(.black.opacity(0.5), in: Capsule())
+                            }
+                            Spacer()
+                        }
+                        .padding(12)
+                    }
+                    if playlist.kind == .liked {
+                        LinearGradient(colors: [TVColor.brand.opacity(0.8), .clear],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                        Image(systemName: "heart.fill").font(.system(size: 64))
+                            .foregroundStyle(.white.opacity(0.92))
+                    }
+                }
+                .frame(width: width, height: h)
+                .tvFocusRing(focused, radius: TVRadius.cover, scale: 1.04, lift: 0)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(playlist.name).tvFont(.cardTitle)
+                        .foregroundStyle(TVColor.text).lineLimit(2, reservesSpace: true)
+                    Text(PMString("ext.tv.songsCount", playlist.count)).tvFont(.caption)
+                        .foregroundStyle(TVColor.textFaint)
+                }
+                .padding(.top, 12).padding(.horizontal, 2)
+                .frame(width: width, alignment: .leading)
+            }
+            .frame(width: width, alignment: .leading)
+        }
+        .accessibilityLabel(Text(playlist.name))
+        .accessibilityValue(Text(PMString("ext.tv.songsCount", playlist.count)))
+    }
+
+    /// 点击歌单卡片播放歌单自身的求值结果，包括普通、喜欢与智能歌单。
+    private func playTapped() {
+        guard store.play(playlist: playlist) else { return }
+        action()
+    }
+}
+
+/// tvOS consumes the same deterministic PrimuseKit plan as the phone and Mac,
+/// but resolves each entry with its target-specific cache/client loader.
+private struct TVPlaylistArtworkView: View {
+    @Environment(TVStore.self) private var store
+    let playlist: TVPlaylist
+    let size: CGFloat
+    let height: CGFloat
+
+    @State private var image: UIImage?
+    @State private var reloadRevision = 0
+
+    private var overrideResolution: LibraryArtworkOverrideResolution {
+        store.library.artworkPresentation(
+            for: LibraryArtworkOwner(kind: .playlist, id: playlist.id)
+        ).resolution
+    }
+
+    private var overrideIdentity: String {
+        switch overrideResolution {
+        case .automatic: return "automatic"
+        case .selectedSong(let songID): return "song:\(songID)"
+        case .uploaded(let contentID): return "upload:\(contentID)"
+        }
+    }
+
+    private var loadIdentity: String {
+        "\(playlist.artworkSignature)#\(overrideIdentity)#\(store.library.artworkOverrideRevision)#\(reloadRevision)"
+    }
+
+    var body: some View {
+        ZStack {
+            TVMusicPlaceholder(
+                tint: TVColor.brand,
+                tint2: .black,
+                kind: .playlist,
+                size: size,
+                height: height
+            )
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size, height: height)
+                    .clipped()
+            }
+        }
+        .frame(width: size, height: height)
+        .task(id: loadIdentity) {
+            let identity = loadIdentity
+            image = nil
+            switch overrideResolution {
+            case .uploaded(let contentID):
+                if let data = MetadataAssetStore.shared.customArtworkData(contentID: contentID),
+                   let customImage = await Self.decodeImage(data) {
+                    guard !Task.isCancelled, loadIdentity == identity else { return }
+                    image = customImage
+                    return
+                }
+            case .selectedSong(let songID):
+                if let song = store.library.song(id: songID) {
+                    if let data = await store.songArtworkData(
+                        songID: song.id,
+                        coverRef: song.coverArtFileName
+                    ), let selectedImage = await Self.decodeImage(data) {
+                        guard !Task.isCancelled, loadIdentity == identity else { return }
+                        image = selectedImage
+                        return
+                    }
+                }
+            case .automatic:
+                break
+            }
+            let corePlan = PlaylistArtworkResolutionPlan(
+                signature: playlist.artworkSignature,
+                candidates: playlist.artworkCandidates.map {
+                    PlaylistArtworkCandidate(
+                        kind: $0.kind,
+                        id: $0.id,
+                        songID: $0.songID,
+                        artworkReference: $0.coverRef
+                    )
+                }
+            )
+            let resolved: PlaylistArtworkResolution<UIImage>? = await PlaylistArtworkResolver
+                .resolve(plan: corePlan) { candidate -> UIImage? in
+                guard let songID = candidate.songID else { return nil }
+                guard let data = await store.songArtworkData(
+                    songID: songID,
+                    coverRef: candidate.artworkReference
+                ) else { return nil }
+                return await Self.decodeImage(data)
+            }
+            guard !Task.isCancelled, loadIdentity == identity else { return }
+            image = resolved?.value
+            if image == nil {
+                try? await Task.sleep(
+                    nanoseconds: UInt64(TVArtworkLoader.negativeCacheTTL * 1_000_000_000)
+                )
+                guard !Task.isCancelled, loadIdentity == identity, image == nil else { return }
+                reloadRevision &+= 1
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidCache)) { note in
+            guard notificationAffectsPlaylist(note) else { return }
+            reloadRevision &+= 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .primuseArtworkDidInvalidate)) { note in
+            guard notificationAffectsPlaylist(note) else { return }
+            reloadRevision &+= 1
+        }
+    }
+
+    private func notificationAffectsPlaylist(_ note: Notification) -> Bool {
+        if note.userInfo?["all"] as? Bool == true { return true }
+        let songIDs = Set(playlist.artworkCandidates.map(\.songID))
+        if let songID = note.object as? String, songIDs.contains(songID) { return true }
+        if let songID = note.userInfo?["songID"] as? String, songIDs.contains(songID) {
+            return true
+        }
+        if let changed = note.userInfo?["songIDs"] as? [String],
+           changed.contains(where: songIDs.contains) {
+            return true
+        }
+        let references = Set(playlist.artworkCandidates.compactMap(\.coverRef))
+        if let tokens = note.userInfo?["tokens"] as? [String],
+           tokens.contains(where: { references.contains($0) || overrideIdentity.contains($0) }) {
+            return true
+        }
+        return false
+    }
+
+    private static func decodeImage(_ data: Data) async -> UIImage? {
+        await Task.detached(priority: .utility) {
+            UIImage(data: data)
+        }.value
+    }
+}
+#endif

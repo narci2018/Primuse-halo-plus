@@ -1,0 +1,46 @@
+.DS_Store
+
+# Xcode user-specific files
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Build outputs
+build/
+build_device/
+DerivedData/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Local tooling
+.claude/
+.idea/
+.playwright-mcp/
+design/
+ScraperConfigs/**
+Config/Secrets.local.xcconfig
+/ShareRelay/relay.env
+
+# Local secret backups / legacy per-developer secret files
+Primuse/Services/Scrobble/AppSecrets.local.swift*
+*.log
+
+# codex tool env
+.codex/
+.codex-tmp/
+
+# 独立 tvOS 预览工程(由 tvpreview.yml 生成)
+PrimuseTVPreview.xcodeproj/
+PrimuseTV/Info-preview.plist
+# 官网内容归属独立仓库 primuse-homepage, 误放于此, 不并入 app 仓库
+/web/
+music
+output
+.playwright-cli
+Marketing
+
+# Local QA plans, execution evidence, and design notes
+Docs/
+/BAIDU_PAN_FIX/

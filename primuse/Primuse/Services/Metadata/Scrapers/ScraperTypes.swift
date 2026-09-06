@@ -1,0 +1,199 @@
+import SwiftUI
+
+/// Represents a scraper source type — either a built-in scraper or a user-imported custom config.
+enum MusicScraperType: Sendable, Identifiable, Hashable {
+    case musicBrainz
+    case lrclib
+    case itunes
+    case custom(String)  // config ID
+
+    var id: String {
+        switch self {
+        case .musicBrainz: "musicBrainz"
+        case .lrclib: "lrclib"
+        case .itunes: "itunes"
+        case .custom(let configId): "custom_\(configId)"
+        }
+    }
+
+    /// Raw string for Codable compatibility
+    var rawValue: String {
+        switch self {
+        case .musicBrainz: "musicBrainz"
+        case .lrclib: "lrclib"
+        case .itunes: "itunes"
+        case .custom(let configId): "custom:\(configId)"
+        }
+    }
+
+    init(rawValue: String) {
+        switch rawValue {
+        case "musicBrainz": self = .musicBrainz
+        case "lrclib": self = .lrclib
+        case "itunes": self = .itunes
+        default:
+            if rawValue.hasPrefix("custom:") {
+                self = .custom(String(rawValue.dropFirst(7)))
+            } else {
+                // Legacy migration: old hardcoded types → custom
+                self = .custom(rawValue)
+            }
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .musicBrainz: "MusicBrainz"
+        case .lrclib: "LRCLIB"
+        case .itunes: "Apple Music"
+        case .custom(let configId):
+            Self.localizedCustomDisplayName(ScraperConfigStore.shared.config(for: configId)?.name ?? configId)
+        }
+    }
+
+    private static func localizedCustomDisplayName(_ name: String) -> String {
+        guard Locale.preferredLanguages.first?.hasPrefix("zh") != true else {
+            return name
+        }
+        switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "酷狗音乐", "酷狗":
+            return "KuGou Music"
+        case "网易云音乐", "网易云":
+            return "NetEase Cloud Music"
+        case "QQ音乐", "QQ 音乐":
+            return "QQ Music"
+        case "咪咕音乐", "咪咕":
+            return "Migu Music"
+        case "千千音乐", "千千":
+            return "Qianqian Music"
+        default:
+            return name
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .musicBrainz: "globe"
+        case .lrclib: "text.quote"
+        case .itunes: "applelogo"
+        case .custom(let configId):
+            ScraperConfigStore.shared.config(for: configId)?.icon ?? "puzzlepiece"
+        }
+    }
+
+    var themeColor: Color {
+        switch self {
+        case .musicBrainz: Color(red: 0.73, green: 0.28, blue: 0.56)
+        case .lrclib: Color(red: 0.39, green: 0.4, blue: 0.95)
+        case .itunes: Color(red: 0.98, green: 0.18, blue: 0.36)
+        case .custom(let configId):
+            if let hex = ScraperConfigStore.shared.config(for: configId)?.color {
+                Color(hex: hex)
+            } else {
+                .accentColor
+            }
+        }
+    }
+
+    var localizedDescription: String {
+        switch self {
+        case .musicBrainz: return String(localized: "scraper_musicbrainz_desc")
+        case .lrclib: return String(localized: "scraper_lrclib_desc")
+        case .itunes: return String(localized: "scraper_itunes_desc")
+        case .custom(let configId):
+            let caps = ScraperConfigStore.shared.config(for: configId)?.capabilities.joined(separator: ", ") ?? ""
+            return String(localized: "custom_scraper_desc") + " (\(caps))"
+        }
+    }
+
+    var supportsMetadata: Bool {
+        switch self {
+        case .musicBrainz: true
+        case .lrclib: false
+        case .itunes: true
+        case .custom(let id): ScraperConfigStore.shared.config(for: id)?.supportsMetadata ?? false
+        }
+    }
+
+    var supportsCover: Bool {
+        switch self {
+        case .musicBrainz: true
+        case .lrclib: false
+        case .itunes: true
+        case .custom(let id): ScraperConfigStore.shared.config(for: id)?.supportsCover ?? false
+        }
+    }
+
+    var supportsLyrics: Bool {
+        switch self {
+        case .musicBrainz: false
+        case .lrclib: true
+        case .itunes: false
+        case .custom(let id): ScraperConfigStore.shared.config(for: id)?.supportsLyrics ?? false
+        }
+    }
+
+    /// 是否支持逐字（word-level / karaoke）歌词。
+    /// 内置源里只有 lrclib 偶发，但默认按行级处理；自定义源由 capabilities 声明。
+    var supportsWordLevelLyrics: Bool {
+        switch self {
+        case .musicBrainz, .lrclib, .itunes: false
+        case .custom(let id): ScraperConfigStore.shared.config(for: id)?.supportsWordLevelLyrics ?? false
+        }
+    }
+
+    var supportsCookie: Bool {
+        switch self {
+        case .musicBrainz, .lrclib, .itunes: false
+        case .custom(let id): ScraperConfigStore.shared.config(for: id)?.supportsCookie ?? false
+        }
+    }
+
+    var isBuiltIn: Bool {
+        switch self {
+        case .musicBrainz, .lrclib, .itunes: true
+        case .custom: false
+        }
+    }
+
+    /// Built-in scrapers in default order
+    static var builtInOrder: [MusicScraperType] {
+        [.itunes, .musicBrainz, .lrclib]
+    }
+}
+
+// MARK: - Codable
+
+extension MusicScraperType: Codable {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        self.init(rawValue: raw)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+// MARK: - Color hex init
+
+#if !os(tvOS)
+extension Color {
+    init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let r, g, b: Double
+        if hex.count == 6 {
+            r = Double((int >> 16) & 0xFF) / 255.0
+            g = Double((int >> 8) & 0xFF) / 255.0
+            b = Double(int & 0xFF) / 255.0
+        } else {
+            r = 0.5; g = 0.5; b = 0.5
+        }
+        self.init(red: r, green: g, blue: b)
+    }
+}
+#endif

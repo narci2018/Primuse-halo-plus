@@ -1,0 +1,2250 @@
+import SwiftUI
+import PrimuseKit
+
+enum LibrarySection: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case recommendations, favorites, playlists, artists, genres, albums, songs, folders, radio, statistics
+
+    var id: String { rawValue }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .recommendations: return "library_recommendations_title"
+        case .favorites: return "library_quick_access"
+        case .folders: return "library_browse_folder"
+        case .statistics: return "stats_title"
+        case .playlists: return "tab_playlists"
+        case .artists: return "tab_artists"
+        case .genres: return "tab_genres"
+        case .albums: return "tab_albums"
+        case .songs: return "tab_songs"
+        case .radio: return "radio_title"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .recommendations: return "sparkles"
+        case .favorites: return "heart.fill"
+        case .folders: return "folder.fill"
+        case .statistics: return "chart.bar.fill"
+        case .playlists: return "music.note.list"
+        case .artists: return "music.mic"
+        case .genres: return "tag.fill"
+        case .albums: return "square.stack.fill"
+        case .songs: return "music.note"
+        case .radio: return "radio.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .recommendations: return Color(red: 0.71, green: 0.48, blue: 0.40)
+        case .favorites: return .pink
+        case .folders: return .orange
+        case .statistics: return .green
+        case .playlists: return .red
+        case .artists: return .pink
+        case .genres: return .teal
+        case .albums: return .purple
+        case .songs: return .blue
+        case .radio: return .orange
+        }
+    }
+
+    var localizedTitle: String {
+        switch self {
+        case .recommendations: return String(localized: "library_recommendations_title")
+        case .favorites: return String(localized: "library_quick_access")
+        case .folders: return String(localized: "library_browse_folder")
+        case .statistics: return String(localized: "stats_title")
+        case .playlists: return String(localized: "tab_playlists")
+        case .artists: return String(localized: "tab_artists")
+        case .genres: return String(localized: "tab_genres")
+        case .albums: return String(localized: "tab_albums")
+        case .songs: return String(localized: "tab_songs")
+        case .radio: return String(localized: "radio_title")
+        }
+    }
+}
+
+enum LibraryDisplayConfiguration {
+    static let quickAccessLimitKey = "primuse.library.quickAccessLimit.v1"
+    static let sectionOrderKey = "primuse.library.sectionOrder.v1"
+    static let hiddenSectionsKey = "primuse.library.hiddenSections.v1"
+
+    static let defaultQuickAccessLimit = 5
+    static let quickAccessLimitRange = 1...12
+    static let defaultSectionOrder: [LibrarySection] = [
+        .recommendations,
+        .favorites,
+        .songs,
+        .albums,
+        .artists,
+        .genres,
+        .playlists,
+        .folders,
+        .radio,
+        .statistics,
+    ]
+
+    static func normalizedQuickAccessLimit(_ value: Int) -> Int {
+        min(max(value, quickAccessLimitRange.lowerBound), quickAccessLimitRange.upperBound)
+    }
+
+    static func decodeSectionOrder(_ rawValue: String) -> [LibrarySection] {
+        let stored: [LibrarySection]
+        if let data = rawValue.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([LibrarySection].self, from: data) {
+            stored = decoded
+        } else {
+            stored = []
+        }
+
+        var seen = Set<LibrarySection>()
+        var result = stored.filter { seen.insert($0).inserted }
+        for missing in defaultSectionOrder where !seen.contains(missing) {
+            guard let defaultIndex = defaultSectionOrder.firstIndex(of: missing) else { continue }
+            let insertionIndex = result.firstIndex { section in
+                guard let sectionDefaultIndex = defaultSectionOrder.firstIndex(of: section) else {
+                    return false
+                }
+                return sectionDefaultIndex > defaultIndex
+            }
+            if let insertionIndex {
+                result.insert(missing, at: insertionIndex)
+            } else {
+                result.append(missing)
+            }
+            seen.insert(missing)
+        }
+        return result
+    }
+
+    static func encodeSectionOrder(_ sections: [LibrarySection]) -> String {
+        guard let data = try? JSONEncoder().encode(sections) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func decodeHiddenSections(_ rawValue: String) -> Set<LibrarySection> {
+        guard let data = rawValue.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([LibrarySection].self, from: data) else {
+            return []
+        }
+        return Set(decoded)
+    }
+
+    static func encodeHiddenSections(_ sections: Set<LibrarySection>) -> String {
+        let ordered = defaultSectionOrder.filter(sections.contains)
+        guard let data = try? JSONEncoder().encode(ordered) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func visibleSections(orderRawValue: String, hiddenRawValue: String) -> [LibrarySection] {
+        let hidden = decodeHiddenSections(hiddenRawValue)
+        return decodeSectionOrder(orderRawValue).filter { !hidden.contains($0) }
+    }
+}
+
+enum LibraryDeepLink: Equatable, Sendable {
+    case root
+    case section(LibrarySection)
+    case album(Album)
+    case artist(Artist)
+    case playlist(Playlist)
+    case song(String)
+}
+
+typealias LibraryPinKind = QuickAccessPinKind
+typealias LibraryPinReference = QuickAccessPinReference
+
+enum LibraryPinStorage {
+    static let defaultsKey = "primuse.library.quickAccess.v1"
+    static let likedSongsPin = LibraryPinReference(
+        kind: .playlist,
+        itemID: MusicLibrary.likedSongsPlaylistID
+    )
+
+    static func decode(
+        _ rawValue: String,
+        maximumCount: Int = LibraryDisplayConfiguration.defaultQuickAccessLimit
+    ) -> [LibraryPinReference] {
+        QuickAccessPinStorageCodec.decode(
+            rawValue,
+            defaultPins: [likedSongsPin],
+            maximumCount: LibraryDisplayConfiguration.normalizedQuickAccessLimit(maximumCount)
+        )
+    }
+
+    static func encode(
+        _ pins: [LibraryPinReference],
+        maximumCount: Int = LibraryDisplayConfiguration.defaultQuickAccessLimit
+    ) -> String {
+        QuickAccessPinStorageCodec.encode(
+            pins,
+            maximumCount: LibraryDisplayConfiguration.normalizedQuickAccessLimit(maximumCount)
+        )
+    }
+}
+
+private struct LibraryArtworkPreviewSelection: Sendable {
+    var revision = ""
+    var songs: [Song] = []
+    var albums: [Album] = []
+    var artists: [Artist] = []
+    var playlists: [Playlist] = []
+    var radioStations: [RadioStation] = []
+    var albumFallbackSongs: [String: [Song]] = [:]
+    var artistFallbackSongs: [String: [Song]] = [:]
+}
+
+@MainActor
+private final class LibraryArtworkPreviewSessionStore {
+    private struct InFlight {
+        let build: SessionStableSnapshotBuild
+        let task: Task<LibraryArtworkPreviewSelection, Never>
+    }
+
+    static let shared = LibraryArtworkPreviewSessionStore()
+
+    private var cache = SessionStableSnapshotCache<LibraryArtworkPreviewSelection>()
+    private var inFlight: InFlight?
+
+    func cachedSelection(for revision: String) -> LibraryArtworkPreviewSelection? {
+        cache.cachedValue(for: revision)
+    }
+
+    func invalidateForManualRefresh() {
+        cache.invalidateForManualRefresh()
+        inFlight?.task.cancel()
+    }
+
+    func selection(
+        for revision: String,
+        build: @escaping @Sendable (String) -> LibraryArtworkPreviewSelection
+    ) async -> LibraryArtworkPreviewSelection? {
+        if let cached = cache.cachedValue(for: revision) {
+            return cached
+        }
+
+        let operation: InFlight
+        if let current = inFlight,
+           current.build.revision == revision,
+           cache.isCurrentBuild(current.build) {
+            operation = current
+        } else if let current = inFlight {
+            current.task.cancel()
+            _ = await current.task.value
+            guard !Task.isCancelled else { return nil }
+            if inFlight?.build == current.build {
+                inFlight = nil
+            }
+            return await selection(for: revision, build: build)
+        } else {
+            let buildContext = cache.beginBuild(for: revision)
+            operation = InFlight(
+                build: buildContext,
+                task: Task.detached(priority: .utility) {
+                    build(buildContext.randomSeed)
+                }
+            )
+            inFlight = operation
+        }
+
+        let value = await operation.task.value
+        let accepted = cache.commit(value, for: operation.build)
+        if inFlight?.build == operation.build {
+            inFlight = nil
+        }
+        if accepted { return value }
+        return cache.cachedValue(for: revision)
+    }
+}
+
+private enum LibraryArtworkPreviewBuilder {
+    static func hasReference(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func songHasArtworkHint(_ song: Song) -> Bool {
+        hasReference(song.coverArtFileName)
+            || (song.sourceID == AppleMusicLibraryIdentity.sourceID && !song.filePath.isEmpty)
+    }
+
+    static func select<Item>(
+        _ items: [Item],
+        maximumCount: Int = 3,
+        randomSeed: String,
+        id: (Item) -> String,
+        hasArtworkHint: (Item) -> Bool
+    ) -> [Item] {
+        let selectedIDs = LibraryArtworkPreviewSelectionPolicy.selectedIDs(
+            from: items.map {
+                LibraryArtworkPreviewCandidate(
+                    id: id($0),
+                    hasArtworkHint: hasArtworkHint($0)
+                )
+            },
+            maximumCount: maximumCount,
+            randomSeed: randomSeed
+        )
+        let itemsByID = Dictionary(items.map { (id($0), $0) }) { first, _ in first }
+        return selectedIDs.compactMap { itemsByID[$0] }
+    }
+}
+
+struct LibraryView: View {
+    @Environment(MusicLibrary.self) private var library
+    @Environment(RadioStationsStore.self) private var radioStationsStore
+    #if os(iOS)
+    @Environment(\.appNavigationMode) private var appNavigationMode
+    #endif
+    @Binding private var deepLink: LibraryDeepLink?
+    private let rootSection: LibrarySection?
+    private let onActiveSectionChange: (LibrarySection?) -> Void
+    @State private var navigationPath = NavigationPath()
+    @State private var songLocationRequest: SongLibraryLocationRequest?
+    @State private var didRestorePersistedPage = false
+    @State private var showQuickAccessEditor = false
+    @AppStorage("primuse.navigation.libraryPage.v1")
+    private var persistedPageID = ""
+    @AppStorage(LibraryPinStorage.defaultsKey)
+    private var quickAccessRawValue = ""
+    @AppStorage(LibraryDisplayConfiguration.quickAccessLimitKey)
+    private var configuredQuickAccessLimit = LibraryDisplayConfiguration.defaultQuickAccessLimit
+    @AppStorage(LibraryDisplayConfiguration.sectionOrderKey)
+    private var sectionOrderRawValue = ""
+    @AppStorage(LibraryDisplayConfiguration.hiddenSectionsKey)
+    private var hiddenSectionsRawValue = ""
+    @AppStorage(QuickAccessCoverStyle.storageKey) private var quickAccessCoverStyle = QuickAccessCoverStyle.automatic
+    @State private var artworkPreviewSelection = LibraryArtworkPreviewSelection()
+
+    private var songs: [Song] { library.visibleSongs }
+    private var albums: [Album] { library.visibleAlbums }
+    private var artists: [Artist] { library.visibleArtists }
+    private var genres: [LibraryGenre] { library.visibleGenres }
+    private var regularPlaylists: [Playlist] {
+        library.playlists.filter { $0.id != MusicLibrary.likedSongsPlaylistID }
+    }
+    private var hasContent: Bool {
+        !songs.isEmpty
+            || !albums.isEmpty
+            || !artists.isEmpty
+            || !regularPlaylists.isEmpty
+            || !library.smartPlaylists.isEmpty
+            || !radioStationsStore.stations.isEmpty
+    }
+    private var storedPins: [LibraryPinReference] {
+        LibraryPinStorage.decode(quickAccessRawValue, maximumCount: quickAccessLimit)
+    }
+    private var visiblePins: [LibraryPinReference] {
+        storedPins.filter(pinExists)
+    }
+    private var likedPlaylist: Playlist {
+        library.playlists.first(where: { $0.id == MusicLibrary.likedSongsPlaylistID })
+            ?? Playlist(
+                id: MusicLibrary.likedSongsPlaylistID,
+                name: String(localized: "playlist_liked_name")
+            )
+    }
+    private var quickAccessLimit: Int {
+        LibraryDisplayConfiguration.normalizedQuickAccessLimit(configuredQuickAccessLimit)
+    }
+    private var visibleLibrarySections: [LibrarySection] {
+        LibraryDisplayConfiguration.visibleSections(
+            orderRawValue: sectionOrderRawValue,
+            hiddenRawValue: hiddenSectionsRawValue
+        )
+    }
+    private var artworkPreviewRevision: String {
+        let radioSignature = radioStationsStore.stations.map { station in
+            [
+                station.id,
+                station.logoFileName ?? "",
+                String(station.logoData?.count ?? 0),
+                String(station.modifiedAt.timeIntervalSinceReferenceDate),
+            ].joined(separator: "\u{1F}")
+        }.joined(separator: "\u{0}")
+        return [
+            String(library.visibleSongCollectionRevision),
+            String(library.albumArtworkLookupRevision),
+            String(library.sourceSyncCompletionRevision),
+            String(library.playlistCollectionRevision),
+            String(library.artworkOverrideRevision),
+            quickAccessRawValue,
+            radioSignature,
+        ].joined(separator: "#")
+    }
+
+    init(
+        deepLink: Binding<LibraryDeepLink?> = .constant(nil),
+        rootSection: LibrarySection? = nil,
+        onActiveSectionChange: @escaping (LibrarySection?) -> Void = { _ in }
+    ) {
+        self._deepLink = deepLink
+        self.rootSection = rootSection
+        self.onActiveSectionChange = onActiveSectionChange
+    }
+
+    var body: some View {
+        NavigationStack(path: $navigationPath) {
+            rootContent
+            .navigationTitle(rootSection?.title ?? "library_title")
+            .toolbarTitleDisplayMode(.inlineLarge)
+            #if os(iOS)
+            .minimalNavigationRoot()
+            #endif
+            .navigationDestination(for: LibrarySection.self) { section in
+                sectionDestination(section)
+            }
+            .navigationDestination(for: Album.self) { album in
+                AlbumDetailView(album: album)
+                    .onAppear {
+                        persistedPageID = "album:\(album.id)"
+                        onActiveSectionChange(.albums)
+                    }
+            }
+            .navigationDestination(for: Artist.self) { artist in
+                ArtistDetailView(artist: artist)
+                    .onAppear {
+                        persistedPageID = "artist:\(artist.id)"
+                        onActiveSectionChange(.artists)
+                    }
+            }
+            .navigationDestination(for: Playlist.self) { playlist in
+                PlaylistDetailView(playlist: playlist)
+                    .onAppear {
+                        persistedPageID = "playlist:\(playlist.id)"
+                        onActiveSectionChange(.playlists)
+                    }
+            }
+            .onAppear {
+                sanitizeStoredPins()
+                if deepLink == nil, rootSection == nil {
+                    restorePersistedPageIfNeeded()
+                } else {
+                    applyDeepLink(deepLink)
+                }
+            }
+            .onChange(of: deepLink) { _, newValue in
+                applyDeepLink(newValue)
+            }
+            .onChange(of: navigationPath.count) { _, count in
+                if didRestorePersistedPage && count == 0 {
+                    persistedPageID = ""
+                    onActiveSectionChange(nil)
+                }
+            }
+            .task(id: library.visibleSongCollectionRevision) {
+                let version = SongListSnapshotVersion(
+                    collectionRevision: library.visibleSongCollectionRevision,
+                    replacementToken: library.songReplacementToken
+                )
+                let songsSnapshot = library.visibleSongs
+                guard !songsSnapshot.isEmpty else { return }
+                do {
+                    // Coalesce scanner bursts, then prepare the default order
+                    // while the user is still on the library hub. SongListView
+                    // reuses the same in-flight/cached snapshot on navigation.
+                    try await Task.sleep(for: .milliseconds(180))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                _ = await SongListSnapshotStore.shared.snapshot(
+                    scopeKey: SongListSnapshotStore.libraryScopeKey,
+                    version: version,
+                    order: .title,
+                    songs: songsSnapshot
+                )
+            }
+            .sheet(isPresented: $showQuickAccessEditor) {
+                LibraryQuickAccessEditor(
+                    pinsRawValue: $quickAccessRawValue,
+                    maximumCount: quickAccessLimit
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rootContent: some View {
+        if let rootSection {
+            destination(for: rootSection)
+        } else if hasContent {
+            libraryHub
+        } else {
+            emptyLibraryState
+        }
+    }
+
+    private func sectionDestination(_ section: LibrarySection) -> some View {
+        destination(for: section)
+            .navigationTitle(section.title)
+            .toolbarTitleDisplayMode(.inline)
+            #if os(iOS)
+            .minimalNavigationRoot()
+            .navigationBarBackButtonHidden(appNavigationMode == .minimal)
+            #endif
+            .onAppear {
+                persistedPageID = "section:\(section.rawValue)"
+                onActiveSectionChange(section)
+            }
+    }
+
+    private var libraryHub: some View {
+        let previewRevision = artworkPreviewRevision
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                browseLibrarySection
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 32)
+        }
+        .task(id: previewRevision) {
+            await refreshArtworkPreviews(for: previewRevision)
+        }
+        .refreshable {
+            LibraryArtworkPreviewSessionStore.shared.invalidateForManualRefresh()
+            artworkPreviewSelection = LibraryArtworkPreviewSelection()
+            await refreshArtworkPreviews(for: artworkPreviewRevision)
+        }
+        .onAppear {
+            if navigationPath.isEmpty {
+                onActiveSectionChange(nil)
+            }
+        }
+    }
+
+    private var quickAccessSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("library_quick_access") {
+                Button("edit") {
+                    showQuickAccessEditor = true
+                }
+                .font(.subheadline.weight(.medium))
+            }
+
+            if usesMinimalSectionControls {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 140), spacing: 16, alignment: .topLeading)],
+                    alignment: .leading,
+                    spacing: 24
+                ) {
+                    quickAccessItems
+                }
+                .padding(.horizontal, 16)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: 14) {
+                        quickAccessItems
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .contentMargins(.horizontal, 0, for: .scrollContent)
+            }
+        }
+    }
+
+    private var quickAccessItems: some View {
+        Group {
+            ForEach(visiblePins) { pin in
+                pinnedItemCard(pin)
+            }
+
+            Button {
+                showQuickAccessEditor = true
+            } label: {
+                addQuickAccessLabel
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var browseLibrarySection: some View {
+        Group {
+            if !visibleLibrarySections.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionHeader("library_browse")
+
+                    LazyVStack(spacing: 10) {
+                        ForEach(visibleLibrarySections) { section in
+                            if section == .favorites {
+                                quickAccessSection
+                                    .padding(.vertical, 8)
+                            } else {
+                                NavigationLink(value: section) {
+                                    libraryCategoryRow(section)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 16)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func sectionHeader<Trailing: View>(
+        _ titleKey: LocalizedStringKey,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack {
+            Text(titleKey)
+                .font(.title3.weight(.bold))
+            Spacer()
+            trailing()
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func sectionHeader(_ titleKey: LocalizedStringKey) -> some View {
+        sectionHeader(titleKey) {
+            EmptyView()
+        }
+    }
+
+    private func likedArtwork(size: CGFloat, cornerRadius: CGFloat) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [.pink, .red],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            Image(systemName: "heart.fill")
+                .font(.system(size: size * 0.33, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: .pink.opacity(0.18), radius: 8, y: 4)
+    }
+
+    private func quickAccessLabel<Artwork: View>(
+        title: String,
+        subtitle: String,
+        @ViewBuilder artwork: @escaping (CGFloat) -> Artwork
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if usesMinimalSectionControls {
+                GeometryReader { geometry in
+                    artwork(geometry.size.width)
+                }
+                .aspectRatio(1, contentMode: .fit)
+            } else {
+                artwork(116)
+                    .frame(width: 116, height: 116)
+            }
+
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(usesMinimalSectionControls ? 2 : 1)
+
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(width: usesMinimalSectionControls ? nil : 116, alignment: .leading)
+        .frame(maxWidth: usesMinimalSectionControls ? .infinity : nil, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private var addQuickAccessLabel: some View {
+        quickAccessLabel(
+            title: String(localized: "library_add_quick_access"),
+            subtitle: "\(visiblePins.count)/\(quickAccessLimit)"
+        ) { size in
+            ZStack {
+                RoundedRectangle(cornerRadius: quickAccessCoverStyle == .circle ? size / 2 : 16, style: .continuous)
+                    .fill(Color.secondary.opacity(0.07))
+                RoundedRectangle(cornerRadius: quickAccessCoverStyle == .circle ? size / 2 : 16, style: .continuous)
+                    .stroke(
+                        Color.secondary.opacity(0.32),
+                        style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                    )
+                Image(systemName: "plus")
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: size, height: size)
+        }
+    }
+
+    @ViewBuilder
+    private func pinnedItemCard(_ pin: LibraryPinReference) -> some View {
+        switch pin.kind {
+        case .album:
+            if let album = albums.first(where: { $0.id == pin.itemID }) {
+                NavigationLink(value: album) {
+                    quickAccessLabel(
+                        title: album.title,
+                        subtitle: album.artistName ?? String(localized: "unknown_artist")
+                    ) { size in
+                        QuickAccessArtworkView(item: .album(album), size: size, cornerRadius: 16) {
+                            libraryAlbumArtwork(album, size: size, cornerRadius: 16, showsPlaceholder: true)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        case .artist:
+            if let artist = artists.first(where: { $0.id == pin.itemID }) {
+                NavigationLink(value: artist) {
+                    quickAccessLabel(
+                        title: artist.name,
+                        subtitle: countText(artist.albumCount, unitKey: "albums_count")
+                    ) { size in
+                        QuickAccessArtworkView(item: .artist(artist), size: size, cornerRadius: 16) {
+                            libraryArtistArtwork(artist, size: size, cornerRadius: size / 2, showsPlaceholder: true)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        case .playlist:
+            if pin.itemID == MusicLibrary.likedSongsPlaylistID {
+                NavigationLink(value: likedPlaylist) {
+                    quickAccessLabel(
+                        title: String(localized: "sidebar_liked_songs"),
+                        subtitle: countText(
+                            library.songCount(forPlaylist: MusicLibrary.likedSongsPlaylistID),
+                            unitKey: "songs_count"
+                        )
+                    ) { size in
+                        QuickAccessArtworkView(item: .playlist(likedPlaylist), size: size, cornerRadius: 16) {
+                            likedArtwork(size: size, cornerRadius: 16)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            } else if let playlist = regularPlaylists.first(where: { $0.id == pin.itemID }) {
+                NavigationLink(value: playlist) {
+                    quickAccessLabel(
+                        title: playlist.name,
+                        subtitle: countText(
+                            library.songCount(forPlaylist: playlist.id),
+                            unitKey: "songs_count"
+                        )
+                    ) { size in
+                        QuickAccessArtworkView(item: .playlist(playlist), size: size, cornerRadius: 16) {
+                            playlistArtwork(playlist, size: size, cornerRadius: 16)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func libraryCategoryRow(_ section: LibrarySection) -> some View {
+        HStack(spacing: 13) {
+            Image(systemName: section.icon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .background(section.color.gradient, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(section.title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(categoryCountText(section))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+            categoryPreview(section)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 72)
+        .background(
+            Color.secondary.opacity(0.07),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.secondary.opacity(0.1), lineWidth: 0.5)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func categoryPreview(_ section: LibrarySection) -> some View {
+        switch section {
+        case .favorites, .folders, .statistics:
+            EmptyView()
+        case .recommendations:
+            overlappingPreview(previewSongs) { song in
+                CachedArtworkView(
+                    coverRef: song.coverArtFileName,
+                    songID: song.id,
+                    size: 36,
+                    cornerRadius: 7,
+                    sourceID: song.sourceID,
+                    filePath: song.filePath,
+                    fileFormat: song.fileFormat
+                )
+            }
+        case .songs:
+            overlappingPreview(previewSongs) { song in
+                CachedArtworkView(
+                    coverRef: song.coverArtFileName,
+                    songID: song.id,
+                    size: 36,
+                    cornerRadius: 7,
+                    sourceID: song.sourceID,
+                    filePath: song.filePath,
+                    fileFormat: song.fileFormat
+                )
+            }
+        case .albums:
+            artworkPreview(
+                previewAlbums,
+                placeholderIcon: "square.stack",
+                cornerRadius: 7
+            ) { album in
+                libraryAlbumArtwork(
+                    album,
+                    size: 36,
+                    cornerRadius: 7,
+                    showsPlaceholder: false
+                )
+            }
+        case .artists:
+            artworkPreview(
+                previewArtists,
+                placeholderIcon: "music.mic",
+                cornerRadius: 18
+            ) { artist in
+                libraryArtistArtwork(
+                    artist,
+                    size: 36,
+                    cornerRadius: 18,
+                    showsPlaceholder: false
+                )
+            }
+        case .genres:
+            overlappingPreview(previewGenreSongs) { song in
+                CachedArtworkView(
+                    coverRef: song.coverArtFileName,
+                    songID: song.id,
+                    size: 36,
+                    cornerRadius: 7,
+                    sourceID: song.sourceID,
+                    filePath: song.filePath,
+                    fileFormat: song.fileFormat
+                )
+            }
+        case .playlists:
+            overlappingPreview(previewPlaylists) { playlist in
+                playlistArtwork(playlist, size: 36, cornerRadius: 7)
+            }
+        case .radio:
+            overlappingPreview(previewRadioStations) { station in
+                RadioStationArtworkView(station: station, size: 36, cornerRadius: 7)
+            }
+        }
+    }
+
+    private var hasCurrentArtworkPreviewSelection: Bool {
+        artworkPreviewSelection.revision == artworkPreviewRevision
+    }
+
+    private var previewSongs: [Song] {
+        hasCurrentArtworkPreviewSelection
+            ? artworkPreviewSelection.songs
+            : Array(songs.prefix(3))
+    }
+
+    private var previewAlbums: [Album] {
+        hasCurrentArtworkPreviewSelection
+            ? artworkPreviewSelection.albums
+            : Array(albums.prefix(3))
+    }
+
+    private var previewArtists: [Artist] {
+        hasCurrentArtworkPreviewSelection
+            ? artworkPreviewSelection.artists
+            : Array(artists.prefix(3))
+    }
+
+    private var previewGenreSongs: [Song] {
+        genres.prefix(3).compactMap { genre in
+            genre.representativeSongIDs.lazy.compactMap { library.visibleSong(id: $0) }.first
+        }
+    }
+
+    private var previewPlaylists: [Playlist] {
+        hasCurrentArtworkPreviewSelection
+            ? artworkPreviewSelection.playlists
+            : Array(regularPlaylists.prefix(3))
+    }
+
+    private var previewRadioStations: [RadioStation] {
+        hasCurrentArtworkPreviewSelection
+            ? artworkPreviewSelection.radioStations
+            : Array(radioStationsStore.stations.prefix(3))
+    }
+
+    private func albumFallbackSongs(_ album: Album) -> [Song] {
+        if hasCurrentArtworkPreviewSelection {
+            return artworkPreviewSelection.albumFallbackSongs[album.id] ?? []
+        }
+        return library.preferredArtworkSong(forAlbumID: album.id).map { [$0] } ?? []
+    }
+
+    private func artistFallbackSongs(_ artist: Artist) -> [Song] {
+        guard hasCurrentArtworkPreviewSelection else { return [] }
+        return artworkPreviewSelection.artistFallbackSongs[artist.id] ?? []
+    }
+
+    private func libraryAlbumArtwork(
+        _ album: Album,
+        size: CGFloat,
+        cornerRadius: CGFloat,
+        showsPlaceholder: Bool
+    ) -> some View {
+        ZStack {
+            if showsPlaceholder {
+                artworkPlaceholder(
+                    size: size,
+                    cornerRadius: cornerRadius,
+                    icon: "square.stack"
+                )
+            }
+
+            ForEach(Array(albumFallbackSongs(album).reversed())) { song in
+                fallbackSongArtwork(song, size: size)
+            }
+
+            AlbumArtworkView(
+                album: album,
+                size: size,
+                cornerRadius: cornerRadius,
+                showsPlaceholder: false
+            )
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+
+    private func libraryArtistArtwork(
+        _ artist: Artist,
+        size: CGFloat,
+        cornerRadius: CGFloat,
+        showsPlaceholder: Bool
+    ) -> some View {
+        ZStack {
+            if showsPlaceholder {
+                artworkPlaceholder(
+                    size: size,
+                    cornerRadius: cornerRadius,
+                    icon: "music.mic"
+                )
+            }
+
+            ForEach(Array(artistFallbackSongs(artist).reversed())) { song in
+                fallbackSongArtwork(song, size: size)
+            }
+
+            ArtistArtworkView(
+                artist: artist,
+                size: size,
+                cornerRadius: cornerRadius,
+                showsPlaceholder: false
+            )
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+
+    private func artworkPlaceholder(
+        size: CGFloat,
+        cornerRadius: CGFloat,
+        icon: String
+    ) -> some View {
+        CachedArtworkView(
+            coverRef: nil,
+            songID: nil,
+            size: size,
+            cornerRadius: cornerRadius,
+            placeholderIcon: icon,
+            showsPlaceholder: true
+        )
+    }
+
+    private func fallbackSongArtwork(_ song: Song, size: CGFloat) -> some View {
+        CachedArtworkView(
+            coverRef: song.coverArtFileName,
+            songID: song.id,
+            size: size,
+            cornerRadius: 0,
+            sourceID: song.sourceID,
+            filePath: song.filePath,
+            fileFormat: song.fileFormat,
+            showsPlaceholder: false
+        )
+    }
+
+    private func overlappingPreview<Item: Identifiable, Content: View>(
+        _ items: [Item],
+        @ViewBuilder content: @escaping (Item) -> Content
+    ) -> some View {
+        HStack(spacing: -10) {
+            if items.isEmpty {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.secondary.opacity(0.1))
+                    .frame(width: 36, height: 36)
+            } else {
+                ForEach(items) { item in
+                    content(item)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        }
+                }
+            }
+        }
+        .frame(width: 68, alignment: .trailing)
+    }
+
+    private func artworkPreview<Item: Identifiable, Content: View>(
+        _ items: [Item],
+        placeholderIcon: String,
+        cornerRadius: CGFloat,
+        @ViewBuilder content: @escaping (Item) -> Content
+    ) -> some View {
+        ZStack(alignment: .trailing) {
+            ZStack {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.secondary.opacity(0.1))
+                Image(systemName: placeholderIcon)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(width: 36, height: 36)
+
+            HStack(spacing: -10) {
+                ForEach(items) { item in
+                    content(item)
+                }
+            }
+        }
+        .frame(width: 68, height: 36, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private func playlistArtwork(_ playlist: Playlist, size: CGFloat, cornerRadius: CGFloat) -> some View {
+        PlaylistArtworkView(playlist: playlist, size: size, cornerRadius: cornerRadius)
+    }
+
+    @MainActor
+    private func refreshArtworkPreviews(for revision: String) async {
+        if artworkPreviewSelection.revision == revision { return }
+        if let cached = LibraryArtworkPreviewSessionStore.shared.cachedSelection(
+            for: revision
+        ) {
+            artworkPreviewSelection = cached
+            return
+        }
+        do {
+            try await Task.sleep(for: .milliseconds(280))
+        } catch {
+            return
+        }
+        guard !Task.isCancelled, artworkPreviewRevision == revision else { return }
+        let songsSnapshot = songs
+        let albumsSnapshot = albums
+        let artistsSnapshot = artists
+        let playlistsSnapshot = regularPlaylists
+        let radioSnapshot = radioStationsStore.stations
+        let pinnedAlbumIDs = Set(visiblePins.compactMap { pin in
+            pin.kind == .album ? pin.itemID : nil
+        })
+        let pinnedArtistIDs = Set(visiblePins.compactMap { pin in
+            pin.kind == .artist ? pin.itemID : nil
+        })
+
+        let albumOverrideIDs = Set(albumsSnapshot.compactMap { album -> String? in
+            let presentation = library.artworkPresentation(
+                for: LibraryArtworkOwner(kind: .album, id: album.id)
+            )
+            return presentation.uploadedContentID != nil || presentation.selectedSong != nil
+                ? album.id
+                : nil
+        })
+        let artistOverrideIDs = Set(artistsSnapshot.compactMap { artist -> String? in
+            let presentation = library.artworkPresentation(
+                for: LibraryArtworkOwner(kind: .artist, id: artist.id)
+            )
+            return presentation.uploadedContentID != nil || presentation.selectedSong != nil
+                ? artist.id
+                : nil
+        })
+        let playlistOverrideIDs = Set(playlistsSnapshot.compactMap { playlist -> String? in
+            let presentation = library.artworkPresentation(
+                for: LibraryArtworkOwner(kind: .playlist, id: playlist.id)
+            )
+            return presentation.uploadedContentID != nil || presentation.selectedSong != nil
+                ? playlist.id
+                : nil
+        })
+        let playlistIDsWithMemberArtworkHint = Set(playlistsSnapshot.compactMap { playlist -> String? in
+            library.songs(forPlaylist: playlist.id).contains(
+                where: LibraryArtworkPreviewBuilder.songHasArtworkHint
+            ) ? playlist.id : nil
+        })
+
+        let selection = await LibraryArtworkPreviewSessionStore.shared.selection(
+            for: revision
+        ) { randomSeed in
+            let songsWithArtworkHint = songsSnapshot.filter(
+                LibraryArtworkPreviewBuilder.songHasArtworkHint
+            )
+            let albumIDsWithSongArtworkHint = Set(songsWithArtworkHint.compactMap(\.albumID))
+            let artistIDsWithSongArtworkHint = Set(songsWithArtworkHint.compactMap(\.artistID))
+
+            let selectedSongs = LibraryArtworkPreviewBuilder.select(
+                songsSnapshot,
+                randomSeed: "\(randomSeed)#songs",
+                id: \Song.id,
+                hasArtworkHint: LibraryArtworkPreviewBuilder.songHasArtworkHint
+            )
+            let selectedAlbums = LibraryArtworkPreviewBuilder.select(
+                albumsSnapshot,
+                randomSeed: "\(randomSeed)#albums",
+                id: \Album.id
+            ) { album in
+                albumOverrideIDs.contains(album.id)
+                    || MetadataAssetStore.shared.hasAlbumCover(forAlbumID: album.id)
+                    || albumIDsWithSongArtworkHint.contains(album.id)
+            }
+            let selectedArtists = LibraryArtworkPreviewBuilder.select(
+                artistsSnapshot,
+                randomSeed: "\(randomSeed)#artists",
+                id: \Artist.id
+            ) { artist in
+                artistOverrideIDs.contains(artist.id)
+                    || LibraryArtworkPreviewBuilder.hasReference(artist.thumbnailPath)
+                    || MetadataAssetStore.shared.hasArtistImage(forArtistID: artist.id)
+                    || artistIDsWithSongArtworkHint.contains(artist.id)
+            }
+            let selectedPlaylists = LibraryArtworkPreviewBuilder.select(
+                playlistsSnapshot,
+                randomSeed: "\(randomSeed)#playlists",
+                id: \Playlist.id
+            ) { playlist in
+                playlistOverrideIDs.contains(playlist.id)
+                    || (
+                        playlist.hasDedicatedCoverArt
+                            && LibraryArtworkPreviewBuilder.hasReference(playlist.coverArtPath)
+                    )
+                    || playlistIDsWithMemberArtworkHint.contains(playlist.id)
+            }
+            let selectedRadioStations = LibraryArtworkPreviewBuilder.select(
+                radioSnapshot,
+                randomSeed: "\(randomSeed)#radio",
+                id: \RadioStation.id
+            ) { station in
+                station.logoData.map(ArtworkImageCompatibility.isCompleteImage) == true
+                    || LibraryArtworkPreviewBuilder.hasReference(station.logoFileName)
+            }
+
+            let fallbackAlbumIDs = pinnedAlbumIDs.union(selectedAlbums.map(\.id))
+            let albumGroups = Dictionary(grouping: songsSnapshot.filter { song in
+                song.albumID.map(fallbackAlbumIDs.contains) == true
+            }) { $0.albumID ?? "" }
+            let albumFallbackSongs = albumGroups.mapValues { albumSongs in
+                LibraryArtworkPreviewBuilder.select(
+                    albumSongs,
+                    randomSeed: "\(randomSeed)#album#\(albumSongs.first?.albumID ?? "")",
+                    id: \Song.id,
+                    hasArtworkHint: LibraryArtworkPreviewBuilder.songHasArtworkHint
+                )
+            }
+
+            let fallbackArtistIDs = pinnedArtistIDs.union(selectedArtists.map(\.id))
+            let artistGroups = Dictionary(grouping: songsSnapshot.filter { song in
+                song.artistID.map(fallbackArtistIDs.contains) == true
+            }) { $0.artistID ?? "" }
+            let artistFallbackSongs = artistGroups.mapValues { artistSongs in
+                LibraryArtworkPreviewBuilder.select(
+                    artistSongs,
+                    randomSeed: "\(randomSeed)#artist#\(artistSongs.first?.artistID ?? "")",
+                    id: \Song.id,
+                    hasArtworkHint: LibraryArtworkPreviewBuilder.songHasArtworkHint
+                )
+            }
+
+            return LibraryArtworkPreviewSelection(
+                revision: revision,
+                songs: selectedSongs,
+                albums: selectedAlbums,
+                artists: selectedArtists,
+                playlists: selectedPlaylists,
+                radioStations: selectedRadioStations,
+                albumFallbackSongs: albumFallbackSongs,
+                artistFallbackSongs: artistFallbackSongs
+            )
+        }
+
+        guard !Task.isCancelled,
+              artworkPreviewRevision == revision,
+              let selection else { return }
+        artworkPreviewSelection = selection
+    }
+
+    private func categoryCountText(_ section: LibrarySection) -> String {
+        switch section {
+        case .favorites:
+            return String(localized: "library_quick_access")
+        case .folders:
+            return countText(songs.count, unitKey: "songs_count")
+        case .statistics:
+            return String(localized: "stats_section_label")
+        case .recommendations:
+            return String(localized: "library_recommendations_subtitle")
+        case .songs:
+            return countText(songs.count, unitKey: "songs_count")
+        case .albums:
+            return countText(albums.count, unitKey: "albums_count")
+        case .artists:
+            return countText(artists.count, unitKey: "artists_count")
+        case .genres:
+            return countText(genres.count, unitKey: "genres_count")
+        case .playlists:
+            return countText(
+                regularPlaylists.count + library.smartPlaylists.count,
+                unitKey: "playlists_count"
+            )
+        case .radio:
+            return countText(radioStationsStore.stations.count, unitKey: "radio_stations_count")
+        }
+    }
+
+    private func countText(_ count: Int, unitKey: String.LocalizationValue) -> String {
+        "\(count.formatted()) \(String(localized: unitKey))"
+    }
+
+    private var usesMinimalSectionControls: Bool {
+        #if os(iOS)
+        appNavigationMode == .minimal
+        #else
+        false
+        #endif
+    }
+
+    @ViewBuilder
+    private func destination(for section: LibrarySection) -> some View {
+        switch section {
+        case .favorites:
+            ScrollView {
+                quickAccessSection
+                    .padding(.vertical, 16)
+            }
+        case .folders:
+            HomeFolderManagementView(usesInlineControls: usesMinimalSectionControls)
+        case .statistics:
+            ListeningStatsView(usesInlineSourcePicker: usesMinimalSectionControls)
+        case .recommendations:
+            AIRecommendationLibraryView()
+        case .songs:
+            SongListView(locationRequest: $songLocationRequest)
+        case .albums:
+            AlbumGridView()
+        case .artists:
+            ArtistListView(artists: artists)
+        case .genres:
+            GenreLibraryView()
+        case .playlists:
+            PlaylistListView()
+        case .radio:
+            RadioStationsView()
+        }
+    }
+
+    private var emptyLibraryState: some View {
+        ContentUnavailableView {
+            Label("welcome_title", systemImage: "music.note.list")
+        } description: {
+            Text("welcome_desc")
+        } actions: {
+            VStack(spacing: 10) {
+                NavigationLink {
+                    SourcesContentView()
+                        #if os(iOS)
+                        .minimalNavigationDetail()
+                        #endif
+                } label: {
+                    Text("manage_sources")
+                }
+                .buttonStyle(.borderedProminent)
+                NavigationLink(value: LibrarySection.radio) {
+                    Text("radio_manage")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func pinExists(_ pin: LibraryPinReference) -> Bool {
+        switch pin.kind {
+        case .album:
+            return albums.contains { $0.id == pin.itemID }
+        case .artist:
+            return artists.contains { $0.id == pin.itemID }
+        case .playlist:
+            if pin.itemID == MusicLibrary.likedSongsPlaylistID { return true }
+            return regularPlaylists.contains { $0.id == pin.itemID }
+        }
+    }
+
+    private func sanitizeStoredPins() {
+        let sanitized = storedPins.filter(pinExists)
+        guard sanitized != storedPins else { return }
+        quickAccessRawValue = LibraryPinStorage.encode(
+            sanitized,
+            maximumCount: quickAccessLimit
+        )
+    }
+
+    private func applyDeepLink(_ link: LibraryDeepLink?) {
+        guard let link else { return }
+        didRestorePersistedPage = true
+        var path = NavigationPath()
+        switch link {
+        case .root:
+            songLocationRequest = nil
+            persistedPageID = ""
+            onActiveSectionChange(nil)
+        case .section(let section):
+            persistedPageID = "section:\(section.rawValue)"
+            path.append(section)
+            onActiveSectionChange(section)
+        case .album(let album):
+            path.append(album)
+        case .artist(let artist):
+            path.append(artist)
+        case .playlist(let playlist):
+            path.append(playlist)
+        case .song(let songID):
+            songLocationRequest = SongLibraryLocationRequest(songID: songID)
+            persistedPageID = "section:\(LibrarySection.songs.rawValue)"
+            path.append(LibrarySection.songs)
+        }
+        navigationPath = path
+        deepLink = nil
+    }
+
+    private func restorePersistedPageIfNeeded() {
+        guard !didRestorePersistedPage else { return }
+        didRestorePersistedPage = true
+        var path = NavigationPath()
+        if let rawValue = identifier(in: persistedPageID, after: "section:"),
+           let section = LibrarySection(rawValue: rawValue),
+           visibleLibrarySections.contains(section) {
+            path.append(section)
+        } else if let itemID = identifier(in: persistedPageID, after: "album:"),
+                  let album = albums.first(where: { $0.id == itemID }) {
+            path.append(album)
+        } else if let itemID = identifier(in: persistedPageID, after: "artist:"),
+                  let artist = artists.first(where: { $0.id == itemID }) {
+            path.append(artist)
+        } else if let itemID = identifier(in: persistedPageID, after: "playlist:") {
+            if let playlist = library.playlists.first(where: { $0.id == itemID }) {
+                path.append(playlist)
+            } else if itemID == MusicLibrary.likedSongsPlaylistID {
+                path.append(likedPlaylist)
+            } else {
+                persistedPageID = ""
+                return
+            }
+        } else {
+            persistedPageID = ""
+            return
+        }
+        navigationPath = path
+    }
+
+    private func identifier(in value: String, after prefix: String) -> String? {
+        guard value.hasPrefix(prefix) else { return nil }
+        return String(value.dropFirst(prefix.count))
+    }
+}
+
+private struct LibraryQuickAccessEditor: View {
+    @Environment(MusicLibrary.self) private var library
+    @Environment(\.dismiss) private var dismiss
+    @Binding var pinsRawValue: String
+    let maximumCount: Int
+    @State private var searchText = ""
+
+    private var pins: [LibraryPinReference] {
+        LibraryPinStorage.decode(pinsRawValue, maximumCount: maximumCount)
+    }
+    private var likedPlaylist: Playlist {
+        library.playlists.first(where: { $0.id == MusicLibrary.likedSongsPlaylistID })
+            ?? Playlist(
+                id: MusicLibrary.likedSongsPlaylistID,
+                name: String(localized: "playlist_liked_name")
+            )
+    }
+    private var selectedPins: [LibraryPinReference] {
+        pins.filter(pinMatchesSearch)
+    }
+    private var albums: [Album] {
+        let matching = library.visibleAlbums.filter {
+            let pin = LibraryPinReference(kind: .album, itemID: $0.id)
+            return !pins.contains(pin)
+                && (
+                    searchText.isEmpty
+                        || $0.title.localizedCaseInsensitiveContains(searchText)
+                        || ($0.artistName?.localizedCaseInsensitiveContains(searchText) ?? false)
+                )
+        }
+        return matching.sorted {
+            return $0.title.localizedCompare($1.title) == .orderedAscending
+        }
+    }
+    private var artists: [Artist] {
+        let matching = library.visibleArtists.filter {
+            let pin = LibraryPinReference(kind: .artist, itemID: $0.id)
+            return !pins.contains(pin)
+                && (searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText))
+        }
+        return matching.sorted {
+            return $0.name.localizedCompare($1.name) == .orderedAscending
+        }
+    }
+    private var playlists: [Playlist] {
+        let allPlaylists = [likedPlaylist] + library.playlists.filter {
+            $0.id != MusicLibrary.likedSongsPlaylistID
+        }
+        let matching = allPlaylists
+            .filter {
+                let pin = LibraryPinReference(kind: .playlist, itemID: $0.id)
+                return !pins.contains(pin)
+                    && (searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText))
+            }
+        return matching.sorted {
+            return $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if searchText.isEmpty || !selectedPins.isEmpty {
+                    Section {
+                        if pins.isEmpty {
+                            Label("library_quick_access_selected_empty", systemImage: "pin")
+                                .foregroundStyle(.secondary)
+                        } else if searchText.isEmpty {
+                            ForEach(pins) { pin in
+                                selectedPinRow(pin)
+                            }
+                            .onMove(perform: movePins)
+                        } else {
+                            ForEach(selectedPins) { pin in
+                                selectedPinRow(pin)
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text("library_quick_access_selected")
+                            Spacer()
+                            Text("\(pins.count)/\(maximumCount)")
+                                .monospacedDigit()
+                        }
+                    } footer: {
+                        Text("library_quick_access_limit_description")
+                    }
+                }
+
+                if !albums.isEmpty {
+                    Section("tab_albums") {
+                        ForEach(albums) { album in
+                            pinButton(
+                                LibraryPinReference(kind: .album, itemID: album.id)
+                            ) {
+                                AlbumArtworkView(album: album, size: 42, cornerRadius: 7)
+                            } title: {
+                                Text(album.title)
+                            } subtitle: {
+                                Text(album.artistName ?? String(localized: "unknown_artist"))
+                            }
+                        }
+                    }
+                }
+
+                if !artists.isEmpty {
+                    Section("tab_artists") {
+                        ForEach(artists) { artist in
+                            pinButton(
+                                LibraryPinReference(kind: .artist, itemID: artist.id)
+                            ) {
+                                ArtistArtworkView(
+                                    artist: artist,
+                                    size: 42,
+                                    cornerRadius: 21
+                                )
+                            } title: {
+                                Text(artist.name)
+                            } subtitle: {
+                                Text("\(artist.albumCount) \(String(localized: "albums_count"))")
+                            }
+                        }
+                    }
+                }
+
+                if !playlists.isEmpty {
+                    Section("tab_playlists") {
+                        ForEach(playlists) { playlist in
+                            pinButton(
+                                LibraryPinReference(kind: .playlist, itemID: playlist.id)
+                            ) {
+                                editorPlaylistArtwork(playlist)
+                            } title: {
+                                Text(playlist.name)
+                            } subtitle: {
+                                Text(String(
+                                    format: String(localized: "carplay_playlist_song_count_format"),
+                                    library.songCount(forPlaylist: playlist.id)
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+            #if os(macOS)
+            .searchable(
+                text: $searchText,
+                placement: .toolbar,
+                prompt: Text("library_quick_access_search_prompt")
+            )
+            #else
+            .searchable(
+                text: $searchText,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Text("library_quick_access_search_prompt")
+            )
+            #endif
+            .navigationTitle("library_edit_quick_access")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("done") {
+                        dismiss()
+                    }
+                }
+            }
+            #if os(iOS)
+            .environment(\.editMode, .constant(searchText.isEmpty ? .active : .inactive))
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private func selectedPinRow(_ pin: LibraryPinReference) -> some View {
+        switch pin.kind {
+        case .album:
+            if let album = library.visibleAlbums.first(where: { $0.id == pin.itemID }) {
+                pinButton(pin) {
+                    AlbumArtworkView(album: album, size: 42, cornerRadius: 7)
+                } title: {
+                    Text(album.title)
+                } subtitle: {
+                    Text(album.artistName ?? String(localized: "unknown_artist"))
+                }
+            }
+        case .artist:
+            if let artist = library.visibleArtists.first(where: { $0.id == pin.itemID }) {
+                pinButton(pin) {
+                    ArtistArtworkView(
+                        artist: artist,
+                        size: 42,
+                        cornerRadius: 21
+                    )
+                } title: {
+                    Text(artist.name)
+                } subtitle: {
+                    Text("\(artist.albumCount) \(String(localized: "albums_count"))")
+                }
+            }
+        case .playlist:
+            if let playlist = pin.itemID == MusicLibrary.likedSongsPlaylistID
+                ? likedPlaylist
+                : library.playlists.first(where: { $0.id == pin.itemID }) {
+                pinButton(pin) {
+                    editorPlaylistArtwork(playlist)
+                } title: {
+                    Text(playlist.name)
+                } subtitle: {
+                    Text(String(
+                        format: String(localized: "carplay_playlist_song_count_format"),
+                        library.songCount(forPlaylist: playlist.id)
+                    ))
+                }
+            }
+        }
+    }
+
+    private func pinMatchesSearch(_ pin: LibraryPinReference) -> Bool {
+        switch pin.kind {
+        case .album:
+            guard let album = library.visibleAlbums.first(where: { $0.id == pin.itemID }) else {
+                return false
+            }
+            return searchText.isEmpty
+                || album.title.localizedCaseInsensitiveContains(searchText)
+                || (album.artistName?.localizedCaseInsensitiveContains(searchText) ?? false)
+        case .artist:
+            guard let artist = library.visibleArtists.first(where: { $0.id == pin.itemID }) else {
+                return false
+            }
+            return searchText.isEmpty || artist.name.localizedCaseInsensitiveContains(searchText)
+        case .playlist:
+            let playlist = pin.itemID == MusicLibrary.likedSongsPlaylistID
+                ? likedPlaylist
+                : library.playlists.first(where: { $0.id == pin.itemID })
+            guard let playlist else { return false }
+            return searchText.isEmpty || playlist.name.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    private func pinButton<Artwork: View, Title: View, Subtitle: View>(
+        _ pin: LibraryPinReference,
+        @ViewBuilder artwork: () -> Artwork,
+        @ViewBuilder title: () -> Title,
+        @ViewBuilder subtitle: () -> Subtitle
+    ) -> some View {
+        let isSelected = pins.contains(pin)
+        let canSelect = isSelected || pins.count < maximumCount
+
+        return Button {
+            toggle(pin)
+        } label: {
+            HStack(spacing: 12) {
+                artwork()
+
+                VStack(alignment: .leading, spacing: 2) {
+                    title()
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    subtitle()
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSelect)
+        .opacity(canSelect ? 1 : 0.45)
+    }
+
+    @ViewBuilder
+    private func editorPlaylistArtwork(_ playlist: Playlist) -> some View {
+        if playlist.id == MusicLibrary.likedSongsPlaylistID {
+            likedEditorArtwork
+        } else {
+            PlaylistArtworkView(playlist: playlist, size: 42, cornerRadius: 7)
+        }
+    }
+
+    private var likedEditorArtwork: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [.pink, .red],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            Image(systemName: "heart.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 42, height: 42)
+    }
+
+    private func toggle(_ pin: LibraryPinReference) {
+        var updated = pins
+        if let index = updated.firstIndex(of: pin) {
+            updated.remove(at: index)
+        } else if updated.count < maximumCount {
+            updated.append(pin)
+        }
+        pinsRawValue = LibraryPinStorage.encode(updated, maximumCount: maximumCount)
+    }
+
+    private func movePins(from source: IndexSet, to destination: Int) {
+        guard searchText.isEmpty else { return }
+        var updated = pins
+        updated.move(fromOffsets: source, toOffset: destination)
+        pinsRawValue = LibraryPinStorage.encode(updated, maximumCount: maximumCount)
+    }
+}
+
+private struct GenreVisualPalette {
+    let leading: Color
+    let trailing: Color
+}
+
+private enum GenreVisualStyle {
+    private static let palettes: [GenreVisualPalette] = [
+        .init(
+            leading: Color(red: 0.16, green: 0.46, blue: 0.43),
+            trailing: Color(red: 0.05, green: 0.19, blue: 0.27)
+        ),
+        .init(
+            leading: Color(red: 0.66, green: 0.27, blue: 0.39),
+            trailing: Color(red: 0.25, green: 0.08, blue: 0.22)
+        ),
+        .init(
+            leading: Color(red: 0.64, green: 0.42, blue: 0.12),
+            trailing: Color(red: 0.25, green: 0.14, blue: 0.06)
+        ),
+        .init(
+            leading: Color(red: 0.37, green: 0.31, blue: 0.68),
+            trailing: Color(red: 0.13, green: 0.10, blue: 0.30)
+        ),
+        .init(
+            leading: Color(red: 0.18, green: 0.43, blue: 0.66),
+            trailing: Color(red: 0.06, green: 0.16, blue: 0.33)
+        ),
+        .init(
+            leading: Color(red: 0.61, green: 0.26, blue: 0.18),
+            trailing: Color(red: 0.25, green: 0.09, blue: 0.07)
+        ),
+    ]
+
+    static func palette(for genreID: String) -> GenreVisualPalette {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in genreID.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return palettes[Int(hash % UInt64(palettes.count))]
+    }
+}
+
+struct GenreLibraryView: View {
+    @Environment(MusicLibrary.self) private var library
+    @State private var searchText = ""
+    #if os(macOS)
+    @State private var selectedGenreID: String?
+    #endif
+
+    private var filteredGenres: [LibraryGenre] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return library.visibleGenres
+            .filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    var body: some View {
+        #if os(macOS)
+        macBody
+        #else
+        iosBody
+            .navigationDestination(for: LibraryGenre.self) { genre in
+                GenreDetailView(genre: genre)
+            }
+        #endif
+    }
+
+    #if os(iOS)
+    @ViewBuilder
+    private var iosBody: some View {
+        if library.visibleGenres.isEmpty {
+            EmptyStateView(
+                titleKey: "no_genres",
+                descriptionKey: "no_genres_desc",
+                systemImage: "tag"
+            )
+        } else {
+            ScrollView {
+                if filteredGenres.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                        .padding(.top, 80)
+                } else {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 156), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(filteredGenres) { genre in
+                            NavigationLink(value: genre) {
+                                LibraryGenreCard(genre: genre)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+            .searchable(
+                text: $searchText,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Text("genre_search_placeholder")
+            )
+        }
+    }
+    #endif
+
+    #if os(macOS)
+    private var selectedGenre: LibraryGenre? {
+        if let selectedGenreID,
+           let genre = filteredGenres.first(where: { $0.id == selectedGenreID }) {
+            return genre
+        }
+        return filteredGenres.first
+    }
+
+    @ViewBuilder
+    private var macBody: some View {
+        if library.visibleGenres.isEmpty {
+            ContentUnavailableView(
+                "no_genres",
+                systemImage: "tag",
+                description: Text("no_genres_desc")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(PMColor.bg.ignoresSafeArea())
+        } else {
+            HStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("tab_genres")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(PMColor.text)
+
+                        HStack(spacing: 6) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 11))
+                                .foregroundStyle(PMColor.textFaint)
+                            TextField(
+                                "",
+                                text: $searchText,
+                                prompt: Text("genre_search_placeholder")
+                            )
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(PMColor.glassBtn, in: RoundedRectangle(cornerRadius: PMRadius.s))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: PMRadius.s)
+                                .strokeBorder(PMColor.cardBorder, lineWidth: 0.5)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 20)
+                    .padding(.bottom, 12)
+
+                    if filteredGenres.isEmpty {
+                        ContentUnavailableView.search(text: searchText)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView(.vertical, showsIndicators: false) {
+                            LazyVStack(spacing: 2) {
+                                ForEach(filteredGenres) { genre in
+                                    macGenreRow(genre)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.bottom, 24)
+                        }
+                    }
+                }
+                .frame(width: 280)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .background(PMColor.bg)
+
+                Rectangle().fill(PMColor.divider).frame(width: 0.5)
+
+                if let selectedGenre {
+                    GenreDetailView(genre: selectedGenre)
+                        .id(selectedGenre.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ContentUnavailableView.search(text: searchText)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .background(PMColor.bg.ignoresSafeArea())
+        }
+    }
+
+    private func macGenreRow(_ genre: LibraryGenre) -> some View {
+        let selected = selectedGenre?.id == genre.id
+        let palette = GenreVisualStyle.palette(for: genre.id)
+        return Button {
+            selectedGenreID = genre.id
+        } label: {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [palette.leading, palette.trailing],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+                    .overlay {
+                        Image(systemName: "tag.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
+                    .frame(width: 36, height: 36)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(verbatim: genre.name)
+                        .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                        .foregroundStyle(PMColor.text)
+                        .lineLimit(1)
+                    Text(verbatim: "\(genre.albumCount) \(String(localized: "albums_count")) · \(genre.songCount) \(String(localized: "songs_count"))")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(PMColor.textFaint)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .pmRowBackground(selected: selected)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+    #endif
+}
+
+private struct LibraryGenreCard: View {
+    let genre: LibraryGenre
+
+    var body: some View {
+        let palette = GenreVisualStyle.palette(for: genre.id)
+        ZStack(alignment: .bottomLeading) {
+            LinearGradient(
+                colors: [palette.leading, palette.trailing],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            GenreArtworkMosaic(genre: genre, artworkSize: 66)
+                .frame(width: 116, height: 86)
+                .offset(x: 62, y: 12)
+                .opacity(0.88)
+
+            LinearGradient(
+                colors: [.black.opacity(0.12), .black.opacity(0.58)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: genre.name)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                Text(verbatim: "\(genre.albumCount) \(String(localized: "albums_count")) · \(genre.songCount) \(String(localized: "songs_count"))")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .lineLimit(1)
+            }
+            .padding(13)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 142)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 0.5)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: genre.name))
+        .accessibilityValue(Text(verbatim: "\(genre.albumCount) \(String(localized: "albums_count")), \(genre.songCount) \(String(localized: "songs_count"))"))
+    }
+}
+
+private struct GenreArtworkMosaic: View {
+    @Environment(MusicLibrary.self) private var library
+    let genre: LibraryGenre
+    let artworkSize: CGFloat
+
+    private var songs: [Song] {
+        genre.representativeSongIDs.compactMap { library.visibleSong(id: $0) }
+    }
+
+    var body: some View {
+        ZStack {
+            if songs.isEmpty {
+                RoundedRectangle(cornerRadius: artworkSize * 0.18, style: .continuous)
+                    .fill(.white.opacity(0.14))
+                    .overlay {
+                        Image(systemName: "music.note")
+                            .font(.system(size: artworkSize * 0.28, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.74))
+                    }
+                    .frame(width: artworkSize, height: artworkSize)
+            } else {
+                ForEach(Array(songs.prefix(3).enumerated()), id: \.element.id) { index, song in
+                    CachedArtworkView(
+                        coverRef: song.coverArtFileName,
+                        songID: song.id,
+                        size: artworkSize,
+                        cornerRadius: artworkSize * 0.16,
+                        sourceID: song.sourceID,
+                        filePath: song.filePath,
+                        fileFormat: song.fileFormat
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: artworkSize * 0.16)
+                            .stroke(.white.opacity(0.28), lineWidth: 0.5)
+                    }
+                    .shadow(color: .black.opacity(0.26), radius: 7, y: 4)
+                    .rotationEffect(.degrees(Double(index - 1) * 7))
+                    .offset(x: CGFloat(index - 1) * artworkSize * 0.34)
+                    .zIndex(Double(index))
+                }
+            }
+        }
+    }
+}
+
+private struct GenreDetailView: View {
+    @Environment(AudioPlayerService.self) private var player
+    @Environment(MusicLibrary.self) private var library
+    @Environment(SourcesStore.self) private var sourcesStore
+    @Environment(MetadataBackfillService.self) private var backfill
+
+    let genre: LibraryGenre
+    @State private var selection = SongSelectionModel()
+
+    private var songs: [Song] { library.songs(forGenre: genre.id) }
+    private var playableSongs: [Song] { songs.filteredPlayable() }
+    private var albums: [Album] {
+        library.albums(forGenre: genre.id).sorted { lhs, rhs in
+            let lhsYear = lhs.year ?? Int.min
+            let rhsYear = rhs.year ?? Int.min
+            if lhsYear != rhsYear { return lhsYear > rhsYear }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    var body: some View {
+        Group {
+            #if os(iOS)
+            ImmersiveLibraryDetailScrollView { topInset in
+                hero(topInset: topInset)
+            } content: {
+                VStack(alignment: .leading, spacing: 28) {
+                    if !albums.isEmpty { albumShelf }
+                    if !songs.isEmpty { songSection }
+                }
+                .padding(.top, 28)
+                .padding(.bottom, 64)
+            }
+            .navigationTitle("")
+            #else
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    hero(topInset: 0)
+
+                    if !albums.isEmpty { albumShelf }
+                    if !songs.isEmpty { songSection }
+                }
+                .padding(.bottom, 64)
+            }
+            .background(PMColor.bg.ignoresSafeArea())
+            .navigationTitle(Text(verbatim: genre.name))
+            #endif
+        }
+        .toolbarTitleDisplayMode(.inline)
+        #if os(iOS)
+        .minimalNavigationDetail()
+        #endif
+        .songBatchActions(
+            selection: selection,
+            orderedIDs: { songs.map(\.id) },
+            resolve: { library.song(id: $0) }
+        )
+    }
+
+    private func hero(topInset: CGFloat) -> some View {
+        let palette = GenreVisualStyle.palette(for: genre.id)
+        return VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(verbatim: genre.name)
+                    #if os(macOS)
+                    .font(.system(size: 42, weight: .bold))
+                    #else
+                    .font(.largeTitle.weight(.bold))
+                    #endif
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(
+                    verbatim:
+                        "\(albums.count) \(String(localized: "albums_count")) · \(songs.count) \(String(localized: "songs_count"))"
+                )
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white.opacity(0.74))
+            }
+
+            HStack(spacing: 10) {
+                LibraryDetailActionButton(
+                    title: "play",
+                    systemImage: "play.fill",
+                    emphasized: true,
+                    disabled: playableSongs.isEmpty,
+                    action: playAll
+                )
+                LibraryDetailActionButton(
+                    title: "shuffle",
+                    systemImage: "shuffle",
+                    disabled: playableSongs.count < 2,
+                    action: shuffleAll
+                )
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, topInset + 100)
+        .padding(.bottom, 28)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            LinearGradient(
+                colors: [palette.leading, palette.trailing],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .overlay(alignment: .topTrailing) {
+                GenreArtworkMosaic(genre: genre, artworkSize: 116)
+                    .frame(width: 220, height: 150)
+                    .padding(.top, topInset + 12)
+                    .padding(.trailing, 16)
+                    .opacity(0.8)
+                    .accessibilityHidden(true)
+            }
+            .overlay {
+                LinearGradient(
+                    colors: [.black.opacity(0.05), .black.opacity(0.76)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        }
+        .clipped()
+    }
+
+    private var albumShelf: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            detailSectionTitle("albums_section")
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    ForEach(albums) { album in
+                        NavigationLink(value: album) {
+                            AlbumCardView(album: album).frame(width: 142)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+            .contentMargins(.horizontal, 0, for: .scrollContent)
+        }
+    }
+
+    private var songSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            detailSectionTitle("all_songs_section")
+
+            LazyVStack(spacing: 0) {
+                ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
+                    SongRowView(
+                        song: song,
+                        isPlaying: player.currentSong?.id == song.id,
+                        selection: selection,
+                        context: SongRowView.context(
+                            for: song,
+                            sourcesStore: sourcesStore,
+                            backfill: backfill
+                        )
+                    )
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                    .onTapGesture { playSong(song) }
+                    .songSelectable(
+                        songID: song.id,
+                        selection: selection,
+                        orderedIDs: { songs.map(\.id) }
+                    )
+
+                    if index != songs.count - 1 {
+                        Divider().padding(.leading, 66)
+                    }
+                }
+            }
+            .background(.background, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(.primary.opacity(0.06), lineWidth: 0.5)
+            }
+            .padding(.horizontal, 20)
+        }
+    }
+
+    private func detailSectionTitle(_ title: LocalizedStringKey) -> some View {
+        Text(title)
+            .font(.title3.weight(.bold))
+            .padding(.horizontal, 20)
+    }
+
+    private func playAll() {
+        guard let first = playableSongs.first else { return }
+        player.setQueue(playableSongs, startAt: 0)
+        Task { await player.play(song: first) }
+    }
+
+    private func shuffleAll() {
+        let queue = playableSongs.shuffled()
+        guard let first = queue.first else { return }
+        player.shuffleEnabled = true
+        player.setQueue(queue, startAt: 0)
+        Task { await player.play(song: first) }
+    }
+
+    private func playSong(_ song: Song) {
+        guard let index = playableSongs.firstIndex(where: { $0.id == song.id }) else { return }
+        player.setQueue(playableSongs, startAt: index)
+        SiriMediaInteractionDonor.donate(song: song)
+        Task { await player.play(song: song) }
+    }
+}
+
+#Preview {
+    LibraryView()
+        .environment(MusicLibrary())
+}

@@ -1,0 +1,276 @@
+import Foundation
+
+/// Durable playback context used to reconstruct the queue after a process
+/// restart. Queue positions are stored instead of song IDs alone because the
+/// same song may intentionally appear more than once.
+public struct PlaybackSessionSnapshot: Codable, Equatable, Sendable {
+    public static let currentVersion = 1
+
+    public var version: Int
+    public var queueSongIDs: [String]
+    public var currentSongID: String
+    public var currentIndex: Int
+    public var currentTime: TimeInterval
+    public var duration: TimeInterval
+    public var wasPlaying: Bool
+    public var shuffleEnabled: Bool
+    public var shuffledIndices: [Int]
+    public var shufflePosition: Int
+    public var pendingNextShuffleIndices: [Int]?
+    public var repeatMode: RepeatMode
+    public var isAtTrackEnd: Bool
+    public var updatedAt: Date
+
+    public init(
+        version: Int = PlaybackSessionSnapshot.currentVersion,
+        queueSongIDs: [String],
+        currentSongID: String,
+        currentIndex: Int,
+        currentTime: TimeInterval,
+        duration: TimeInterval,
+        wasPlaying: Bool,
+        shuffleEnabled: Bool,
+        shuffledIndices: [Int],
+        shufflePosition: Int,
+        pendingNextShuffleIndices: [Int]? = nil,
+        repeatMode: RepeatMode,
+        isAtTrackEnd: Bool,
+        updatedAt: Date = Date()
+    ) {
+        self.version = version
+        self.queueSongIDs = queueSongIDs
+        self.currentSongID = currentSongID
+        self.currentIndex = currentIndex
+        self.currentTime = currentTime
+        self.duration = duration
+        self.wasPlaying = wasPlaying
+        self.shuffleEnabled = shuffleEnabled
+        self.shuffledIndices = shuffledIndices
+        self.shufflePosition = shufflePosition
+        self.pendingNextShuffleIndices = pendingNextShuffleIndices
+        self.repeatMode = repeatMode
+        self.isAtTrackEnd = isAtTrackEnd
+        self.updatedAt = updatedAt
+    }
+}
+
+/// Coordinates the one-time launch restore with transport actions that may
+/// arrive while its file/queue work is still in flight. An empty player is not
+/// proof that the user stopped playback until the initial restore has either
+/// completed or been explicitly superseded.
+public struct PlaybackSessionRestoreLifecycle: Equatable, Sendable {
+    public enum Phase: Equatable, Sendable {
+        case pending
+        case restoring
+        case superseded
+        case completed
+    }
+
+    public private(set) var phase: Phase = .pending
+    private var generation: UInt64 = 0
+
+    public init() {}
+
+    /// Empty-state publications (for example the first scene-active callback)
+    /// may clear durable state only after launch restoration has settled.
+    public var permitsEmptySessionClear: Bool {
+        phase == .completed
+    }
+
+    /// Starts the single launch restore and returns a token that must still be
+    /// current before applying its asynchronously prepared queue.
+    public mutating func begin() -> UInt64? {
+        guard phase == .pending else { return nil }
+        generation &+= 1
+        phase = .restoring
+        return generation
+    }
+
+    public func permitsApply(token: UInt64) -> Bool {
+        phase == .restoring && generation == token
+    }
+
+    /// Finishes a restore attempt. A stale completion cannot undo a newer user
+    /// intent that superseded the restore while it was awaiting I/O.
+    public mutating func complete(token: UInt64) {
+        guard permitsApply(token: token) else { return }
+        phase = .completed
+    }
+
+    /// A new Play request owns the live session, but the previous snapshot is
+    /// retained until the replacement has actually been persisted. If the new
+    /// transport fails early, the next launch can still recover the old state.
+    public mutating func supersedeForPlaybackIntent() {
+        guard phase == .pending || phase == .restoring else { return }
+        generation &+= 1
+        phase = .superseded
+    }
+
+    /// Successful persistence of a current item makes subsequent empty state a
+    /// meaningful stop rather than a transient launch condition.
+    public mutating func didPersistCurrentSession() {
+        phase = .completed
+    }
+
+    /// Pause/stop is explicit user intent. It invalidates an in-flight restore
+    /// and allows the caller to remove the stored snapshot when no item exists.
+    public mutating func completeForPauseOrStopIntent() {
+        generation &+= 1
+        phase = .completed
+    }
+}
+
+/// A validated, library-aware playback session. Missing queue items are
+/// removed while the current occurrence and the played/up-next shuffle split
+/// remain stable.
+public struct PlaybackSessionRestorationPlan: Equatable, Sendable {
+    public var queueSongIDs: [String]
+    public var currentIndex: Int
+    public var currentTime: TimeInterval
+    public var duration: TimeInterval
+    public var shuffleEnabled: Bool
+    public var shuffledIndices: [Int]
+    public var shufflePosition: Int
+    public var pendingNextShuffleIndices: [Int]?
+    public var repeatMode: RepeatMode
+    public var isAtTrackEnd: Bool
+    public var shouldStartPlayback: Bool
+}
+
+public enum PlaybackSessionRestorationPolicy {
+    /// Positions this close to the beginning are transport jitter, not useful
+    /// resume points. Keeping a fractional launch snapshot would send an
+    /// uncached remote track through exact-seek recovery and can block first
+    /// playback while the complete file is materialized.
+    public static let minimumMeaningfulResumeTime: TimeInterval = 3
+
+    public static func plan(
+        snapshot: PlaybackSessionSnapshot,
+        availableSongIDs: Set<String>
+    ) -> PlaybackSessionRestorationPlan? {
+        guard snapshot.version == PlaybackSessionSnapshot.currentVersion,
+              snapshot.queueSongIDs.indices.contains(snapshot.currentIndex),
+              snapshot.queueSongIDs[snapshot.currentIndex] == snapshot.currentSongID,
+              availableSongIDs.contains(snapshot.currentSongID) else {
+            return nil
+        }
+
+        var oldToNew: [Int: Int] = [:]
+        var restoredIDs: [String] = []
+        restoredIDs.reserveCapacity(snapshot.queueSongIDs.count)
+        for (oldIndex, songID) in snapshot.queueSongIDs.enumerated()
+            where availableSongIDs.contains(songID) {
+            oldToNew[oldIndex] = restoredIDs.count
+            restoredIDs.append(songID)
+        }
+
+        guard let restoredCurrentIndex = oldToNew[snapshot.currentIndex],
+              !restoredIDs.isEmpty else {
+            return nil
+        }
+
+        let shuffleOrder: [Int]
+        let shufflePosition: Int
+        let pendingOrder: [Int]?
+        if snapshot.shuffleEnabled {
+            let mappedOrder = snapshot.shuffledIndices.compactMap { oldToNew[$0] }
+            let snapshotPointsAtCurrent = snapshot.shuffledIndices.indices.contains(snapshot.shufflePosition)
+                && snapshot.shuffledIndices[snapshot.shufflePosition] == snapshot.currentIndex
+            if snapshotPointsAtCurrent,
+               isPermutation(mappedOrder, count: restoredIDs.count),
+               let mappedPosition = mappedOrder.firstIndex(of: restoredCurrentIndex) {
+                shuffleOrder = mappedOrder
+                shufflePosition = mappedPosition
+            } else {
+                // Corrupt or legacy shuffle bookkeeping must never crash queue
+                // traversal. Keep the selected track and build a deterministic
+                // unplayed tail; a fresh random round starts after this one.
+                shuffleOrder = [restoredCurrentIndex]
+                    + (0..<restoredIDs.count).filter { $0 != restoredCurrentIndex }
+                shufflePosition = 0
+            }
+
+            if let storedPending = snapshot.pendingNextShuffleIndices {
+                let mappedPending = storedPending.compactMap { oldToNew[$0] }
+                pendingOrder = isPermutation(mappedPending, count: restoredIDs.count)
+                    ? mappedPending
+                    : nil
+            } else {
+                pendingOrder = nil
+            }
+        } else {
+            shuffleOrder = []
+            shufflePosition = 0
+            pendingOrder = nil
+        }
+
+        let safeDuration = snapshot.duration.isFinite ? max(0, snapshot.duration) : 0
+        let unclampedTime = snapshot.currentTime.isFinite ? max(0, snapshot.currentTime) : 0
+        let safeTime = safeDuration > 0 ? min(unclampedTime, safeDuration) : unclampedTime
+        let restorableTime = safeTime > minimumMeaningfulResumeTime ? safeTime : 0
+
+        return PlaybackSessionRestorationPlan(
+            queueSongIDs: restoredIDs,
+            currentIndex: restoredCurrentIndex,
+            currentTime: snapshot.isAtTrackEnd ? 0 : restorableTime,
+            duration: safeDuration,
+            shuffleEnabled: snapshot.shuffleEnabled,
+            shuffledIndices: shuffleOrder,
+            shufflePosition: shufflePosition,
+            pendingNextShuffleIndices: pendingOrder,
+            repeatMode: snapshot.repeatMode,
+            isAtTrackEnd: snapshot.isAtTrackEnd,
+            shouldStartPlayback: false
+        )
+    }
+
+    private static func isPermutation(_ indices: [Int], count: Int) -> Bool {
+        indices.count == count && Set(indices) == Set(0..<count)
+    }
+}
+
+/// File-backed storage keeps large library queues out of UserDefaults. Writes
+/// use atomic replacement so a terminated process leaves either the old or new
+/// complete snapshot on disk.
+public struct PlaybackSessionStore: Sendable {
+    public let url: URL
+
+    public init(fileManager: FileManager = .default) {
+        #if os(tvOS)
+        let base = fileManager.primuseDirectoryURL(for: .cachesDirectory)
+        #else
+        let base = fileManager.primuseDirectoryURL(for: .applicationSupportDirectory)
+        #endif
+        url = base
+            .appendingPathComponent("Primuse", isDirectory: true)
+            .appendingPathComponent("playback-session.json")
+    }
+
+    public init(url: URL) {
+        self.url = url
+    }
+
+    public func load() throws -> PlaybackSessionSnapshot? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(PlaybackSessionSnapshot.self, from: data)
+    }
+
+    public func save(_ snapshot: PlaybackSessionSnapshot) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(snapshot).write(to: url, options: .atomic)
+    }
+
+    public func clear() throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+}

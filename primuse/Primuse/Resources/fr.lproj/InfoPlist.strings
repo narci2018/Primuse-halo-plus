@@ -1,0 +1,10 @@
+// Français : remplacements des métadonnées de l’app. En l’absence d’une clé
+// ici, le système utilise la valeur anglaise par défaut (Info.plist).
+"CFBundleDisplayName" = "Primuse";
+
+// Textes des demandes d’autorisation système. Apple exige une formulation
+// claire et conforme à la fonctionnalité.
+"NSSiriUsageDescription" = "Permet de lancer la lecture et de contrôler Primuse à la voix avec Siri.";
+"NSAppleMusicUsageDescription" = "Primuse a besoin d’accéder à votre bibliothèque Apple Music / iTunes pour importer vos morceaux locaux comme source de lecture.";
+"NSLocalNetworkUsageDescription" = "Primuse a besoin d’accéder au réseau local pour détecter vos appareils NAS, serveurs multimédias et autres sources musicales, et s’y connecter.";
+"NSMotionUsageDescription" = "Primuse utilise les données de mouvement de vos écouteurs afin de garder l’audio spatial stable lorsque vous tournez la tête.";

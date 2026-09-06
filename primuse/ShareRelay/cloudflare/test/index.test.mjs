@@ -1,0 +1,1296 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+import worker, { cleanupExpiredShares, testing } from "../src/index.mjs";
+
+const TEST_ADMIN_TOKEN = "test-admin-token-with-more-than-thirty-two-characters";
+const TEST_CHUNK_SIZE = 5 * 1024 * 1024;
+const CLIENT_ENCRYPTION_MODE = "client-aes-256-gcm-chunks-v1";
+const utf8 = new TextEncoder();
+const utf8Decoder = new TextDecoder();
+
+test("self-hosted policy can explicitly disable client encryption", async () => {
+  const env = makeEnvironment(new MemoryBucket(), { E2EE_POLICY: "disabled" });
+  const context = new TestContext();
+  const capabilities = await fetchRelay(env, context, "/.well-known/primuse-share");
+  assert.equal((await capabilities.json()).clientSideEncryption, "disabled");
+  const response = await fetchRelay(env, context, "/v1/uploads", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      encryptionMode: CLIENT_ENCRYPTION_MODE,
+      size: 16,
+      linkType: "permanent",
+    }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "client_encryption_disabled");
+});
+
+test("official E2EE uploads keep keys and presentation metadata off the server", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket, {
+    E2EE_POLICY: "required",
+    UPLOAD_AUTHENTICATION: "none",
+  });
+  const context = new TestContext();
+  const media = new Uint8Array(TEST_CHUNK_SIZE + 137);
+  for (let index = 0; index < media.length; index += 1) media[index] = index % 251;
+  const key = crypto.getRandomValues(new Uint8Array(32));
+  const manifest = {
+    version: 1,
+    fileName: "陈默寻 - 夜航西飞.flac",
+    contentType: "audio/flac",
+    size: media.byteLength,
+    chunkSize: TEST_CHUNK_SIZE,
+    title: "夜航西飞",
+    artist: "陈默寻",
+    album: "潮汐纪年",
+    audioFormat: "FLAC",
+    quality: "24-bit / 96 kHz",
+    durationSeconds: 243.5,
+  };
+
+  const capabilities = await fetchRelay(env, context, "/.well-known/primuse-share");
+  assert.equal(capabilities.status, 200);
+  assert.deepEqual(await capabilities.json(), {
+    protocolVersion: 4,
+    clientSideEncryption: "required",
+    supportedEncryptionModes: [CLIENT_ENCRYPTION_MODE],
+    uploadAuthentication: "none",
+  });
+  const legacyRejected = await fetchRelay(env, context, "/v1/uploads", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fileName: "plaintext.mp3", contentType: "audio/mpeg", size: 16 }),
+  });
+  assert.equal(legacyRejected.status, 400);
+  assert.equal((await legacyRejected.json()).error, "encryption_required");
+
+  const creationResponse = await fetchRelay(env, context, "/v1/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      encryptionMode: CLIENT_ENCRYPTION_MODE,
+      size: media.byteLength,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      allowPlayback: true,
+      allowDownload: true,
+      allowImport: true,
+      linkType: "long",
+    }),
+  });
+  await assertResponseStatus(creationResponse, 201);
+  const creation = await creationResponse.json();
+  assert.equal(creation.encryptionMode, CLIENT_ENCRYPTION_MODE);
+  assert.equal(new URL(creation.publicURL).hash, "");
+
+  const encryptedManifest = await encryptEnvelope(
+    key,
+    utf8.encode(JSON.stringify(manifest)),
+    `primuse-share-e2ee-v1:${creation.shareID}:manifest`,
+  );
+  const manifestUpload = await fetchRelay(env, context, `/v1/uploads/${creation.shareID}/manifest`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${creation.uploadToken}`,
+      "Content-Type": "application/octet-stream",
+    },
+    body: encryptedManifest,
+  });
+  assert.equal(manifestUpload.status, 204);
+
+  for (let index = 0, offset = 0; offset < media.byteLength; index += 1, offset += creation.chunkSize) {
+    const end = Math.min(offset + creation.chunkSize, media.byteLength);
+    const plaintext = media.slice(offset, end);
+    const encrypted = await encryptEnvelope(
+      key,
+      plaintext,
+      `primuse-share-e2ee-v1:${creation.shareID}:chunk:${index}:${plaintext.byteLength}`,
+    );
+    const response = await fetchRelay(env, context, `/v1/uploads/${creation.shareID}/chunks/${index}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${creation.uploadToken}`,
+        "Content-Type": "application/octet-stream",
+        "Content-Range": `bytes ${offset}-${end - 1}/${media.byteLength}`,
+      },
+      body: encrypted,
+    });
+    assert.equal(response.status, 204);
+  }
+  const completion = await fetchRelay(env, context, `/v1/uploads/${creation.shareID}/complete`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${creation.uploadToken}` },
+  });
+  assert.equal(completion.status, 200);
+  const publicPath = new URL(creation.publicURL).pathname;
+
+  const page = await fetchRelay(env, context, publicPath, {
+    headers: { Accept: "text/html", "Sec-Fetch-Mode": "navigate" },
+  });
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("Content-Security-Policy"), /media-src 'self' blob:/);
+  const html = await page.text();
+  assert.match(html, /data-encryption-mode="client-aes-256-gcm-chunks-v1"/);
+  assert.match(html, /Decrypt on this device/);
+  assert.doesNotMatch(html, /夜航西飞|陈默寻|潮汐纪年/);
+
+  const manifestResponse = await fetchRelay(env, context, `${publicPath}/manifest`);
+  assert.equal(manifestResponse.status, 200);
+  assert.equal(manifestResponse.headers.get("X-Primuse-Share-ID"), creation.shareID);
+  const decryptedManifest = await decryptEnvelope(
+    key,
+    new Uint8Array(await manifestResponse.arrayBuffer()),
+    `primuse-share-e2ee-v1:${creation.shareID}:manifest`,
+  );
+  assert.deepEqual(JSON.parse(utf8Decoder.decode(decryptedManifest)), manifest);
+
+  const reconstructed = [];
+  for (let index = 0, offset = 0; offset < media.byteLength; index += 1, offset += creation.chunkSize) {
+    const plaintextLength = Math.min(creation.chunkSize, media.byteLength - offset);
+    const encryptedChunk = await fetchRelay(env, context, `${publicPath}/chunks/${index}`);
+    assert.equal(encryptedChunk.status, 200);
+    reconstructed.push(await decryptEnvelope(
+      key,
+      new Uint8Array(await encryptedChunk.arrayBuffer()),
+      `primuse-share-e2ee-v1:${creation.shareID}:chunk:${index}:${plaintextLength}`,
+    ));
+  }
+  assert.deepEqual(concatenate(reconstructed), media);
+  assert.equal((await fetchRelay(env, context, `${publicPath}/media`)).status, 409);
+
+  const ticketResponse = await fetchRelay(env, context, `${publicPath}/import`, {
+    method: "POST",
+    headers: { Origin: "https://share.soundisle.com", Accept: "application/json" },
+  });
+  assert.equal(ticketResponse.status, 201);
+  const ticket = await ticketResponse.json();
+  const imported = await fetchRelay(env, context, new URL(ticket.importURL).pathname);
+  assert.equal(imported.status, 200);
+  assert.equal(imported.headers.get("Content-Type"), "application/vnd.primuse.encrypted-media");
+  assert.equal(imported.headers.get("X-Primuse-Share-ID"), creation.shareID);
+  const importedCiphertext = new Uint8Array(await imported.arrayBuffer());
+  const importedPlaintext = await decryptChunkedMedia(
+    key,
+    importedCiphertext,
+    creation.shareID,
+    media.byteLength,
+    creation.chunkSize,
+  );
+  assert.deepEqual(importedPlaintext, media);
+
+  const persisted = bucket.textForPrefixes(["metadata/", "indexes/", "parts/"]);
+  for (const secret of [manifest.fileName, manifest.title, manifest.artist, manifest.album]) {
+    assert.equal(persisted.includes(secret), false);
+  }
+  assert.equal(Buffer.from(bucket.raw(`data/${creation.shareID}.bin`)).includes(Buffer.from(media)), false);
+});
+
+test("anonymous upload mode fails closed without required E2EE and honors rate limits", async () => {
+  const context = new TestContext();
+  const invalid = makeEnvironment(new MemoryBucket(), {
+    E2EE_POLICY: "optional",
+    UPLOAD_AUTHENTICATION: "none",
+  });
+  assert.equal((await fetchRelay(invalid, context, "/healthz")).status, 503);
+
+  const rateLimited = makeEnvironment(new MemoryBucket(), {
+    E2EE_POLICY: "required",
+    UPLOAD_AUTHENTICATION: "none",
+    UPLOAD_RATE_LIMITER: { limit: async () => ({ success: false }) },
+  });
+  const response = await fetchRelay(rateLimited, context, "/v1/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      encryptionMode: CLIENT_ENCRYPTION_MODE,
+      size: 16,
+      linkType: "permanent",
+    }),
+  });
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("Retry-After"), "60");
+});
+
+test("encrypted multipart upload supports full reads, ranges, validators, and secret boundaries", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const media = new Uint8Array(TEST_CHUNK_SIZE + 65_537);
+  for (let index = 0; index < media.byteLength; index += 1) {
+    media[index] = index % 251;
+  }
+
+  const creation = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media,
+    fileName: "夜航 / Live.flac",
+    contentType: "audio/flac",
+  });
+  await context.flush();
+  const publicPath = new URL(creation.publicURL).pathname;
+
+  const closedUpload = await fetchRelay(env, context, `/v1/uploads/${creation.shareID}/chunks/0`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${creation.uploadToken}`,
+      "Content-Type": "application/octet-stream",
+      "Content-Range": `bytes 0-${TEST_CHUNK_SIZE - 1}/${media.byteLength}`,
+    },
+    body: media.slice(0, TEST_CHUNK_SIZE),
+  });
+  assert.equal(closedUpload.status, 409);
+  await context.flush();
+  assert.notEqual(bucket.raw(`data/${creation.shareID}.bin`), null);
+
+  const head = await fetchRelay(env, context, publicPath, { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get("Accept-Ranges"), "bytes");
+  assert.equal(head.headers.get("Content-Length"), String(media.byteLength));
+  assert.match(head.headers.get("Content-Disposition"), /filename\*=UTF-8''/);
+  assert.equal(head.headers.get("Cache-Control"), "private, no-store, max-age=0");
+  assert.equal(head.headers.get("Referrer-Policy"), "no-referrer");
+
+  const rangeStart = TEST_CHUNK_SIZE - 31;
+  const rangeEnd = TEST_CHUNK_SIZE + 79;
+  const range = await fetchRelay(env, context, publicPath, {
+    headers: { Range: `bytes=${rangeStart}-${rangeEnd}` },
+  });
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get("Content-Range"), `bytes ${rangeStart}-${rangeEnd}/${media.byteLength}`);
+  assert.deepEqual(new Uint8Array(await range.arrayBuffer()), media.slice(rangeStart, rangeEnd + 1));
+
+  const suffix = await fetchRelay(env, context, publicPath, {
+    headers: { Range: "bytes=-257" },
+  });
+  assert.equal(suffix.status, 206);
+  assert.deepEqual(new Uint8Array(await suffix.arrayBuffer()), media.slice(-257));
+
+  const invalid = await fetchRelay(env, context, publicPath, {
+    headers: { Range: "bytes=99999999-100000000" },
+  });
+  assert.equal(invalid.status, 416);
+  assert.equal(invalid.headers.get("Content-Range"), `bytes */${media.byteLength}`);
+
+  const unchanged = await fetchRelay(env, context, publicPath, {
+    headers: { "If-None-Match": head.headers.get("ETag") },
+  });
+  assert.equal(unchanged.status, 304);
+
+  const full = await fetchRelay(env, context, publicPath);
+  assert.equal(full.status, 200);
+  assert.deepEqual(new Uint8Array(await full.arrayBuffer()), media);
+
+  const rawCiphertext = bucket.raw(`data/${creation.shareID}.bin`);
+  assert.equal(
+    rawCiphertext.byteLength,
+    media.byteLength + 2 * testing.ENCRYPTED_CHUNK_OVERHEAD,
+  );
+  assert.equal(
+    Buffer.from(rawCiphertext).indexOf(Buffer.from(media.subarray(0, 128))),
+    -1,
+  );
+  const persistedText = bucket.textForPrefixes(["metadata/", "indexes/", "parts/"]);
+  const publicToken = publicPath.split("/").at(-1);
+  for (const secret of [TEST_ADMIN_TOKEN, creation.uploadToken, publicToken, "smb://private/music.flac"]) {
+    assert.equal(persistedText.includes(secret), false, `persisted secret: ${secret.slice(0, 4)}`);
+  }
+  assert.deepEqual(bucket.keys(`parts/${creation.shareID}/`), []);
+});
+
+test("legacy expiring metadata without a permanent marker remains readable", async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const media = utf8.encode("legacy-expiring-share".repeat(256));
+  const creation = await createAndUpload({
+    env,
+    context,
+    media,
+    fileName: "legacy.mp3",
+    contentType: "audio/mpeg",
+    linkType: "long",
+  });
+  const metadataKey = `metadata/${creation.shareID}.json`;
+  const metadata = JSON.parse(utf8Decoder.decode(bucket.raw(metadataKey)));
+  metadata.version = 2;
+  delete metadata.permanent;
+  await bucket.put(metadataKey, JSON.stringify(metadata), {
+    httpMetadata: { contentType: "application/json" },
+  });
+
+  const response = await fetchRelay(makeEnvironment(bucket), new TestContext(), new URL(creation.publicURL).pathname, {
+    method: "HEAD",
+  });
+  assert.equal(response.status, 200);
+});
+
+test("password protection and revocation preserve the public capability boundary", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const media = utf8.encode("password-protected-media".repeat(4096));
+  const password = "正确 horse";
+  const creation = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media,
+    fileName: "测试音频.mp3",
+    contentType: "audio/mpeg",
+    password,
+  });
+  await context.flush();
+  const publicPath = new URL(creation.publicURL).pathname;
+
+  const missing = await fetchRelay(env, context, publicPath);
+  assert.equal(missing.status, 401);
+  assert.match(missing.headers.get("WWW-Authenticate"), /^Basic /);
+
+  const wrong = await fetchRelay(env, context, publicPath, {
+    headers: { Authorization: basicAuthorization("listener", "wrong") },
+  });
+  assert.equal(wrong.status, 401);
+
+  const correct = await fetchRelay(env, context, publicPath, {
+    headers: { Authorization: basicAuthorization("listener", password) },
+  });
+  assert.equal(correct.status, 200);
+  assert.deepEqual(new Uint8Array(await correct.arrayBuffer()), media);
+
+  const persistedMetadata = utf8Decoder.decode(bucket.raw(`metadata/${creation.shareID}.json`));
+  assert.equal(persistedMetadata.includes(password), false);
+  const revoke = await fetchRelay(env, context, `/v1/shares/${creation.shareID}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${creation.uploadToken}` },
+  });
+  assert.equal(revoke.status, 204);
+  await context.flush();
+  assert.equal(bucket.raw(`data/${creation.shareID}.bin`), null);
+
+  const afterRevoke = await fetchRelay(env, context, publicPath, { method: "HEAD" });
+  assert.equal(afterRevoke.status, 410);
+  const metadata = JSON.parse(utf8Decoder.decode(bucket.raw(`metadata/${creation.shareID}.json`)));
+  assert.ok(metadata.revokedAt);
+  assert.ok(metadata.dataDeletedAt);
+});
+
+test("permanent secure links survive future cleanup and fresh worker contexts until revoked", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const media = utf8.encode("permanent-encrypted-media".repeat(4096));
+  const password = "permanent-password";
+  const creation = await createAndUpload({
+    env,
+    context,
+    media,
+    fileName: "永久分享.flac",
+    contentType: "audio/flac",
+    password,
+    title: "不会过期的分享",
+    allowPlayback: true,
+    allowDownload: false,
+    allowImport: true,
+    linkType: "permanent",
+  });
+  await context.flush();
+  assert.equal(creation.permanent, true);
+  assert.equal(creation.expiresAt, undefined);
+  assert.equal(creation.accessCode, undefined);
+  const publicPath = new URL(creation.publicURL).pathname;
+  assert.match(publicPath, /^\/s\/[A-Za-z0-9_-]{16,128}$/);
+  const metadataKey = `metadata/${creation.shareID}.json`;
+  const metadata = JSON.parse(utf8Decoder.decode(bucket.raw(metadataKey)));
+  assert.equal(metadata.permanent, true);
+  assert.equal(metadata.expiresAt, null);
+
+  const future = new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000);
+  await cleanupExpiredShares(env, future);
+  assert.notEqual(bucket.raw(`data/${creation.shareID}.bin`), null);
+
+  const restartedEnv = makeEnvironment(bucket);
+  const restartedContext = new TestContext();
+  const page = await fetchRelay(restartedEnv, restartedContext, publicPath, {
+    headers: {
+      Accept: "text/html",
+      "Sec-Fetch-Mode": "navigate",
+      Authorization: basicAuthorization("listener", password),
+    },
+  });
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Available until revoked/);
+  const playable = await fetchRelay(restartedEnv, restartedContext, `${publicPath}/media`, {
+    headers: { Authorization: basicAuthorization("listener", password) },
+  });
+  assert.equal(playable.status, 200);
+  assert.deepEqual(new Uint8Array(await playable.arrayBuffer()), media);
+  const download = await fetchRelay(restartedEnv, restartedContext, `${publicPath}/download`, {
+    headers: { Authorization: basicAuthorization("listener", password) },
+  });
+  assert.equal(download.status, 403);
+
+  const revoke = await fetchRelay(restartedEnv, restartedContext, `/v1/shares/${creation.shareID}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${creation.uploadToken}` },
+  });
+  assert.equal(revoke.status, 204);
+  await restartedContext.flush();
+  assert.equal(bucket.raw(`data/${creation.shareID}.bin`), null);
+  const afterRevoke = await fetchRelay(restartedEnv, restartedContext, publicPath, { method: "HEAD" });
+  assert.equal(afterRevoke.status, 410);
+  const revokedMetadata = JSON.parse(utf8Decoder.decode(bucket.raw(metadataKey)));
+  assert.ok(revokedMetadata.revokedAt);
+  assert.ok(revokedMetadata.dataDeletedAt);
+});
+
+test("browser share page exposes only allowed actions and import tickets are one-time", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const media = utf8.encode("designed-share-media".repeat(4096));
+  const creation = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media,
+    fileName: "陈默寻 - 夜航西飞.flac",
+    contentType: "audio/flac",
+    title: "夜航西飞 <Live>",
+    artist: "陈默寻",
+    album: "潮汐纪年",
+    audioFormat: "FLAC",
+    quality: "24bit/96kHz",
+    allowPlayback: true,
+    allowDownload: false,
+    allowImport: true,
+  });
+  await context.flush();
+  const publicPath = new URL(creation.publicURL).pathname;
+
+  const page = await fetchRelay(env, context, publicPath, {
+    headers: { Accept: "text/html", "Sec-Fetch-Mode": "navigate" },
+  });
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("Content-Type"), /^text\/html/);
+  assert.match(page.headers.get("Content-Security-Policy"), /default-src 'none'/);
+  const html = await page.text();
+  assert.match(html, /夜航西飞 &lt;Live&gt;/);
+  assert.match(html, /陈默寻 · 潮汐纪年/);
+  assert.match(html, /data-protected-action="download" hidden/);
+  assert.match(html, new RegExp(`data-file-size="${media.byteLength}"`));
+  assert.doesNotMatch(html, /<audio[^>]+src=/);
+
+  const playable = await fetchRelay(env, context, `${publicPath}/media`, {
+    headers: { Range: "bytes=20-79" },
+  });
+  assert.equal(playable.status, 206);
+  assert.deepEqual(new Uint8Array(await playable.arrayBuffer()), media.slice(20, 80));
+
+  const forbiddenDownload = await fetchRelay(env, context, `${publicPath}/download`);
+  assert.equal(forbiddenDownload.status, 403);
+
+  const ticketResponse = await fetchRelay(env, context, `${publicPath}/import`, {
+    method: "POST",
+    headers: { Origin: "https://share.soundisle.com", Accept: "application/json" },
+  });
+  assert.equal(ticketResponse.status, 201);
+  const ticket = await ticketResponse.json();
+  const importPath = new URL(ticket.importURL).pathname;
+  const imported = await fetchRelay(env, context, importPath);
+  assert.equal(imported.status, 200);
+  assert.match(imported.headers.get("Content-Disposition"), /^attachment;/);
+  assert.deepEqual(new Uint8Array(await imported.arrayBuffer()), media);
+  await context.flush();
+  const reused = await fetchRelay(env, context, importPath);
+  assert.equal(reused.status, 410);
+});
+
+test("opening an expired browser share schedules encrypted media cleanup", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const media = utf8.encode("expired-browser-media".repeat(2048));
+  const creation = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media,
+    fileName: "expired.flac",
+    contentType: "audio/flac",
+  });
+  await context.flush();
+
+  const metadataKey = `metadata/${creation.shareID}.json`;
+  const metadata = JSON.parse(utf8Decoder.decode(bucket.raw(metadataKey)));
+  metadata.createdAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  metadata.expiresAt = new Date(Date.now() - 1_000).toISOString();
+  await bucket.put(metadataKey, JSON.stringify(metadata), {
+    httpMetadata: { contentType: "application/json" },
+  });
+
+  const publicPath = new URL(creation.publicURL).pathname;
+  const page = await fetchRelay(env, context, publicPath, {
+    headers: { Accept: "text/html", "Sec-Fetch-Mode": "navigate" },
+  });
+  assert.equal(page.status, 410);
+  await context.flush();
+  assert.equal(bucket.raw(`data/${creation.shareID}.bin`), null);
+  const cleanedMetadata = JSON.parse(utf8Decoder.decode(bucket.raw(metadataKey)));
+  assert.ok(cleanedMetadata.dataDeletedAt);
+});
+
+test("password browser flow uses a signed session cookie without disclosing metadata", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const media = utf8.encode("private-browser-media".repeat(2048));
+  const creation = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media,
+    fileName: "私密歌曲.mp3",
+    contentType: "audio/mpeg",
+    password: "海屋2026",
+    title: "不可提前泄露的标题",
+  });
+  const publicPath = new URL(creation.publicURL).pathname;
+
+  const localizedPublicPath = `${publicPath}?lang=zh-Hans`;
+  const locked = await fetchRelay(env, context, localizedPublicPath, {
+    headers: { Accept: "text/html", "Sec-Fetch-Mode": "navigate" },
+  });
+  assert.equal(locked.status, 200);
+  const lockedHTML = await locked.text();
+  assert.equal(locked.headers.get("Content-Language"), "zh-Hans");
+  assert.match(lockedHTML, /受密码保护/);
+  assert.ok(lockedHTML.includes(`data-auth-url="${publicPath}/auth?lang=zh-Hans"`));
+  assert.doesNotMatch(lockedHTML, /不可提前泄露|私密歌曲/);
+  assert.equal(locked.headers.get("WWW-Authenticate"), null);
+
+  const wrong = await fetchRelay(env, context, `${publicPath}/auth?lang=zh-Hans`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Origin: "https://share.soundisle.com",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ password: "wrong" }),
+  });
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.headers.get("WWW-Authenticate"), null);
+
+  const unlocked = await fetchRelay(env, context, `${publicPath}/auth?lang=zh-Hans`, {
+    method: "POST",
+    headers: {
+      Accept: "text/html",
+      Origin: "https://share.soundisle.com",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ password: "海屋2026" }),
+  });
+  assert.equal(unlocked.status, 303);
+  assert.equal(unlocked.headers.get("Location"), `${creation.publicURL}?lang=zh-Hans`);
+  const cookie = unlocked.headers.get("Set-Cookie");
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Strict/);
+  assert.equal(cookie.includes("海屋2026"), false);
+
+  const session = cookie.split(";", 1)[0];
+  const privatePage = await fetchRelay(env, context, publicPath, {
+    headers: {
+      Accept: "text/html",
+      "Sec-Fetch-Mode": "navigate",
+      Cookie: session,
+    },
+  });
+  assert.equal(privatePage.status, 200);
+  assert.match(await privatePage.text(), /不可提前泄露的标题/);
+
+  const privateMedia = await fetchRelay(env, context, `${publicPath}/media`, {
+    headers: { Cookie: session },
+  });
+  assert.equal(privateMedia.status, 200);
+  assert.deepEqual(new Uint8Array(await privateMedia.arrayBuffer()), media);
+});
+
+test("short codes retry collisions atomically, expire quickly, and limit failures per peer and code", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  const creation = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media: utf8.encode("short-code-media".repeat(512)),
+    fileName: "short-code.mp3",
+    contentType: "audio/mpeg",
+    password: "independent-password",
+    expiresAt,
+    linkType: "short",
+    shortCodeLength: 6,
+  });
+  assert.match(creation.accessCode, /^[0-9]{6}$/);
+  assert.equal(new URL(creation.publicURL).pathname, `/s/${creation.accessCode}`);
+  assert.match(creation.shareID, /^[A-Za-z0-9_-]{16,128}$/);
+  assert.match(creation.uploadToken, /^[A-Za-z0-9_-]{16,128}$/);
+  assert.notEqual(creation.accessCode, creation.shareID);
+  assert.notEqual(creation.accessCode, creation.uploadToken);
+  assert.notEqual(creation.accessCode, "independent-password");
+  const persisted = bucket.textForPrefixes(["metadata/", "indexes/public/"]);
+  assert.equal(persisted.includes(creation.accessCode), false);
+  assert.equal(persisted.includes("independent-password"), false);
+  const shortMetadataKey = `metadata/${creation.shareID}.json`;
+  const expiredMetadata = JSON.parse(utf8Decoder.decode(bucket.raw(shortMetadataKey)));
+  expiredMetadata.createdAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  expiredMetadata.expiresAt = new Date(Date.now() - 1_000).toISOString();
+  await bucket.put(shortMetadataKey, JSON.stringify(expiredMetadata), {
+    httpMetadata: { contentType: "application/json" },
+  });
+  const expiredShort = await fetchRelay(env, context, new URL(creation.publicURL).pathname, { method: "HEAD" });
+  assert.equal(expiredShort.status, 410);
+  await context.flush();
+  assert.equal(bucket.raw(`data/${creation.shareID}.bin`), null);
+
+  const collisionBucket = new MemoryBucket();
+  const codes = ["123456", "123456", "654321"];
+  const generator = (length) => {
+    assert.equal(length, 6);
+    return codes.shift();
+  };
+  const first = await testing.reserveShortCode(
+    collisionBucket,
+    6,
+    "first-share-identifier",
+    expiresAt,
+    generator,
+  );
+  const second = await testing.reserveShortCode(
+    collisionBucket,
+    6,
+    "second-share-identifier",
+    expiresAt,
+    generator,
+  );
+  assert.equal(first, "123456");
+  assert.equal(second, "654321");
+  assert.equal(collisionBucket.keys("indexes/public/").length, 2);
+
+  const overlong = await fetchRelay(env, context, "/v1/uploads", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fileName: "overlong.mp3",
+      contentType: "audio/mpeg",
+      size: 16,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000 + 5_000).toISOString(),
+      linkType: "short",
+      shortCodeLength: 6,
+    }),
+  });
+  assert.equal(overlong.status, 400);
+
+  const failureLimiter = new CounterRateLimiter(2);
+  const limitedEnvironment = makeEnvironment(new MemoryBucket(), {
+    SHORT_CODE_FAILURE_RATE_LIMITER: failureLimiter,
+  });
+  const limitedContext = new TestContext();
+  for (const expected of [410, 410, 429]) {
+    const response = await fetchRelay(limitedEnvironment, limitedContext, "/s/000000", {
+      headers: { Accept: "text/html", "Sec-Fetch-Mode": "navigate", "CF-Connecting-IP": "203.0.113.8" },
+    });
+    assert.equal(response.status, expected);
+  }
+
+  const longCreation = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media: utf8.encode("long-link-media".repeat(512)),
+    fileName: "long-link.flac",
+    contentType: "audio/flac",
+    linkType: "long",
+  });
+  assert.equal(longCreation.accessCode, undefined);
+  assert.match(new URL(longCreation.publicURL).pathname, /^\/s\/[A-Za-z0-9_-]{16,128}$/);
+});
+
+test("short-code total peer limits cannot be bypassed by rotating codes", async () => {
+  const peerLimiter = new CounterRateLimiter(2);
+  const env = makeEnvironment(new MemoryBucket(), {
+    SHORT_CODE_PEER_RATE_LIMITER: peerLimiter,
+    SHORT_CODE_FAILURE_RATE_LIMITER: new CounterRateLimiter(20),
+  });
+  const context = new TestContext();
+  for (const [code, expected] of [["000001", 410], ["000002", 410], ["000003", 429]]) {
+    const response = await fetchRelay(env, context, `/s/${code}`, {
+      method: "HEAD",
+      headers: { "CF-Connecting-IP": "203.0.113.9" },
+    });
+    assert.equal(response.status, expected);
+  }
+});
+
+test("scheduled cleanup removes expired encrypted media and abandoned multipart uploads", {
+  timeout: 60_000,
+}, async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket, { UPLOAD_TTL_SECONDS: "60" });
+  const context = new TestContext();
+  const media = utf8.encode("expiring-media".repeat(1024));
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+  const complete = await createAndUpload({
+    bucket,
+    env,
+    context,
+    media,
+    fileName: "short.ogg",
+    contentType: "audio/ogg",
+    expiresAt,
+  });
+  await context.flush();
+
+  const pending = await createOnly(env, context, {
+    fileName: "abandoned.aac",
+    contentType: "audio/aac",
+    size: 4096,
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  });
+  assert.equal(bucket.hasMultipartUploadFor(`data/${pending.shareID}.bin`), true);
+
+  await cleanupExpiredShares(env, new Date(Date.now() + 10 * 60 * 1000));
+  assert.equal(bucket.raw(`data/${complete.shareID}.bin`), null);
+  assert.equal(bucket.hasMultipartUploadFor(`data/${pending.shareID}.bin`), false);
+
+  const gone = await fetchRelay(env, context, new URL(complete.publicURL).pathname);
+  assert.equal(gone.status, 410);
+  const pendingMetadata = JSON.parse(utf8Decoder.decode(bucket.raw(`metadata/${pending.shareID}.json`)));
+  assert.ok(pendingMetadata.dataDeletedAt);
+});
+
+test("configuration, authentication, media validation, and range parsing fail closed", async () => {
+  const bucket = new MemoryBucket();
+  const env = makeEnvironment(bucket);
+  const context = new TestContext();
+
+  const healthy = await fetchRelay(env, context, "/healthz");
+  assert.equal(healthy.status, 200);
+  const unhealthy = await fetchRelay({ ...env, MASTER_KEY: "short" }, context, "/healthz");
+  assert.equal(unhealthy.status, 503);
+
+  const unauthorized = await fetchRelay(env, context, "/v1/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileName: "x.mp3", contentType: "audio/mpeg", size: 1 }),
+  });
+  assert.equal(unauthorized.status, 401);
+
+  const invalid = await fetchRelay(env, context, "/v1/uploads", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fileName: "..", contentType: "text/html", size: 1 }),
+  });
+  assert.equal(invalid.status, 400);
+
+  assert.deepEqual(testing.requestedRange("bytes=3-8", 10), { start: 3, end: 8, partial: true });
+  assert.deepEqual(testing.requestedRange("bytes=-4", 10), { start: 6, end: 9, partial: true });
+  assert.equal(testing.requestedRange("bytes=20-30", 10), null);
+  assert.deepEqual(testing.parseContentRange("bytes 5-9/10"), { start: 5, end: 9, total: 10 });
+  assert.equal(testing.parseContentRange("bytes 5-10/10"), null);
+  assert.equal(testing.sanitizeFileName("  ../bad:name  "), ".._bad_name");
+  assert.equal(testing.sanitizeContentType("text/html"), "application/octet-stream");
+});
+
+test("browser pages negotiate every supported locale from one complete catalog", async () => {
+  const catalog = JSON.parse(await readFile(new URL("../../web/i18n.json", import.meta.url), "utf8"));
+  const locales = ["en", "de", "fr", "ja", "ko", "zh-Hans", "zh-Hant"];
+  assert.equal(new Set(catalog.keys).size, catalog.keys.length);
+  const musicShareIndex = catalog.keys.indexOf("MUSIC_SHARE");
+  assert.notEqual(musicShareIndex, -1);
+
+  const env = makeEnvironment(new MemoryBucket());
+  const context = new TestContext();
+  const missingToken = "A".repeat(32);
+  for (const locale of locales) {
+    assert.equal(catalog.locales[locale].length, catalog.keys.length);
+    assert.ok(catalog.locales[locale].every((value, index) => (
+      String(value).trim() || ["FILE_ABOUT_SUFFIX", "LARGE_FILE_SUFFIX"].includes(catalog.keys[index])
+    )));
+    const response = await fetchRelay(env, context, `/s/${missingToken}?lang=${locale}`, {
+      headers: { Accept: "text/html", "Sec-Fetch-Mode": "navigate" },
+    });
+    assert.equal(response.status, 410);
+    assert.equal(response.headers.get("Content-Language"), locale);
+    assert.match(response.headers.get("Vary"), /Accept-Language/i);
+    const html = await response.text();
+    assert.match(html, new RegExp(`<html lang="${locale}">`));
+    assert.ok(html.includes(catalog.locales[locale][musicShareIndex]));
+    assert.equal(html.includes("{{"), false);
+  }
+
+  const weighted = await fetchRelay(env, context, `/s/${missingToken}`, {
+    headers: {
+      Accept: "text/html",
+      "Sec-Fetch-Mode": "navigate",
+      "Accept-Language": "ja;q=0.4, fr-FR;q=0.9",
+    },
+  });
+  assert.equal(weighted.headers.get("Content-Language"), "fr");
+
+  const explicit = await fetchRelay(env, context, `/s/${missingToken}?lang=de-DE`, {
+    headers: {
+      Accept: "text/html",
+      "Sec-Fetch-Mode": "navigate",
+      "Accept-Language": "zh-CN",
+    },
+  });
+  assert.equal(explicit.headers.get("Content-Language"), "de");
+});
+
+async function encryptEnvelope(keyBytes, plaintext, additionalData) {
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({
+    name: "AES-GCM",
+    iv: nonce,
+    additionalData: utf8.encode(additionalData),
+    tagLength: 128,
+  }, key, plaintext));
+  return concatenate([nonce, ciphertext]);
+}
+
+async function decryptEnvelope(keyBytes, encrypted, additionalData) {
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
+  return new Uint8Array(await crypto.subtle.decrypt({
+    name: "AES-GCM",
+    iv: encrypted.subarray(0, 12),
+    additionalData: utf8.encode(additionalData),
+    tagLength: 128,
+  }, key, encrypted.subarray(12)));
+}
+
+async function decryptChunkedMedia(keyBytes, encrypted, shareID, plaintextSize, chunkSize) {
+  const chunks = [];
+  let encryptedOffset = 0;
+  for (let index = 0, offset = 0; offset < plaintextSize; index += 1, offset += chunkSize) {
+    const plaintextLength = Math.min(chunkSize, plaintextSize - offset);
+    const encryptedLength = plaintextLength + 28;
+    const end = encryptedOffset + encryptedLength;
+    assert.ok(end <= encrypted.byteLength, "encrypted import is truncated");
+    chunks.push(await decryptEnvelope(
+      keyBytes,
+      encrypted.subarray(encryptedOffset, end),
+      `primuse-share-e2ee-v1:${shareID}:chunk:${index}:${plaintextLength}`,
+    ));
+    encryptedOffset = end;
+  }
+  assert.equal(encryptedOffset, encrypted.byteLength, "encrypted import has trailing bytes");
+  return concatenate(chunks);
+}
+
+async function createAndUpload({
+  env,
+  context,
+  media,
+  fileName,
+  contentType,
+  password = "",
+  expiresAt,
+  ...presentation
+}) {
+  const input = {
+    fileName,
+    contentType,
+    size: media.byteLength,
+    password,
+    ...presentation,
+  };
+  if (presentation.linkType !== "permanent") {
+    input.expiresAt = (expiresAt ?? new Date(Date.now() + 60 * 60 * 1000)).toISOString();
+  } else if (expiresAt) {
+    input.expiresAt = expiresAt.toISOString();
+  }
+  const creation = await createOnly(env, context, input);
+  for (let index = 0, offset = 0; offset < media.byteLength; index += 1, offset += creation.chunkSize) {
+    const end = Math.min(offset + creation.chunkSize, media.byteLength);
+    const response = await fetchRelay(env, context, `/v1/uploads/${creation.shareID}/chunks/${index}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${creation.uploadToken}`,
+        "Content-Type": "application/octet-stream",
+        "Content-Range": `bytes ${offset}-${end - 1}/${media.byteLength}`,
+      },
+      body: media.slice(offset, end),
+    });
+    await assertResponseStatus(response, 204);
+  }
+  const completed = await fetchRelay(env, context, `/v1/uploads/${creation.shareID}/complete`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${creation.uploadToken}` },
+  });
+  await assertResponseStatus(completed, 200);
+  const completion = await completed.json();
+  assert.equal(completion.shareID, creation.shareID);
+  assert.equal(completion.permanent, creation.permanent);
+  assert.equal(completion.expiresAt, creation.expiresAt);
+  return creation;
+}
+
+async function createOnly(env, context, input) {
+  const response = await fetchRelay(env, context, "/v1/uploads", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+  await assertResponseStatus(response, 201);
+  return response.json();
+}
+
+async function assertResponseStatus(response, expected) {
+  if (response.status !== expected) {
+    assert.fail(`status=${response.status}, expected=${expected}, body=${await response.text()}`);
+  }
+}
+
+function fetchRelay(env, context, path, init = {}) {
+  return worker.fetch(new Request(`https://share.soundisle.com${path}`, init), env, context);
+}
+
+function makeEnvironment(bucket, overrides = {}) {
+  return {
+    MEDIA_BUCKET: bucket,
+    ASSETS: new MemoryAssets(),
+    PUBLIC_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    UPLOAD_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    PASSWORD_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    SHORT_CODE_PEER_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    ADMIN_TOKEN: TEST_ADMIN_TOKEN,
+    MASTER_KEY: Buffer.alloc(32, 0x42).toString("base64"),
+    PUBLIC_BASE_URL: "https://share.soundisle.com",
+    CHUNK_SIZE_BYTES: String(TEST_CHUNK_SIZE),
+    MAX_FILE_BYTES: String(64 * 1024 * 1024),
+    MAX_TTL_SECONDS: String(24 * 60 * 60),
+    UPLOAD_TTL_SECONDS: String(60 * 60),
+    E2EE_POLICY: "optional",
+    UPLOAD_AUTHENTICATION: "admin-token",
+    ...overrides,
+  };
+}
+
+class MemoryAssets {
+  async fetch(request) {
+    const name = new URL(request.url).pathname.slice(1);
+    try {
+      const data = await readFile(new URL(`../../web/${name}`, import.meta.url));
+      const contentType = name.endsWith(".html")
+        ? "text/html; charset=utf-8"
+        : name.endsWith(".css")
+          ? "text/css; charset=utf-8"
+          : name.endsWith(".js")
+            ? "text/javascript; charset=utf-8"
+            : "application/octet-stream";
+      return new Response(data, { status: 200, headers: { "Content-Type": contentType } });
+    } catch {
+      return new Response(null, { status: 404 });
+    }
+  }
+}
+
+function basicAuthorization(username, password) {
+  return `Basic ${Buffer.from(`${username}:${password}`, "utf8").toString("base64")}`;
+}
+
+class TestContext {
+  constructor() {
+    this.pending = [];
+  }
+
+  waitUntil(promise) {
+    this.pending.push(Promise.resolve(promise));
+  }
+
+  async flush() {
+    while (this.pending.length > 0) {
+      const current = this.pending.splice(0);
+      await Promise.all(current);
+    }
+  }
+}
+
+class CounterRateLimiter {
+  constructor(maximum) {
+    this.maximum = maximum;
+    this.counts = new Map();
+  }
+
+  async limit({ key }) {
+    const count = (this.counts.get(key) ?? 0) + 1;
+    this.counts.set(key, count);
+    return { success: count <= this.maximum };
+  }
+}
+
+class MemoryBucket {
+  constructor() {
+    this.objects = new Map();
+    this.uploads = new Map();
+    this.counter = 0;
+  }
+
+  async put(key, value, options = {}) {
+    const previous = this.objects.get(key);
+    if (options.onlyIf?.etagMatches && previous?.etag !== options.onlyIf.etagMatches) {
+      return null;
+    }
+    if (options.onlyIf?.etagDoesNotMatch === "*" && previous) {
+      return null;
+    }
+    const bytes = await valueBytes(value);
+    const record = {
+      bytes,
+      etag: `object-${++this.counter}`,
+      uploaded: new Date(),
+      httpMetadata: { ...(options.httpMetadata ?? {}) },
+      customMetadata: { ...(options.customMetadata ?? {}) },
+    };
+    this.objects.set(key, record);
+    return this.objectView(key, record, false);
+  }
+
+  async get(key, options = {}) {
+    const record = this.objects.get(key);
+    if (!record) {
+      return null;
+    }
+    let bytes = record.bytes;
+    let range;
+    if (options.range && !(options.range instanceof Headers)) {
+      const offset = options.range.offset ?? 0;
+      const length = options.range.length ?? bytes.byteLength - offset;
+      bytes = bytes.slice(offset, offset + length);
+      range = { offset, length: bytes.byteLength };
+    }
+    return this.objectView(key, record, true, bytes, range);
+  }
+
+  async head(key) {
+    const record = this.objects.get(key);
+    return record ? this.objectView(key, record, false) : null;
+  }
+
+  async delete(keys) {
+    for (const key of Array.isArray(keys) ? keys : [keys]) {
+      this.objects.delete(key);
+    }
+  }
+
+  async list(options = {}) {
+    const prefix = options.prefix ?? "";
+    const limit = options.limit ?? 1000;
+    const start = Number(options.cursor ?? 0);
+    const all = [...this.objects.keys()].filter((key) => key.startsWith(prefix)).sort();
+    const selected = all.slice(start, start + limit);
+    const truncated = start + selected.length < all.length;
+    return {
+      objects: selected.map((key) => this.objectView(key, this.objects.get(key), false)),
+      truncated,
+      cursor: truncated ? String(start + selected.length) : undefined,
+      delimitedPrefixes: [],
+    };
+  }
+
+  async createMultipartUpload(key, options = {}) {
+    const uploadId = `upload-${++this.counter}`;
+    this.uploads.set(uploadId, { key, options, parts: new Map() });
+    return this.multipartView(key, uploadId);
+  }
+
+  resumeMultipartUpload(key, uploadId) {
+    return this.multipartView(key, uploadId);
+  }
+
+  multipartView(key, uploadId) {
+    return {
+      key,
+      uploadId,
+      uploadPart: async (partNumber, value) => {
+        const upload = this.uploads.get(uploadId);
+        if (!upload || upload.key !== key) {
+          throw new Error("NoSuchUpload");
+        }
+        const bytes = await valueBytes(value);
+        const etag = `part-${partNumber}-${++this.counter}`;
+        upload.parts.set(partNumber, { bytes, etag });
+        return { partNumber, etag };
+      },
+      complete: async (parts) => {
+        const upload = this.uploads.get(uploadId);
+        if (!upload || upload.key !== key) {
+          throw new Error("NoSuchUpload");
+        }
+        const selected = [];
+        for (const part of parts) {
+          const stored = upload.parts.get(part.partNumber);
+          if (!stored || stored.etag !== part.etag) {
+            throw new Error("InvalidPart");
+          }
+          selected.push(stored.bytes);
+        }
+        for (let index = 0; index < selected.length - 1; index += 1) {
+          if (selected[index].byteLength < 5 * 1024 * 1024) {
+            throw new Error("EntityTooSmall");
+          }
+          if (index > 0 && selected[index].byteLength !== selected[0].byteLength) {
+            throw new Error("InvalidPart");
+          }
+        }
+        const bytes = concatenate(selected);
+        const record = {
+          bytes,
+          etag: `multipart-${++this.counter}`,
+          uploaded: new Date(),
+          httpMetadata: { ...(upload.options.httpMetadata ?? {}) },
+          customMetadata: { ...(upload.options.customMetadata ?? {}) },
+        };
+        this.objects.set(key, record);
+        this.uploads.delete(uploadId);
+        return this.objectView(key, record, false);
+      },
+      abort: async () => {
+        const upload = this.uploads.get(uploadId);
+        if (!upload || upload.key !== key) {
+          throw new Error("NoSuchUpload");
+        }
+        this.uploads.delete(uploadId);
+      },
+    };
+  }
+
+  objectView(key, record, includeBody, selectedBytes = record.bytes, range) {
+    const view = {
+      key,
+      version: "memory",
+      size: record.bytes.byteLength,
+      etag: record.etag,
+      httpEtag: `"${record.etag}"`,
+      uploaded: record.uploaded,
+      httpMetadata: { ...record.httpMetadata },
+      customMetadata: { ...record.customMetadata },
+      range,
+    };
+    if (includeBody) {
+      view.body = chunkedStream(selectedBytes);
+      view.arrayBuffer = async () => selectedBytes.slice().buffer;
+      view.text = async () => utf8Decoder.decode(selectedBytes);
+      view.json = async () => JSON.parse(utf8Decoder.decode(selectedBytes));
+      view.blob = async () => new Blob([selectedBytes]);
+    }
+    return view;
+  }
+
+  raw(key) {
+    const bytes = this.objects.get(key)?.bytes;
+    return bytes ? bytes.slice() : null;
+  }
+
+  keys(prefix = "") {
+    return [...this.objects.keys()].filter((key) => key.startsWith(prefix)).sort();
+  }
+
+  textForPrefixes(prefixes) {
+    return [...this.objects.entries()]
+      .filter(([key]) => prefixes.some((prefix) => key.startsWith(prefix)))
+      .map(([, record]) => utf8Decoder.decode(record.bytes))
+      .join("\n");
+  }
+
+  hasMultipartUploadFor(key) {
+    return [...this.uploads.values()].some((upload) => upload.key === key);
+  }
+}
+
+async function valueBytes(value) {
+  if (typeof value === "string") {
+    return utf8.encode(value);
+  }
+  if (value instanceof Uint8Array) {
+    return value.slice();
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value.slice(0));
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  }
+  if (value instanceof Blob) {
+    return new Uint8Array(await value.arrayBuffer());
+  }
+  if (value instanceof ReadableStream) {
+    return new Uint8Array(await new Response(value).arrayBuffer());
+  }
+  throw new TypeError("unsupported R2 value");
+}
+
+function concatenate(chunks) {
+  const output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function chunkedStream(bytes) {
+  let offset = 0;
+  let turn = 0;
+  const sizes = [65_521, 131_071, 32_749];
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(offset + sizes[turn % sizes.length], bytes.byteLength);
+      controller.enqueue(bytes.slice(offset, end));
+      offset = end;
+      turn += 1;
+    },
+  });
+}

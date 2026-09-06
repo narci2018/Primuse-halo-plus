@@ -1,0 +1,379 @@
+import Foundation
+import PrimuseKit
+
+/// 本地播放历史 — 给「听歌统计」页用。
+///
+/// 跟现有的两条数据通路是互补关系:
+/// - `MusicLibrary.recentPlaybackSongIDs`: 只是个 100 条的滑动窗口, 不带
+///   时间戳, 给 Home 页「最近播放」用, 不能做按周/月聚合。
+/// - `ScrobbleService`: 把每条播放发到 ListenBrainz / Last.fm, 但不在本地
+///   留底, 用户不开 scrobble 就什么也没。
+///
+/// 这里用 append-only 的本地 JSON 日志, 滚动保留最近 5000 条 (够覆盖
+/// 普通用户 1-2 年的高强度听歌), 给统计页的「本周 / 本月 / 全部」
+/// + Top 排行 + 热力图提供原始数据。
+///
+/// **隐私**: 默认本地存储; 用户开启 iCloud「听歌统计」频道后才进入私有
+/// CloudKit 同步。
+@MainActor
+@Observable
+final class PlayHistoryStore {
+    /// 单条播放事件 — 当用户听歌超过阈值时由 AudioPlayerService 触发记入。
+    struct Entry: Codable, Identifiable, Hashable {
+        var id: String { "\(songID)-\(Int64(playedAt.timeIntervalSince1970))" }
+        let songID: String
+        let songTitle: String
+        let artistName: String
+        let albumTitle: String
+        /// 这次开始播的 wall-clock 时间。
+        let playedAt: Date
+        /// 用户实际听了多长 (秒)。<阈值不会进入这里, 所以最小值
+        /// 在 `recordedThresholdSec` 附近。
+        let listenedSec: TimeInterval
+        let sourceID: String
+
+        var listeningEvent: HomeListeningEvent {
+            HomeListeningEvent(
+                songID: songID, playedAt: playedAt, listenedSeconds: listenedSec,
+                songTitle: songTitle, artistName: artistName, albumTitle: albumTitle
+            )
+        }
+    }
+
+    static let shared = PlayHistoryStore()
+
+    /// 触发记录的最低实听时长。跟 ScrobbleService 一致 (50% or 240s
+    /// 的较小值, 保底 30s)。短于这个的歌会被认为是用户跳过, 不计入
+    /// 统计避免污染 Top 排行。
+    static let recordedThresholdSec: TimeInterval = 30
+
+    /// 最大保留条目数 — 滚动 evict 最老的。5000 条按平均 3 分钟一首
+    /// 大约 250h = 10 天纯听歌, 实际能覆盖 1-2 年的零散听歌。
+    static let maxRetainedEntries = 5000
+
+    private(set) var entries: [Entry] = []
+    private let storeURL: URL
+    private var saveTask: Task<Void, Never>?
+
+    // 当前会话 — beginSession / tick / endSession 三段式跟 Scrobble 同步,
+    // 由 AudioPlayerService 在同样的 hook 点调用。
+    private var currentSong: Song?
+    private var currentStartedAt: Date?
+    /// 实听 high-water mark — 用 currentTime 近似, seek 回去不会让它降。
+    private var currentMaxElapsed: TimeInterval = 0
+
+    private init() {
+        #if os(tvOS)
+        let docs = FileManager.default.primuseDirectoryURL(for: .cachesDirectory)
+            .appendingPathComponent("Primuse", isDirectory: true)
+        #else
+        let docs = FileManager.default.primuseDirectoryURL(for: .applicationSupportDirectory)
+            .appendingPathComponent("Primuse", isDirectory: true)
+        #endif
+        try? FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        self.storeURL = docs.appendingPathComponent("play_history.json")
+        load()
+    }
+
+    // MARK: - Session lifecycle (AudioPlayerService 调用)
+
+    /// 用户开始播放新歌 — 启动 session, 如果有上一首未结算的先 flush。
+    func beginSession(song: Song) {
+        endSession()
+        currentSong = song
+        currentStartedAt = Date()
+        currentMaxElapsed = 0
+    }
+
+    /// 进度更新 — 跟 ScrobbleService 同步触发。维护 high-water mark
+    /// (seek 回去不应让累计变小)。
+    func tick(elapsed: TimeInterval) {
+        guard currentSong != nil else { return }
+        if elapsed > currentMaxElapsed { currentMaxElapsed = elapsed }
+    }
+
+    /// 结束 session — 用户主动停 / 切歌 / 播完。低于阈值不写入。
+    func endSession() {
+        guard let song = currentSong, let startedAt = currentStartedAt else { return }
+        defer {
+            currentSong = nil
+            currentStartedAt = nil
+            currentMaxElapsed = 0
+        }
+        guard currentMaxElapsed >= Self.recordedThresholdSec else { return }
+        record(song: song, startedAt: startedAt, listenedSec: currentMaxElapsed)
+    }
+
+    // MARK: - 写入
+
+    /// 直接写一条 entry —— 测试 / 数据导入用。普通播放走 session 三段式。
+    func record(song: Song, startedAt: Date, listenedSec: TimeInterval) {
+        guard listenedSec >= Self.recordedThresholdSec else { return }
+        let entry = Entry(
+            songID: song.id,
+            songTitle: song.title,
+            artistName: song.artistName ?? "",
+            albumTitle: song.albumTitle ?? "",
+            playedAt: startedAt,
+            listenedSec: listenedSec,
+            sourceID: song.sourceID
+        )
+        entries.insert(entry, at: 0)
+        if entries.count > Self.maxRetainedEntries {
+            entries.removeLast(entries.count - Self.maxRetainedEntries)
+        }
+        scheduleSave()
+        notifyChanged()
+        NotificationCenter.default.post(name: .primuseQualifiedPlaybackDidRecord, object: nil)
+    }
+
+    func clearAll() {
+        entries.removeAll()
+        try? FileManager.default.removeItem(at: storeURL)
+        notifyChanged()
+    }
+
+    // MARK: - Cloud sync hooks
+
+    var entriesForSync: [Entry] { entries }
+
+    func mergeRemoteEntries(_ remoteEntries: [Entry]) {
+        guard !remoteEntries.isEmpty else { return }
+        let before = Set(entries.map(\.id))
+        var mergedByID = Dictionary(
+            entries.map { ($0.id, $0) },
+            uniquingKeysWith: { lhs, rhs in lhs.playedAt >= rhs.playedAt ? lhs : rhs }
+        )
+        for entry in remoteEntries {
+            mergedByID[entry.id] = entry
+        }
+        let merged = mergedByID.values.sorted { $0.playedAt > $1.playedAt }
+        entries = Array(merged.prefix(Self.maxRetainedEntries))
+        guard Set(entries.map(\.id)) != before else { return }
+        scheduleSave()
+        notifyChanged()
+    }
+
+    func clearFromRemote() {
+        guard !entries.isEmpty else { return }
+        entries.removeAll()
+        try? FileManager.default.removeItem(at: storeURL)
+        notifyChanged()
+    }
+
+    // MARK: - 查询 / 聚合
+
+    enum Range: String, CaseIterable, Identifiable {
+        case week, month, year, all
+        var id: String { rawValue }
+        var localizationKey: String {
+            switch self {
+            case .week: return "stats_range_week"
+            case .month: return "stats_range_month"
+            case .year: return "stats_range_year"
+            case .all: return "stats_range_all"
+            }
+        }
+        var calendarComponent: Calendar.Component? {
+            switch self {
+            case .week: return .weekOfYear
+            case .month: return .month
+            case .year: return .year
+            case .all: return nil
+            }
+        }
+
+        func startDate(now: Date = Date(), calendar: Calendar = ListeningCalendar.current) -> Date {
+            let days: Int
+            switch self {
+            case .week: days = 7
+            case .month: days = 30
+            case .year: days = 365
+            case .all: return .distantPast
+            }
+            return calendar.date(byAdding: .day, value: -days, to: now) ?? now
+        }
+
+        func statisticsStartDate(now: Date = Date(), calendar: Calendar = ListeningCalendar.current) -> Date {
+            ListeningCalendar.interval(component: calendarComponent, now: now, calendar: calendar).start
+        }
+    }
+
+    // Discovery uses these rolling windows for "not recently played". Calendar
+    // statistics must not make yesterday's songs stale when a new month starts.
+    func entries(in range: Range, now: Date = Date()) -> [Entry] {
+        let cutoff = range.startDate(now: now)
+        return entries.filter { $0.playedAt >= cutoff && $0.playedAt <= now }
+    }
+
+    func statisticsEntries(in range: Range, now: Date = Date(), calendar: Calendar = ListeningCalendar.current) -> [Entry] {
+        let cutoff = range.statisticsStartDate(now: now, calendar: calendar)
+        return entries.filter { $0.playedAt >= cutoff && $0.playedAt <= now }
+    }
+
+    struct SongPlaybackStats: Equatable, Sendable {
+        let playCount: Int
+        let lastPlayedAt: Date?
+    }
+
+    /// 播放次数只统计已经通过 session 阈值的记录，且受当前历史保留窗口限制。
+    func playbackStats(forSongID songID: String) -> SongPlaybackStats {
+        var count = 0
+        var lastPlayedAt: Date?
+        for entry in entries where entry.songID == songID {
+            count += 1
+            if let currentLastPlayedAt = lastPlayedAt {
+                if entry.playedAt > currentLastPlayedAt {
+                    lastPlayedAt = entry.playedAt
+                }
+            } else {
+                lastPlayedAt = entry.playedAt
+            }
+        }
+        return SongPlaybackStats(playCount: count, lastPlayedAt: lastPlayedAt)
+    }
+
+    struct RankedItem: Identifiable, Hashable {
+        let id: String
+        let title: String
+        let subtitle: String
+        let playCount: Int
+        let totalSec: TimeInterval
+    }
+
+    func topSongs(in range: Range, limit: Int = 20) -> [RankedItem] {
+        Self.rankedItems(from: entries(in: range), category: .songs, limit: limit)
+    }
+
+    func topArtists(in range: Range, limit: Int = 20) -> [RankedItem] {
+        Self.rankedItems(from: entries(in: range), category: .artists, limit: limit)
+    }
+
+    func topAlbums(in range: Range, limit: Int = 20) -> [RankedItem] {
+        Self.rankedItems(from: entries(in: range), category: .albums, limit: limit)
+    }
+
+    static func rankedItems(from entries: [Entry], category: HomeListeningCategory, limit: Int) -> [RankedItem] {
+        HomeListeningRanking.ranks(
+            events: entries.map(\.listeningEvent), songs: [:], folders: nil,
+            period: .all, category: category
+        ).prefix(limit).map { rank in
+            RankedItem(
+                id: category == .songs ? (rank.songIDs.first ?? rank.id) : rank.id,
+                title: rank.title,
+                subtitle: category == .artists
+                    ? String(format: String(localized: "stats_unique_songs_format"), rank.songIDs.count)
+                    : rank.subtitle,
+                playCount: rank.playCount,
+                totalSec: rank.listenedSeconds
+            )
+        }
+    }
+
+    /// 按天聚合的播放数 (热力图用)。返回 [日期: 当天播放次数],
+    /// 跨度从 `range` 起点到今天, 缺失的日子值为 0。
+    func dailyPlayCounts(in range: Range, now: Date = Date()) -> [(date: Date, count: Int)] {
+        let cal = ListeningCalendar.current
+        let end = cal.startOfDay(for: now)
+        let scoped = entries(in: range, now: now)
+        // `.all` 没有固定起点 —— 从最早一条记录那天开始; 同时兜底最多回看 ~2 年,
+        // 避免极端长的历史把热力图撑出成千上万列。
+        let rawStart: Date
+        if range == .all {
+            rawStart = scoped.map(\.playedAt).min().map { cal.startOfDay(for: $0) } ?? end
+        } else {
+            rawStart = cal.startOfDay(for: range.startDate(now: now))
+        }
+        let floor = cal.date(byAdding: .day, value: -740, to: end) ?? rawStart
+        let start = max(rawStart, floor)
+        let bucketed = Dictionary(grouping: scoped) {
+            cal.startOfDay(for: $0.playedAt)
+        }.mapValues(\.count)
+        var result: [(Date, Int)] = []
+        var cursor = start
+        while cursor <= end {
+            result.append((cursor, bucketed[cursor] ?? 0))
+            cursor = cal.date(byAdding: .day, value: 1, to: cursor) ?? cursor.addingTimeInterval(86400)
+        }
+        return result
+    }
+
+    /// 总览数字 (顶部摘要卡用)。
+    struct Summary {
+        let totalPlays: Int
+        let totalSec: TimeInterval
+        let activeDays: Int
+        let uniqueSongs: Int
+    }
+
+    func summary(in range: Range) -> Summary {
+        Self.summary(for: entries(in: range))
+    }
+
+    func statisticsSummary(in range: Range) -> Summary {
+        Self.summary(for: statisticsEntries(in: range))
+    }
+
+    static func summary(for entries: [Entry], calendar: Calendar = ListeningCalendar.current) -> Summary {
+        Summary(
+            totalPlays: entries.count,
+            totalSec: entries.reduce(0) { $0 + ($1.listenedSec.isFinite ? max(0, $1.listenedSec) : 0) },
+            activeDays: Set(entries.map { calendar.startOfDay(for: $0.playedAt) }).count,
+            uniqueSongs: Set(entries.map(\.songID)).count
+        )
+    }
+
+    // MARK: - Persistence
+
+    func flush() {
+        saveTask?.cancel()
+        saveTask = nil
+        saveNow()
+    }
+
+    func remapSongIDs(_ replacements: [String: String]) {
+        guard entries.contains(where: { replacements[$0.songID] != nil }) else { return }
+        entries = entries.map { entry in
+            Entry(songID: replacements[entry.songID] ?? entry.songID,
+                  songTitle: entry.songTitle, artistName: entry.artistName,
+                  albumTitle: entry.albumTitle, playedAt: entry.playedAt,
+                  listenedSec: entry.listenedSec, sourceID: entry.sourceID)
+        }
+        flush()
+        notifyChanged()
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: storeURL) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        guard let loaded = try? decoder.decode([Entry].self, from: data) else { return }
+        // 按 playedAt 降序保证插入端不变
+        entries = loaded.sorted { $0.playedAt > $1.playedAt }
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            saveNow()
+        }
+    }
+
+    private func saveNow() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        guard let data = try? encoder.encode(entries) else { return }
+        try? data.write(to: storeURL, options: .atomic)
+    }
+
+    private func notifyChanged() {
+        NotificationCenter.default.post(name: .primuseListeningStatsDidChange, object: nil)
+    }
+}
+
+extension Notification.Name {
+    static let primuseListeningStatsDidChange = Notification.Name("primuse.listeningStatsDidChange")
+    static let primuseQualifiedPlaybackDidRecord = Notification.Name("primuse.qualifiedPlaybackDidRecord")
+}
