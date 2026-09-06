@@ -19,14 +19,24 @@ jobs:
 
       - name: Select Xcode Version
         run: |
-          for xcode in /Applications/Xcode_16.2.app /Applications/Xcode_16.1.app /Applications/Xcode.app /Applications/Xcode_16.0.app; do
-            if [ -d "$xcode" ]; then
-              echo "Selecting $xcode"
-              sudo xcode-select -s "$xcode"
+          SELECTED_XCODE=""
+          for xcode in /Applications/Xcode.app /Applications/Xcode_*.app; do
+            if [ -d "$xcode/Contents/Developer/Platforms/iPhoneOS.platform" ]; then
+              echo "Found iOS platform in $xcode"
+              SELECTED_XCODE="$xcode"
               break
             fi
           done
+
+          if [ -n "$SELECTED_XCODE" ]; then
+            echo "Selecting $SELECTED_XCODE"
+            sudo xcode-select -s "$SELECTED_XCODE"
+          else
+            echo "Falling back to default Xcode..."
+          fi
+
           xcodebuild -version
+          xcodebuild -showsdks
 
       - name: Install XcodeGen
         run: |
@@ -45,6 +55,7 @@ jobs:
             -scheme Primuse \
             -configuration Release \
             -destination "generic/platform=iOS" \
+            -sdk iphoneos \
             -derivedDataPath build_derived \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
