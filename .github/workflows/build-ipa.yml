@@ -57,6 +57,8 @@ jobs:
             -destination "generic/platform=iOS" \
             -sdk iphoneos \
             -derivedDataPath build_derived \
+            CLANG_CXX_LANGUAGE_STANDARD="c++20" \
+            OTHER_CPLUSPLUSFLAGS='$(inherited) -fexperimental-library -D_LIBCPP_ENABLE_EXPERIMENTAL' \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""

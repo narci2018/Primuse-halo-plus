@@ -14,6 +14,11 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+    CLANG_CXX_LANGUAGE_STANDARD: "c++20"
+    OTHER_CPLUSPLUSFLAGS:
+      - "$(inherited)"
+      - "-fexperimental-library"
+      - "-D_LIBCPP_ENABLE_EXPERIMENTAL"
     # 全平台唯一版本号来源:iOS / macOS / tvOS / watchOS 及各扩展统一继承这里,
     # 各 target 不再单独覆盖,发版只改这一处,避免漏改导致版本不一致。
     MARKETING_VERSION: "1.9.5"
