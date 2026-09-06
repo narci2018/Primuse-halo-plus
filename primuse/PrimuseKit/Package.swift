@@ -9,7 +9,7 @@ let package = Package(
         .library(name: "PrimuseKit", targets: ["PrimuseKit"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.8.0"),
     ],
     targets: [
         .target(
