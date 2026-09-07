@@ -586,6 +586,7 @@ targets:
       - path: Primuse/Services/Radio/RadioLiveStreamSource.swift
       - path: Primuse/Services/Radio/RadioFLACAudioDecoder.swift
       - path: Primuse/Services/Radio/RadioFLACDecoderBridge.m
+      - path: Primuse/Services/Intents/SafeSiriBridge.m
       # 内网自动发现(Bonjour/NWBrowser 找 NAS),与 iOS/macOS 同一份实现
       - path: Primuse/Services/Sources/NetworkDiscoveryService.swift
       - path: Primuse/Utilities/FileLogger.swift

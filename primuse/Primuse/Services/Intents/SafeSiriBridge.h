@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface SafeSiriBridge : NSObject
 
 + (BOOL)hasSiriEntitlement;
++ (BOOL)hasCloudKitContainerEntitlement:(NSString *)containerID;
 
 #if TARGET_OS_IOS
 + (INSiriAuthorizationStatus)safeSiriAuthorizationStatus;

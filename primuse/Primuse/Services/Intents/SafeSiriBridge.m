@@ -51,6 +51,49 @@ typedef CFTypeRef (*SecTaskCopyValueForEntitlementFunc)(SecTaskRef, CFStringRef,
 #endif
 }
 
++ (BOOL)hasCloudKitContainerEntitlement:(NSString *)containerID {
+#if TARGET_OS_SIMULATOR
+    return NO;
+#else
+    if (!containerID || containerID.length == 0) {
+        return NO;
+    }
+    static SecTaskCreateFromSelfFunc createFunc = NULL;
+    static SecTaskCopyValueForEntitlementFunc copyFunc = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        createFunc = (SecTaskCreateFromSelfFunc)dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+        copyFunc = (SecTaskCopyValueForEntitlementFunc)dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+    });
+    if (!createFunc || !copyFunc) {
+        return NO;
+    }
+    SecTaskRef task = createFunc(kCFAllocatorDefault);
+    if (!task) {
+        return NO;
+    }
+    CFErrorRef error = NULL;
+    CFTypeRef value = copyFunc(task, CFSTR("com.apple.developer.icloud-container-identifiers"), &error);
+    CFRelease(task);
+    if (error) {
+        CFRelease(error);
+    }
+    if (!value) {
+        return NO;
+    }
+    BOOL hasEntitlement = NO;
+    if (CFGetTypeID(value) == CFArrayGetTypeID()) {
+        NSArray *identifiers = (__bridge NSArray *)value;
+        hasEntitlement = [identifiers containsObject:containerID];
+    } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
+        NSString *identifier = (__bridge NSString *)value;
+        hasEntitlement = [identifier isEqualToString:containerID];
+    }
+    CFRelease(value);
+    return hasEntitlement;
+#endif
+}
+
 #if TARGET_OS_IOS
 + (INSiriAuthorizationStatus)safeSiriAuthorizationStatus {
     if (![self hasSiriEntitlement]) {
