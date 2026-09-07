@@ -334,6 +334,7 @@ extension RadioStationArtworkResolution: Sendable where Value: Sendable {}
 public enum RadioStationArtworkResolver {
     public static func resolve<Value>(
         plan: RadioStationArtworkResolutionPlan,
+        isolation: isolated (any Actor)? = #isolation,
         using load: (RadioStationArtworkCandidate) async -> Value?
     ) async -> RadioStationArtworkResolution<Value>? {
         for candidate in plan.candidates {

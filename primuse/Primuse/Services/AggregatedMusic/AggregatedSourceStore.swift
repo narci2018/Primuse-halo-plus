@@ -168,10 +168,11 @@ public final class AggregatedSourceStore {
         isPinging = true
         defer { isPinging = false }
 
+        let sourceIDs = sources.map(\.id)
         await withTaskGroup(of: Void.self) { group in
-            for source in sources {
-                group.addTask { @MainActor in
-                    _ = await self.ping(sourceID: source.id)
+            for id in sourceIDs {
+                group.addTask {
+                    _ = await self.ping(sourceID: id)
                 }
             }
         }

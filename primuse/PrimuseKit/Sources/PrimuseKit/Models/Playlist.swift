@@ -254,6 +254,7 @@ public enum PlaylistArtworkResolutionPolicy {
 public enum PlaylistArtworkResolver {
     public static func resolve<Value>(
         plan: PlaylistArtworkResolutionPlan,
+        isolation: isolated (any Actor)? = #isolation,
         using load: (PlaylistArtworkCandidate) async -> Value?
     ) async -> PlaylistArtworkResolution<Value>? {
         for candidate in plan.candidates {
@@ -283,6 +284,7 @@ public enum QuickAccessArtworkPolicy {
     public static func resolveCollage<Value>(
         plan: PlaylistArtworkResolutionPlan,
         songs: [Song],
+        isolation: isolated (any Actor)? = #isolation,
         using load: (PlaylistArtworkCandidate) async -> Value?
     ) async -> [Value] {
         let songsByID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
