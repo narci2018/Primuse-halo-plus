@@ -6,15 +6,33 @@ import PrimuseKit
 import Intents
 
 /// `INPreferences` raises an Objective-C exception when the process lacks the
-/// Siri entitlement. Simulator QA builds are commonly linker-signed without
-/// entitlements, so every caller must pass through this boundary instead of
-/// querying `INPreferences` directly.
+/// Siri entitlement (`com.apple.developer.siri`). Simulator QA builds,
+/// sideloaded IPAs, and personal free-certificate signings lack this entitlement,
+/// so every caller must pass through this safe boundary.
 enum SiriAuthorizationRuntime {
+    static var isSupported: Bool {
+        #if os(iOS)
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        if let provURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+           let provData = try? Data(contentsOf: provURL),
+           let provString = String(data: provData, encoding: .ascii) {
+            return provString.contains("com.apple.developer.siri")
+        }
+        return true
+        #endif
+        #else
+        return false
+        #endif
+    }
+
     static var status: INSiriAuthorizationStatus {
         #if targetEnvironment(simulator)
         .restricted
         #else
-        INPreferences.siriAuthorizationStatus()
+        guard isSupported else { return .restricted }
+        return SafeSiriBridge.safeSiriAuthorizationStatus()
         #endif
     }
 
@@ -22,7 +40,11 @@ enum SiriAuthorizationRuntime {
         #if targetEnvironment(simulator)
         completion(.restricted)
         #else
-        INPreferences.requestSiriAuthorization(completion)
+        guard isSupported else {
+            completion(.restricted)
+            return
+        }
+        SafeSiriBridge.safeRequestSiriAuthorization(completion)
         #endif
     }
 }

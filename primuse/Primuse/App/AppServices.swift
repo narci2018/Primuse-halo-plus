@@ -1122,6 +1122,9 @@ final class AppServices {
     }
 
     private func observeSiriRadioCatalog() {
+        #if os(iOS)
+        guard SiriAuthorizationRuntime.isSupported else { return }
+        #endif
         let center = NotificationCenter.default
         let refresh: @MainActor () -> Void = { [weak self] in
             guard let self else { return }

@@ -5,3 +5,4 @@
 #import "Services/Audio/FFmpegDecoderBridge.h"
 #import "Services/Audio/AudioPlayerNodeClockReader.h"
 #import "Services/Radio/RadioFLACDecoderBridge.h"
+#import "Services/Intents/SafeSiriBridge.h"
