@@ -4,6 +4,8 @@ import PrimuseKit
 public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
     case qq = "qq"
     case netease = "netease"
+    case kugou = "kugou"
+    case kuwo = "kuwo"
     case bilibili = "bilibili"
     case custom = "custom"
 
@@ -11,6 +13,8 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
         switch self {
         case .qq: return "QQ 音乐"
         case .netease: return "网易云音乐"
+        case .kugou: return "酷狗音乐"
+        case .kuwo: return "酷我音乐"
         case .bilibili: return "哔哩哔哩"
         case .custom: return "自定义源"
         }
@@ -20,6 +24,8 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
         switch self {
         case .qq: return "QQ"
         case .netease: return "163"
+        case .kugou: return "KG"
+        case .kuwo: return "KW"
         case .bilibili: return "Bili"
         case .custom: return "Custom"
         }
@@ -29,20 +35,37 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
         switch self {
         case .qq: return "tencent"
         case .netease: return "netease"
+        case .kugou: return "kugou"
+        case .kuwo: return "kuwo"
         case .bilibili: return "bilibili"
         case .custom: return "netease"
+        }
+    }
+
+    public var hywSourceKey: String {
+        switch self {
+        case .qq: return "tx"
+        case .netease: return "wy"
+        case .kugou: return "kg"
+        case .kuwo: return "kw"
+        case .bilibili: return "bili"
+        case .custom: return "tx"
         }
     }
 }
 
 public enum AggregatedProtocolType: String, Codable, Sendable, CaseIterable {
     case meting = "meting"
+    case hyw = "hyw"
+    case nxinxz = "nxinxz"
     case openApi = "openApi"
     case customJson = "customJson"
 
     public var displayName: String {
         switch self {
         case .meting: return "Meting API"
+        case .hyw: return "落雪 / HYW 聚合源"
+        case .nxinxz: return "NXINXZ 线路"
         case .openApi: return "Music Open API"
         case .customJson: return "自定义 JSON"
         }

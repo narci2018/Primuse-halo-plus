@@ -177,7 +177,9 @@ public struct AggregatedSourcesSettingsView: View {
         switch platform {
         case .qq: return .green
         case .netease: return .red
-        case .bilibili: return .blue
+        case .kugou: return .blue
+        case .kuwo: return .orange
+        case .bilibili: return .cyan
         case .custom: return .purple
         }
     }

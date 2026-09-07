@@ -6,7 +6,7 @@ import Observation
 public final class AggregatedSourceStore {
     public static let shared = AggregatedSourceStore()
 
-    private static let storageKey = "primuse.aggregated_sources.v1"
+    private static let storageKey = "primuse.aggregated_sources.v2"
 
     public private(set) var sources: [AggregatedSourceItem] = []
     public private(set) var isPinging: Bool = false
@@ -18,17 +18,71 @@ public final class AggregatedSourceStore {
     public static var defaultSources: [AggregatedSourceItem] {
         [
             AggregatedSourceItem(
-                id: "default-qq-openapi-1",
-                name: "QQ音乐 (Open API 线路)",
+                id: "default-qq-hyw",
+                name: "QQ音乐 (HYW 极速无损解析)",
                 platform: .qq,
-                protocolType: .openApi,
-                baseURL: "https://tang.api.s01s.cn/music_open_api.php",
+                protocolType: .hyw,
+                baseURL: "http://103.79.184.97/api/music/url",
+                isEnabled: true,
+                priority: 20
+            ),
+            AggregatedSourceItem(
+                id: "default-netease-gdstudio",
+                name: "网易云 (GDStudio 320k)",
+                platform: .netease,
+                protocolType: .meting,
+                baseURL: "https://music-api.gdstudio.xyz/api.php",
+                isEnabled: true,
+                priority: 18
+            ),
+            AggregatedSourceItem(
+                id: "default-kuwo-nxinxz",
+                name: "酷我音乐 (NXINXZ 320k)",
+                platform: .kuwo,
+                protocolType: .nxinxz,
+                baseURL: "http://music.nxinxz.com/kw.php",
+                isEnabled: true,
+                priority: 16
+            ),
+            AggregatedSourceItem(
+                id: "default-kugou-hyw",
+                name: "酷狗音乐 (HYW 极速解析)",
+                platform: .kugou,
+                protocolType: .hyw,
+                baseURL: "http://103.79.184.97/api/music/url",
+                isEnabled: true,
+                priority: 15
+            ),
+            AggregatedSourceItem(
+                id: "default-netease-meting-1",
+                name: "网易云 (七洁雅 Meting)",
+                platform: .netease,
+                protocolType: .meting,
+                baseURL: "https://api.qijieya.cn/meting",
+                isEnabled: true,
+                priority: 14
+            ),
+            AggregatedSourceItem(
+                id: "default-netease-meting-3e0",
+                name: "网易云 (DreamMeting 3e0)",
+                platform: .netease,
+                protocolType: .meting,
+                baseURL: "https://music.3e0.cn",
+                isEnabled: true,
+                priority: 12
+            ),
+            AggregatedSourceItem(
+                id: "default-kuwo-hyw",
+                name: "酷我音乐 (HYW 线路)",
+                platform: .kuwo,
+                protocolType: .hyw,
+                baseURL: "http://103.79.184.97/api/music/url",
                 isEnabled: true,
                 priority: 10
             ),
             AggregatedSourceItem(
                 id: "default-qq-meting-1",
-                name: "QQ音乐 (Meting 线路 1)",
+                name: "QQ音乐 (七洁雅 Meting 备用)",
                 platform: .qq,
                 protocolType: .meting,
                 baseURL: "https://api.qijieya.cn/meting",
@@ -36,38 +90,11 @@ public final class AggregatedSourceStore {
                 priority: 8
             ),
             AggregatedSourceItem(
-                id: "default-qq-meting-2",
-                name: "QQ音乐 (Meting 线路 2)",
+                id: "default-qq-openapi-1",
+                name: "QQ音乐 (Open API 线路)",
                 platform: .qq,
-                protocolType: .meting,
-                baseURL: "https://api.injahow.cn/meting",
-                isEnabled: true,
-                priority: 6
-            ),
-            AggregatedSourceItem(
-                id: "default-netease-meting-1",
-                name: "网易云 (Meting 线路 1)",
-                platform: .netease,
-                protocolType: .meting,
-                baseURL: "https://api.qijieya.cn/meting",
-                isEnabled: true,
-                priority: 10
-            ),
-            AggregatedSourceItem(
-                id: "default-netease-meting-2",
-                name: "网易云 (Meting 线路 2)",
-                platform: .netease,
-                protocolType: .meting,
-                baseURL: "https://api.injahow.cn/meting",
-                isEnabled: true,
-                priority: 8
-            ),
-            AggregatedSourceItem(
-                id: "default-netease-meting-3",
-                name: "网易云 (Meting 线路 3)",
-                platform: .netease,
-                protocolType: .meting,
-                baseURL: "https://musicapi.qijieya.cn/meting",
+                protocolType: .openApi,
+                baseURL: "https://tang.api.s01s.cn/music_open_api.php",
                 isEnabled: true,
                 priority: 6
             )

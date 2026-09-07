@@ -93,8 +93,52 @@ public final class AggregatedMusicService {
         switch source.protocolType {
         case .meting:
             let server = source.platform.metingServerName
-            let urlString = "\(source.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))?type=search&id=\(encodedKeyword)&server=\(server)&limit=20"
+            let base = source.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let urlString: String
+            if base.contains("api.php") {
+                urlString = "\(base)?types=search&count=20&source=\(server)&pages=1&name=\(encodedKeyword)"
+            } else {
+                urlString = "\(base)?type=search&id=\(encodedKeyword)&server=\(server)&limit=20"
+            }
             guard let url = URL(string: urlString) else { return [] }
+
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 6.0
+            request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+
+            return parseMetingSearchResults(data: data, platform: source.platform, sourceName: source.name)
+
+        case .hyw:
+            let searchURLString: String
+            switch source.platform {
+            case .qq:
+                searchURLString = "https://api.qijieya.cn/meting?type=search&id=\(encodedKeyword)&server=tencent&limit=20"
+            case .kugou:
+                searchURLString = "https://api.qijieya.cn/meting?type=search&id=\(encodedKeyword)&server=kugou&limit=20"
+            case .kuwo:
+                searchURLString = "https://music-api.gdstudio.xyz/api.php?types=search&count=20&source=kuwo&name=\(encodedKeyword)"
+            case .netease:
+                searchURLString = "https://music-api.gdstudio.xyz/api.php?types=search&count=20&source=netease&name=\(encodedKeyword)"
+            default:
+                return []
+            }
+            guard let url = URL(string: searchURLString) else { return [] }
+
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 6.0
+            request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+
+            return parseMetingSearchResults(data: data, platform: source.platform, sourceName: source.name)
+
+        case .nxinxz:
+            let searchURLString = "https://music-api.gdstudio.xyz/api.php?types=search&count=20&source=kuwo&name=\(encodedKeyword)"
+            guard let url = URL(string: searchURLString) else { return [] }
 
             var request = URLRequest(url: url)
             request.timeoutInterval = 6.0
@@ -131,12 +175,35 @@ public final class AggregatedMusicService {
 
         var results: [AggregatedSongItem] = []
         for dict in jsonArray {
-            let id = "\(dict["id"] ?? "")"
-            let name = (dict["name"] as? String) ?? (dict["title"] as? String) ?? ""
-            let artist = (dict["artist"] as? String) ?? (dict["author"] as? String) ?? ""
+            var id = "\(dict["id"] ?? "")"
+            if id.isEmpty || id == "<null>" || id == "nil" {
+                id = "\(dict["url_id"] ?? "")"
+            }
+            if id.isEmpty || id == "<null>" || id == "nil" {
+                id = "\(dict["songmid"] ?? "")"
+            }
+            if (id.isEmpty || id == "<null>" || id == "nil"),
+               let urlStr = (dict["url"] as? String) ?? (dict["lrc"] as? String),
+               let match = urlStr.range(of: "(?<=id=)[^&]+", options: .regularExpression) {
+                id = String(urlStr[match])
+            }
+
+            let name = (dict["name"] as? String) ?? (dict["title"] as? String) ?? (dict["song_name"] as? String) ?? ""
+
+            let artist: String
+            if let str = dict["artist"] as? String {
+                artist = str
+            } else if let arr = dict["artist"] as? [String] {
+                artist = arr.joined(separator: ", ")
+            } else if let str = dict["author"] as? String {
+                artist = str
+            } else {
+                artist = ""
+            }
+
             let album = (dict["album"] as? String) ?? ""
             let pic = (dict["pic"] as? String) ?? (dict["cover"] as? String)
-            guard !id.isEmpty, !name.isEmpty else { continue }
+            guard !id.isEmpty, id != "<null>", !name.isEmpty else { continue }
 
             let songItem = AggregatedSongItem(
                 id: "agg_\(platform.rawValue)_\(id)",
@@ -223,7 +290,12 @@ public final class AggregatedMusicService {
         switch source.protocolType {
         case .meting:
             let server = source.platform.metingServerName
-            let urlString = "\(base)?server=\(server)&type=url&id=\(rawID)&br=320"
+            let urlString: String
+            if base.contains("api.php") {
+                urlString = "\(base)?types=url&source=\(server)&id=\(rawID)&br=320"
+            } else {
+                urlString = "\(base)?server=\(server)&type=url&id=\(rawID)&br=320"
+            }
             guard let endpoint = URL(string: urlString) else { return nil }
 
             var request = URLRequest(url: endpoint)
@@ -238,6 +310,7 @@ public final class AggregatedMusicService {
                 // If JSON { "url": "..." }
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let audioURLString = json["url"] as? String,
+                   !audioURLString.isEmpty,
                    let direct = URL(string: audioURLString) {
                     return direct
                 }
@@ -247,6 +320,29 @@ public final class AggregatedMusicService {
                    let direct = URL(string: text) {
                     return direct
                 }
+            }
+
+        case .hyw:
+            let sourceKey = source.platform.hywSourceKey
+            let urlString = "\(base)?source=\(sourceKey)&songId=\(rawID)&quality=320k"
+            guard let endpoint = URL(string: urlString) else { return nil }
+
+            var request = URLRequest(url: endpoint)
+            request.timeoutInterval = 8.0
+            let (data, _) = try await URLSession.shared.data(for: request)
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let audioURLString = json["url"] as? String, !audioURLString.isEmpty, let direct = URL(string: audioURLString) {
+                    return direct
+                }
+                if let sub = json["data"] as? [String: Any], let audioURLString = sub["url"] as? String, !audioURLString.isEmpty, let direct = URL(string: audioURLString) {
+                    return direct
+                }
+            }
+
+        case .nxinxz:
+            let urlString = "\(base)?id=\(rawID)&level=320k&type=mp3"
+            if let endpoint = URL(string: urlString) {
+                return endpoint
             }
 
         case .openApi:
@@ -293,7 +389,12 @@ public final class AggregatedMusicService {
         switch source.protocolType {
         case .meting:
             let server = source.platform.metingServerName
-            let urlString = "\(base)?server=\(server)&type=lrc&id=\(rawID)"
+            let urlString: String
+            if base.contains("api.php") {
+                urlString = "\(base)?types=lyric&source=\(server)&id=\(rawID)"
+            } else {
+                urlString = "\(base)?server=\(server)&type=lrc&id=\(rawID)"
+            }
             guard let endpoint = URL(string: urlString) else { return nil }
 
             var request = URLRequest(url: endpoint)
@@ -301,11 +402,24 @@ public final class AggregatedMusicService {
             let (data, _) = try await URLSession.shared.data(for: request)
 
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let lrc = json["lyric"] as? String {
+               let lrc = (json["lyric"] as? String) ?? (json["lrc"] as? String) {
                 return lrc
             }
             if let text = String(data: data, encoding: .utf8), text.contains("[") {
                 return text
+            }
+
+        case .hyw, .nxinxz:
+            let server = source.platform.metingServerName
+            let fallbackURL = "https://api.qijieya.cn/meting?server=\(server)&type=lrc&id=\(rawID)"
+            if let endpoint = URL(string: fallbackURL) {
+                var request = URLRequest(url: endpoint)
+                request.timeoutInterval = 5.0
+                if let (data, _) = try? await URLSession.shared.data(for: request) {
+                    if let text = String(data: data, encoding: .utf8), text.contains("[") {
+                        return text
+                    }
+                }
             }
 
         case .openApi:
