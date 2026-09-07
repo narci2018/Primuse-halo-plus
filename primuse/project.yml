@@ -60,10 +60,6 @@ schemes:
         Primuse: all
         PrimuseKit: all
         PrimuseWidgetExtension: all
-        # PrimuseWatchWidgets 仅 build 不参与 archive ── 它通过 PrimuseWatchApp
-        # 的 embed 嵌入, 跟着 watch app 一起进 archive, 不需要顶层入口。
-        # 顶层放它会跟 watch app 一样, 让 archive 退化成 Generic Archive。
-        PrimuseWatchWidgets: [test, run, profile, analyze]
         # PrimuseWatchApp 不列入顶层 scheme buildable ── 它是 Primuse iOS
         # app 的 embed dependency (project.yml 里通过 `embed: true` 声明),
         # implicitDependencies=YES 会让 archive 自动带上它。
@@ -169,8 +165,6 @@ targets:
       - sdk: AppIntents.framework
       - target: PrimuseKit
       - target: PrimuseWidgetExtension
-        embed: true
-      - target: PrimuseWatchApp
         embed: true
     info:
       path: Primuse/Info.plist
