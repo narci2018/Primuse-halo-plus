@@ -630,8 +630,7 @@ final class AppServices {
         #endif
         self.themeService = theme
         let scanService = ScanService()
-        scanService.removeCheckpoint(for: AggregatedMusicService.systemSourceID)
-        scanService.scanStates[AggregatedMusicService.systemSourceID] = nil
+        scanService.clearScanState(for: AggregatedMusicService.systemSourceID)
         let metadataBackfill = MetadataBackfillService(
             library: library,
             sourceManager: manager,

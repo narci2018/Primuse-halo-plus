@@ -46,6 +46,7 @@ enum YearlyReportAnalyzer {
         case .baiduPan, .aliyunDrive, .oneDrive, .dropbox, .googleDrive, .drime, .pan115, .pan123, .s3: return "icloud.fill"
         case .jellyfin, .emby, .plex, .subsonic, .navidrome, .airsonic, .gonic: return "play.tv.fill"
         case .appleMusic, .appleMusicLibrary: return "music.note"
+        case .aggregated: return "sparkles.rectangle.stack"
         }
     }
 

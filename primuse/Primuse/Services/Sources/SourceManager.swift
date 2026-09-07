@@ -2407,6 +2407,8 @@ final class SourceManager {
         }
         let connector: any MusicSourceConnector
         switch source.type {
+        case .aggregated:
+            return AggregatedMusicSource(sourceID: source.id)
         case .synology:
             plog("🔧 SourceManager creating SynologySource id=\(source.id) host=\(source.host ?? "?") userLen=\(source.username?.count ?? 0)")
             connector = SynologySource(

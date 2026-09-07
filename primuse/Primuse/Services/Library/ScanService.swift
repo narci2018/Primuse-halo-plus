@@ -923,6 +923,11 @@ final class ScanService {
         }
     }
 
+    func clearScanState(for sourceID: String) {
+        removeCheckpoint(for: sourceID)
+        scanStates[sourceID] = nil
+    }
+
     func removeCheckpoint(for sourceID: String) {
         let stageSessionID = checkpoints[sourceID]?.subsonicCatalogState?.stageSessionID
         checkpoints[sourceID] = nil
