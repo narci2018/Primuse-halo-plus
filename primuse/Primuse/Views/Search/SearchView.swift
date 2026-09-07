@@ -1687,17 +1687,15 @@ struct SearchView: View {
             }
 
             Button {
-                player.appendToQueue([primuseSong])
+                player.play([primuseSong], startingAt: 0)
             } label: {
-                Label("添加到播放列表", systemImage: "text.line.last.and.arrowtriangle.forward")
+                Label("立即播放", systemImage: "play.circle")
             }
 
             Button {
-                Task {
-                    try? await library.save(song: primuseSong)
-                }
+                player.appendToQueue([primuseSong])
             } label: {
-                Label("收藏到本地曲库", systemImage: "star")
+                Label("添加到播放列表", systemImage: "text.line.last.and.arrowtriangle.forward")
             }
         }
     }

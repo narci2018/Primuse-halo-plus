@@ -10,7 +10,7 @@ on:
 jobs:
   build-ipa:
     name: Build Unsigned iOS IPA
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -19,8 +19,11 @@ jobs:
 
       - name: Select Xcode Version
         run: |
+          echo "=== All Available Xcodes ==="
+          ls -ld /Applications/Xcode*.app || true
+
           SELECTED_XCODE=""
-          for xcode in /Applications/Xcode.app /Applications/Xcode_*.app; do
+          for xcode in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
             if [ -d "$xcode/Contents/Developer/Platforms/iPhoneOS.platform" ]; then
               echo "Found iOS platform in $xcode"
               SELECTED_XCODE="$xcode"
@@ -31,8 +34,6 @@ jobs:
           if [ -n "$SELECTED_XCODE" ]; then
             echo "Selecting $SELECTED_XCODE"
             sudo xcode-select -s "$SELECTED_XCODE"
-          else
-            echo "Falling back to default Xcode..."
           fi
 
           xcodebuild -version

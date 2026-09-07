@@ -261,27 +261,32 @@ struct HomeView: View {
         return HomeMode(rawValue: homeModeRawValue) ?? .music
     }
 
+    @ViewBuilder
+    private var homeScrollContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if homeMode == .radio {
+                    radioModeContent
+                        .transition(homeFaceTransition)
+                } else if !hasPreparedInitialSnapshot {
+                    initialLoadingView
+                        .transition(homeFaceTransition)
+                } else if hasContent {
+                    contentView
+                        .transition(homeFaceTransition)
+                } else {
+                    emptyView
+                        .transition(homeFaceTransition)
+                }
+            }
+            .padding(.bottom, 100)
+            .animation(.easeOut(duration: 0.24), value: hasPreparedInitialSnapshot)
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    if homeMode == .radio {
-                        radioModeContent
-                            .transition(homeFaceTransition)
-                    } else if !hasPreparedInitialSnapshot {
-                        initialLoadingView
-                            .transition(homeFaceTransition)
-                    } else if hasContent {
-                        contentView
-                            .transition(homeFaceTransition)
-                    } else {
-                        emptyView
-                            .transition(homeFaceTransition)
-                    }
-                }
-                .padding(.bottom, 100)
-                .animation(.easeOut(duration: 0.24), value: hasPreparedInitialSnapshot)
-            }
+            homeScrollContent
             .task {
                 await refreshHomeSnapshotAfterPresentationIfNeeded()
             }
