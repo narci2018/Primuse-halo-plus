@@ -1625,7 +1625,9 @@ struct SearchView: View {
         let isPlaying = player.currentSong?.id == primuseSong.id
 
         return Button {
-            player.play(song: primuseSong)
+            Task {
+                await player.play(song: primuseSong)
+            }
         } label: {
             HStack(spacing: 12) {
                 if let urlString = songItem.coverURLString, let url = URL(string: urlString) {
@@ -1687,7 +1689,9 @@ struct SearchView: View {
             }
 
             Button {
-                player.play(song: primuseSong)
+                Task {
+                    await player.play(song: primuseSong)
+                }
             } label: {
                 Label("立即播放", systemImage: "play.circle")
             }
