@@ -326,6 +326,20 @@ struct SearchView: View {
         appleMusicSearchEnabled ? appleMusic.searchResults : []
     }
 
+    private var hasAnySearchResults: Bool {
+        !searchResults.isEmpty
+            || !matchingAlbums.isEmpty
+            || !matchingArtists.isEmpty
+            || !visibleSemanticResults.isEmpty
+            || !visibleAppleMusicSearchResults.isEmpty
+            || !aggregatedMusic.searchResults.isEmpty
+            || semanticSearchFeedback.isVisible
+    }
+
+    private var isAnySearchRunning: Bool {
+        isSearching || aggregatedMusic.isSearching || renderedQuery != searchText
+    }
+
     /// “全选”只圈用户在当前筛选下真正看得到的本地歌曲。Apple Music 在线结果
     /// 不是本地曲库条目，不参与多选。
     private var selectableSongIDs: [String] {
@@ -445,31 +459,31 @@ struct SearchView: View {
         } else {
             iosSearchContent
                 .searchable(text: $searchText, prompt: Text(searchPrompt))
-                .onSubmit(of: .search) { addRecentSearch(searchText) }
+                .onSubmit(of: .search) {
+                    addRecentSearch(searchText)
+                    performSearch(query: searchText)
+                    performAppleMusicSearch(query: searchText)
+                    performAggregatedMusicSearch(query: searchText)
+                }
         }
     }
 
     private var iosSearchContent: some View {
         Group {
             if searchText.isEmpty {
-                if library.visibleSongs.isEmpty {
+                if !recentSearches.isEmpty {
+                    recentSearchView
+                } else if library.visibleSongs.isEmpty {
                     EmptyStateView(
-                        titleKey: "search_empty_library",
-                        descriptionKey: "search_empty_library_desc",
-                        systemImage: "magnifyingglass"
+                        titleKey: "全网聚合搜索",
+                        descriptionKey: "输入歌曲名或歌手，即可直接搜索并畅听全网聚合音乐",
+                        systemImage: "sparkles.rectangle.stack"
                     )
                 } else {
                     recentSearchView
                 }
-            } else if isSearching && renderedQuery != searchText {
-                searchingPlaceholder
-            } else if searchResults.isEmpty
-                        && matchingAlbums.isEmpty
-                        && matchingArtists.isEmpty
-                        && visibleSemanticResults.isEmpty
-                        && visibleAppleMusicSearchResults.isEmpty
-                        && !semanticSearchFeedback.isVisible {
-                if isSearching || renderedQuery != searchText {
+            } else if !hasAnySearchResults {
+                if isAnySearchRunning {
                     searchingPlaceholder
                 } else {
                     ContentUnavailableView.search(text: searchText)
@@ -525,7 +539,12 @@ struct SearchView: View {
                 NotificationCenter.default.post(name: .primuseDismissSearchFocus, object: nil)
             }
         )
-        .onSubmit(of: .search) { addRecentSearch(searchText) }
+        .onSubmit(of: .search) {
+            addRecentSearch(searchText)
+            performSearch(query: searchText)
+            performAppleMusicSearch(query: searchText)
+            performAggregatedMusicSearch(query: searchText)
+        }
         .onChange(of: macResultFilter) { _, _ in
             selection.prune(to: Set(selectableSongIDs))
         }
@@ -627,24 +646,19 @@ struct SearchView: View {
     @ViewBuilder
     private var macSearchContent: some View {
         if searchText.isEmpty {
-            if library.visibleSongs.isEmpty {
+            if !recentSearches.isEmpty {
+                macRecentSearchView
+            } else if library.visibleSongs.isEmpty {
                 EmptyStateView(
-                    titleKey: "search_empty_library",
-                    descriptionKey: "search_empty_library_desc",
-                    systemImage: "magnifyingglass"
+                    titleKey: "全网聚合搜索",
+                    descriptionKey: "输入歌曲名或歌手，即可直接搜索并畅听全网聚合音乐",
+                    systemImage: "sparkles.rectangle.stack"
                 )
             } else {
                 macRecentSearchView
             }
-        } else if isSearching && renderedQuery != searchText {
-            macSearchingPlaceholder
-        } else if searchResults.isEmpty
-                    && matchingAlbums.isEmpty
-                    && matchingArtists.isEmpty
-                    && visibleSemanticResults.isEmpty
-                    && visibleAppleMusicSearchResults.isEmpty
-                    && !semanticSearchFeedback.isVisible {
-            if isSearching || renderedQuery != searchText {
+        } else if !hasAnySearchResults {
+            if isAnySearchRunning {
                 macSearchingPlaceholder
             } else {
                 ContentUnavailableView.search(text: searchText)
@@ -728,6 +742,10 @@ struct SearchView: View {
                 .frame(maxWidth: 900, alignment: .leading)
                 if appleMusicSearchEnabled {
                     macAppleMusicSection()
+                        .frame(maxWidth: 900, alignment: .leading)
+                }
+                if !aggregatedMusic.searchResults.isEmpty || aggregatedMusic.isSearching {
+                    macAggregatedMusicSection
                         .frame(maxWidth: 900, alignment: .leading)
                 }
                 macRecentSearchInlineSection
@@ -945,6 +963,94 @@ struct SearchView: View {
                     .pmRowBackground(cornerRadius: 6)
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var macAggregatedMusicSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PMColor.brand)
+                Text("全网聚合音乐")
+                    .font(.title3.weight(.bold))
+                if !aggregatedMusic.searchResults.isEmpty {
+                    Text("(\(aggregatedMusic.searchResults.count))")
+                        .font(.caption)
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                Spacer()
+            }
+
+            if aggregatedMusic.isSearching && aggregatedMusic.searchResults.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在搜索全网聚合音源...")
+                        .font(.system(size: 12))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                .padding(14)
+                .pmCard(cornerRadius: 10)
+            } else {
+                ForEach(aggregatedMusic.searchResults) { songItem in
+                    let primuseSong = songItem.toPrimuseSong(systemSourceID: AggregatedMusicService.systemSourceID)
+                    Button {
+                        Task {
+                            await player.play(song: primuseSong)
+                            NotificationCenter.default.post(name: .primuseRequestShowNowPlaying, object: nil)
+                        }
+                        addRecentSearch(searchText)
+                    } label: {
+                        HStack(spacing: 12) {
+                            if let urlString = songItem.coverURLString, let url = URL(string: urlString) {
+                                AsyncImage(url: url) { phase in
+                                    if let img = phase.image {
+                                        img.resizable().aspectRatio(contentMode: .fill)
+                                    } else {
+                                        RoundedRectangle(cornerRadius: 5).fill(PMColor.rowHover)
+                                    }
+                                }
+                                .frame(width: 36, height: 36)
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                            } else {
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(PMColor.rowHover)
+                                    .frame(width: 36, height: 36)
+                                    .overlay {
+                                        Image(systemName: "music.note")
+                                            .font(.system(size: 14))
+                                            .foregroundStyle(PMColor.textFaint)
+                                    }
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(songItem.title)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .foregroundStyle(PMColor.text)
+                                        .lineLimit(1)
+                                    Text(songItem.platform.badgeLabel)
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(songItem.platform == .qq ? Color.green : (songItem.platform == .netease ? Color.red : Color.blue), in: Capsule())
+                                }
+                                Text("\(songItem.artist) · \(songItem.album.isEmpty ? "在线" : songItem.album)")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(PMColor.textFaint)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .pmRowBackground(cornerRadius: 6)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
     }
@@ -1366,6 +1472,7 @@ struct SearchView: View {
             + matchingAlbums.count
             + matchingArtists.count
             + visibleAppleMusicSearchResults.count
+            + aggregatedMusic.searchResults.count
     }
 
     private var appleMusicStatusText: String {
@@ -1581,7 +1688,7 @@ struct SearchView: View {
                 appleMusicSection
             }
 
-            if !aggregatedMusic.searchResults.isEmpty || aggregatedMusic.isSearching {
+            if !aggregatedMusic.searchResults.isEmpty || aggregatedMusic.isSearching || (aggregatedMusic.lastSearchError != nil && searchResults.isEmpty) {
                 aggregatedMusicSection
             }
         }
@@ -1591,7 +1698,7 @@ struct SearchView: View {
     @ViewBuilder
     private var aggregatedMusicSection: some View {
         Section {
-            if aggregatedMusic.isSearching {
+            if aggregatedMusic.isSearching && aggregatedMusic.searchResults.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("正在搜索全网聚合音源...")
@@ -1605,6 +1712,14 @@ struct SearchView: View {
             } else {
                 ForEach(aggregatedMusic.searchResults) { song in
                     aggregatedMusicRow(song)
+                }
+                if aggregatedMusic.isSearching {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在搜索更多线路...")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         } header: {
@@ -1627,7 +1742,9 @@ struct SearchView: View {
         return Button {
             Task {
                 await player.play(song: primuseSong)
+                NotificationCenter.default.post(name: .primuseRequestShowNowPlaying, object: nil)
             }
+            addRecentSearch(searchText)
         } label: {
             HStack(spacing: 12) {
                 if let urlString = songItem.coverURLString, let url = URL(string: urlString) {
@@ -1691,7 +1808,9 @@ struct SearchView: View {
             Button {
                 Task {
                     await player.play(song: primuseSong)
+                    NotificationCenter.default.post(name: .primuseRequestShowNowPlaying, object: nil)
                 }
+                addRecentSearch(searchText)
             } label: {
                 Label("立即播放", systemImage: "play.circle")
             }
@@ -1946,6 +2065,10 @@ struct SearchView: View {
     }
 
     private func performAggregatedMusicSearch(query: String) {
+        guard scope == nil else {
+            aggregatedMusic.clearSearchResults()
+            return
+        }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             aggregatedMusic.clearSearchResults()

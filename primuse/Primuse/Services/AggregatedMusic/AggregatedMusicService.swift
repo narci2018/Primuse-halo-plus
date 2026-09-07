@@ -14,6 +14,7 @@ public final class AggregatedMusicService {
     public private(set) var lastSearchError: String?
 
     private var currentSearchTask: Task<Void, Never>?
+    private var searchGeneration: Int = 0
     private var streamURLCache: [String: URL] = [:]
     private var lyricsCache: [String: String] = [:]
 
@@ -28,19 +29,29 @@ public final class AggregatedMusicService {
     public func search(query: String) async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            searchResults = []
-            isSearching = false
+            clearSearchResults()
             return
         }
+
+        searchGeneration += 1
+        let currentGen = searchGeneration
 
         currentSearchTask?.cancel()
         currentSearchTask = Task {
             isSearching = true
             lastSearchError = nil
+            defer {
+                if currentGen == searchGeneration {
+                    isSearching = false
+                }
+            }
+
+            // 防抖 200ms
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled, currentGen == searchGeneration else { return }
 
             let sources = store.enabledSources()
             if sources.isEmpty {
-                isSearching = false
                 lastSearchError = "未启用任何聚合音乐源，请在设置中配置并启用音源。"
                 return
             }
@@ -51,6 +62,7 @@ public final class AggregatedMusicService {
             await withTaskGroup(of: [AggregatedSongItem].self) { group in
                 for source in sources {
                     group.addTask {
+                        guard !Task.isCancelled else { return [] }
                         do {
                             return try await self.searchSingleSource(source: source, keyword: trimmed)
                         } catch {
@@ -59,20 +71,25 @@ public final class AggregatedMusicService {
                     }
                 }
 
+                // 流式渐进上屏：只要有一个音源返回结果，立即刷新给用户展示，避免慢线路拖慢整体展示
                 for await items in group {
+                    guard !Task.isCancelled, currentGen == searchGeneration else { break }
+                    var hasNew = false
                     for item in items {
                         let key = "\(item.platform.rawValue):\(item.rawID)"
                         if seenKeys.insert(key).inserted {
                             aggregatedList.append(item)
+                            hasNew = true
                         }
+                    }
+                    if hasNew {
+                        self.searchResults = aggregatedList
                     }
                 }
             }
 
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, currentGen == searchGeneration else { return }
 
-            self.searchResults = aggregatedList
-            self.isSearching = false
             if aggregatedList.isEmpty {
                 self.lastSearchError = "未搜索到匹配歌曲"
             }
@@ -81,7 +98,9 @@ public final class AggregatedMusicService {
     }
 
     public func clearSearchResults() {
+        searchGeneration += 1
         currentSearchTask?.cancel()
+        currentSearchTask = nil
         searchResults = []
         isSearching = false
         lastSearchError = nil
