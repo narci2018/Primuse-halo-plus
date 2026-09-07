@@ -14,6 +14,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: "minimal"
     CLANG_CXX_LANGUAGE_STANDARD: "c++20"
     OTHER_CPLUSPLUSFLAGS:
       - "$(inherited)"

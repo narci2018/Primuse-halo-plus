@@ -88,8 +88,8 @@ public enum CloudOAuthCredentialTransaction {
     @discardableResult
     @MainActor
     public static func authorizeThenCommit<Value>(
-        authorize: () async throws -> Value,
-        commit: (Value) async throws -> Void
+        authorize: @MainActor () async throws -> Value,
+        commit: @MainActor (Value) async throws -> Void
     ) async throws -> Value {
         let authorizedValue = try await authorize()
         try Task.checkCancellation()

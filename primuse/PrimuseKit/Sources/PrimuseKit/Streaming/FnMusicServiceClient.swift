@@ -114,15 +114,23 @@ public struct FnMusicCatalogTrack: Sendable {
         let albumArtistStrings = (json["albumArtists"] as? [String])?
             .compactMap(fnMusicNonemptyString) ?? []
         let albumArtistObject = fnMusicObject(album?["artist"])
-        self.albumArtistName = fnMusicFirstNonemptyString(
+        var resolvedAlbumArtistName = fnMusicFirstNonemptyString(
             json,
             keys: ["albumArtist", "albumArtistName"]
         )
             ?? fnMusicFirstNonemptyString(album, keys: ["albumArtist", "artistName"])
-            ?? fnMusicFirstNonemptyString(albumArtistObject, keys: ["name", "title"])
-            ?? fnMusicNonemptyString(album?["artist"])
-            ?? (!albumArtistObjectNames.isEmpty ? albumArtistObjectNames.joined(separator: ", ") : nil)
-            ?? (!albumArtistStrings.isEmpty ? albumArtistStrings.joined(separator: ", ") : nil)
+        if resolvedAlbumArtistName == nil {
+            resolvedAlbumArtistName = fnMusicFirstNonemptyString(albumArtistObject, keys: ["name", "title"])
+                ?? fnMusicNonemptyString(album?["artist"])
+        }
+        if resolvedAlbumArtistName == nil {
+            if !albumArtistObjectNames.isEmpty {
+                resolvedAlbumArtistName = albumArtistObjectNames.joined(separator: ", ")
+            } else if !albumArtistStrings.isEmpty {
+                resolvedAlbumArtistName = albumArtistStrings.joined(separator: ", ")
+            }
+        }
+        self.albumArtistName = resolvedAlbumArtistName
 
         let artists = json["artists"] as? [[String: Any]] ?? []
         self.artistGUID = artists.compactMap {
