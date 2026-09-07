@@ -756,8 +756,9 @@ struct NowPlayingView: View {
     #endif
 
     private func toggleLikedCurrent() {
-        guard let songID = player.currentSong?.id else { return }
-        library.toggleLiked(songID: songID)
+        guard let song = player.currentSong else { return }
+        library.registerSongIfNeeded(song)
+        library.toggleLiked(songID: song.id)
     }
 
     private func presentImmersiveLyrics() {
@@ -4574,7 +4575,7 @@ struct AddToPlaylistSheet: View {
                 Button(String(localized: "create")) {
                     guard !newPlaylistName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     let pl = library.createPlaylist(name: newPlaylistName)
-                    library.add(songID: song.id, toPlaylist: pl.id)
+                    library.add(song: song, toPlaylist: pl.id)
                     newPlaylistName = ""
                 }
             }
@@ -4673,7 +4674,7 @@ struct AddToPlaylistSheet: View {
             Button(String(localized: "create")) {
                 guard !newPlaylistName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                 let pl = library.createPlaylist(name: newPlaylistName)
-                library.add(songID: song.id, toPlaylist: pl.id)
+                library.add(song: song, toPlaylist: pl.id)
                 newPlaylistName = ""
             }
         }
@@ -4688,7 +4689,7 @@ struct AddToPlaylistSheet: View {
             if isAdded {
                 library.remove(songID: song.id, fromPlaylist: playlist.id)
             } else {
-                library.add(songID: song.id, toPlaylist: playlist.id)
+                library.add(song: song, toPlaylist: playlist.id)
             }
         } label: {
             HStack(spacing: 10) {
@@ -4729,7 +4730,7 @@ struct AddToPlaylistSheet: View {
             if isAdded {
                 library.remove(songID: song.id, fromPlaylist: playlist.id)
             } else {
-                library.add(songID: song.id, toPlaylist: playlist.id)
+                library.add(song: song, toPlaylist: playlist.id)
             }
         } label: {
             HStack {

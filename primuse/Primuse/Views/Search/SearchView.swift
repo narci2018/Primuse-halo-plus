@@ -251,6 +251,7 @@ struct SearchView: View {
     @State private var matchingAlbums: [PrimuseKit.Album] = []
     @State private var semanticResults: [SemanticLibrarySearchResult] = []
     @State private var recentSearches: [String] = []
+    @State private var songForAddToPlaylist: PrimuseKit.Song?
     /// Task handles, generation tokens and the reusable lyrics index are
     /// operational state. Keeping them outside SwiftUI rendering state avoids
     /// extra full-page evaluations on every debounce/cancellation/cache fill.
@@ -389,6 +390,13 @@ struct SearchView: View {
                 iosBody
             }
             #endif
+        }
+        .sheet(item: $songForAddToPlaylist) { song in
+            AddToPlaylistSheet(song: song)
+                #if os(iOS)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                #endif
         }
         .songBatchActions(
             selection: selection,
@@ -1050,6 +1058,35 @@ struct SearchView: View {
                         .pmRowBackground(cornerRadius: 6)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            player.insertNextInQueue([primuseSong])
+                        } label: {
+                            Label("下一首播放", systemImage: "text.line.first.and.arrowtriangle.forward")
+                        }
+
+                        Button {
+                            Task {
+                                await player.play(song: primuseSong)
+                                NotificationCenter.default.post(name: .primuseRequestShowNowPlaying, object: nil)
+                            }
+                            addRecentSearch(searchText)
+                        } label: {
+                            Label("立即播放", systemImage: "play.circle")
+                        }
+
+                        Button {
+                            player.appendToQueue([primuseSong])
+                        } label: {
+                            Label("添加到播放列表", systemImage: "text.line.last.and.arrowtriangle.forward")
+                        }
+
+                        Button {
+                            songForAddToPlaylist = primuseSong
+                        } label: {
+                            Label(String(localized: "add_to_playlist"), systemImage: "plus.rectangle.on.folder")
+                        }
+                    }
                 }
             }
         }
@@ -1819,6 +1856,12 @@ struct SearchView: View {
                 player.appendToQueue([primuseSong])
             } label: {
                 Label("添加到播放列表", systemImage: "text.line.last.and.arrowtriangle.forward")
+            }
+
+            Button {
+                songForAddToPlaylist = primuseSong
+            } label: {
+                Label(String(localized: "add_to_playlist"), systemImage: "plus.rectangle.on.folder")
             }
         }
     }

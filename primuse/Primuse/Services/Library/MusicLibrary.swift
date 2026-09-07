@@ -4554,7 +4554,7 @@ final class MusicLibrary {
 
     func songs(forPlaylist playlistID: String) -> [Song] {
         _ = visibleSongsReference
-        return (playlistSongIDs[playlistID] ?? []).compactMap { visibleSongByID[$0] }
+        return (playlistSongIDs[playlistID] ?? []).compactMap { visibleSongByID[$0] ?? song(id: $0) }
     }
 
     /// Count and first visible entry without materializing the full playlist.
@@ -4564,7 +4564,7 @@ final class MusicLibrary {
         var first: Song?
         var count = 0
         for songID in playlistSongIDs[playlistID] ?? [] {
-            guard let song = visibleSongByID[songID] else { continue }
+            guard let song = visibleSongByID[songID] ?? song(id: songID) else { continue }
             if first == nil { first = song }
             count += 1
         }
@@ -4584,7 +4584,7 @@ final class MusicLibrary {
             limit: artworkCandidateLimit
         )
         for songID in playlistSongIDs[playlistID] ?? [] {
-            guard let song = visibleSongByID[songID] else { continue }
+            guard let song = visibleSongByID[songID] ?? song(id: songID) else { continue }
             accumulator.consider(song)
         }
         return (accumulator.artworkCandidates, accumulator.visibleCount)
@@ -5028,6 +5028,41 @@ final class MusicLibrary {
 
     private func sortSmartPlaylists() {
         allSmartPlaylists.sort { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Registers an external/online song into the library if not already present.
+    func registerSongIfNeeded(_ song: Song) {
+        registerSongsIfNeeded([song])
+    }
+
+    /// Registers multiple external/online songs into the library if not already present.
+    func registerSongsIfNeeded(_ songsToRegister: [Song]) {
+        let missing = songsToRegister.filter { songIndexByID[$0.id] == nil }
+        guard !missing.isEmpty else { return }
+        addSongs(
+            missing,
+            affectedSourceIDs: nil,
+            notifyRemovals: false,
+            pruneMissingSongs: false
+        )
+        for s in missing {
+            if !disabledSourceIDs.contains(s.sourceID) {
+                visibleSongByID[s.id] = s
+                if !visibleSongs.contains(where: { $0.id == s.id }) {
+                    visibleSongs.append(s)
+                }
+            }
+        }
+    }
+
+    func add(song: Song, toPlaylist playlistID: String) {
+        registerSongIfNeeded(song)
+        add(songIDs: [song.id], toPlaylist: playlistID)
+    }
+
+    func add(songs: [Song], toPlaylist playlistID: String) {
+        registerSongsIfNeeded(songs)
+        add(songIDs: songs.map(\.id), toPlaylist: playlistID)
     }
 
     func add(songID: String, toPlaylist playlistID: String) {

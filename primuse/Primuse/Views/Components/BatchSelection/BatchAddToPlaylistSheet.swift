@@ -52,7 +52,7 @@ struct BatchAddToPlaylistSheet: View {
             guard !trimmedNewName.isEmpty else { return }
             targetID = library.createPlaylist(name: trimmedNewName).id
         }
-        library.add(songIDs: songs.map(\.id), toPlaylist: targetID)
+        library.add(songs: songs, toPlaylist: targetID)
         onFinish()
         dismiss()
     }
