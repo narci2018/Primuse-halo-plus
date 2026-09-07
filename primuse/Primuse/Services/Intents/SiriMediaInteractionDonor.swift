@@ -15,12 +15,7 @@ enum SiriAuthorizationRuntime {
         #if targetEnvironment(simulator)
         return false
         #else
-        if let provURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-           let provData = try? Data(contentsOf: provURL),
-           let provString = String(data: provData, encoding: .ascii) {
-            return provString.contains("com.apple.developer.siri")
-        }
-        return true
+        return SafeSiriBridge.hasSiriEntitlement()
         #endif
         #else
         return false

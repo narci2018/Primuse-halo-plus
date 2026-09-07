@@ -14,6 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface SafeSiriBridge : NSObject
 
++ (BOOL)hasSiriEntitlement;
+
 #if TARGET_OS_IOS
 + (INSiriAuthorizationStatus)safeSiriAuthorizationStatus;
 + (void)safeRequestSiriAuthorization:(void (^)(INSiriAuthorizationStatus status))completion;

@@ -17,5 +17,7 @@ PRIMUSE_MAC_APP_STORE_ID =
 // APNs sandbox environment for Debug builds. Substituted into
 // `aps-environment` in entitlements at sign time.
 APS_ENVIRONMENT = development
+GCC_ENABLE_OBJC_EXCEPTIONS = YES
+OTHER_CFLAGS = $(inherited) -fobjc-exceptions
 
 #include? "Secrets.local.xcconfig"
