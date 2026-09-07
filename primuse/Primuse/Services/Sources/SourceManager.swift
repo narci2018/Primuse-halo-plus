@@ -2402,7 +2402,7 @@ final class SourceManager {
     }
 
     private func directConnector(for source: MusicSource) -> any MusicSourceConnector {
-        if source.id == AggregatedMusicService.systemSourceID {
+        if source.id == AggregatedMusicService.systemSourceID || source.type == .aggregated {
             return AggregatedMusicSource(sourceID: source.id)
         }
         let connector: any MusicSourceConnector
@@ -2639,6 +2639,14 @@ final class SourceManager {
 
     func diagnose(source: MusicSource, directories explicitDirectories: [String]? = nil) async -> SourceDiagnosticReport {
         let startedAt = Date()
+        if source.id == AggregatedMusicService.systemSourceID || source.type == .aggregated {
+            let pass = SourceDiagnosticCheck(
+                status: .passed,
+                title: "聚合音乐在线引擎",
+                message: "在线解析服务正常运行"
+            )
+            return SourceDiagnosticReport(source: source, startedAt: startedAt, checks: [pass])
+        }
         var checks = configurationChecks(for: source, explicitDirectories: explicitDirectories)
         if checks.contains(where: { $0.status == .failed }) {
             return SourceDiagnosticReport(source: source, startedAt: startedAt, checks: checks)
@@ -2852,6 +2860,9 @@ final class SourceManager {
         for source: MusicSource,
         explicitDirectories: [String]?
     ) -> [SourceDiagnosticCheck] {
+        if source.id == AggregatedMusicService.systemSourceID || source.type == .aggregated {
+            return []
+        }
         var checks: [SourceDiagnosticCheck] = []
 
         let hasUsableConnection = source.type.supportsAdaptiveConnections

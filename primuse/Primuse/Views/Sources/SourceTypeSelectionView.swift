@@ -179,7 +179,7 @@ struct SourceTypeSelectionView<ConnectionContent: View>: View {
                     )
 
                     ForEach(MusicSourceType.groupedByCategory, id: \.0) { category, types in
-                        let filtered = types.filter { $0 != .appleMusicLibrary && $0 != .appleMusic }
+                        let filtered = types.filter { $0 != .appleMusicLibrary && $0 != .appleMusic && $0 != .aggregated }
                         if !filtered.isEmpty {
                             macProtocolSection(
                                 title: category.displayNameFallback,
@@ -472,7 +472,7 @@ struct SourceTypeSelectionView<ConnectionContent: View>: View {
 
             // 其它来源按 category 分组,过滤掉已在上面单独展示的 appleMusicLibrary
             ForEach(MusicSourceType.groupedByCategory, id: \.0) { category, types in
-                let filtered = types.filter { $0 != .appleMusicLibrary && $0 != .appleMusic }
+                let filtered = types.filter { $0 != .appleMusicLibrary && $0 != .appleMusic && $0 != .aggregated }
                 if !filtered.isEmpty {
                     Section(category.displayNameFallback) {
                         ForEach(filtered, id: \.self) { typeButton($0) }
@@ -680,7 +680,7 @@ struct SourceTypeSelectionView<ConnectionContent: View>: View {
             }
 
             ForEach(MusicSourceType.groupedByCategory, id: \.0) { category, types in
-                let filtered = types.filter { $0 != .local && $0 != .appleMusicLibrary }
+                let filtered = types.filter { $0 != .local && $0 != .appleMusicLibrary && $0 != .appleMusic && $0 != .aggregated }
                 if category == .local {
                     iosLocalImportSection
                 } else if !filtered.isEmpty {

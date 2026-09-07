@@ -154,7 +154,7 @@ private extension MusicSourceType {
              .fnMusic, .daoliyu, .songloft,
              .aliyunDrive, .googleDrive, .oneDrive,
              .drime, .pan115, .pan123,
-             .appleMusic, .appleMusicLibrary:
+             .appleMusic, .appleMusicLibrary, .aggregated:
             return .opaque
         default:
             return .hierarchical

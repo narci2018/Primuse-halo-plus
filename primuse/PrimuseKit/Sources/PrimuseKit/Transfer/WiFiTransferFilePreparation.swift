@@ -4,7 +4,7 @@ public enum WiFiTransferFilePreparation {
     public static let maximumFileSize: Int64 = 8 * 1024 * 1024 * 1024
 
     public static func unavailableReason(song: Song, sourceType: MusicSourceType) -> String? {
-        if sourceType == .appleMusic { return "libraryProtected" }
+        if sourceType == .appleMusic || sourceType == .aggregated { return "libraryProtected" }
         if sourceType.isAwaitingPublicAPI { return "librarySourceUnavailable" }
         if song.cueSheetPath?.isEmpty == false { return "libraryCue" }
         if song.isStreamDescriptor { return "libraryStream" }

@@ -334,6 +334,7 @@ struct SourcesContentView: View {
     /// "打开 Apple Music 设置" 的跳转 ── 走 NavigationStack 的 destination 而不是 sheet,
     /// 让推入栈跟其他 Settings 子页体验一致 (左上角"返回"而不是"完成")。
     @State private var openAppleMusicSettings = false
+    @State private var openAggregatedMusicSettings = false
     /// 各源磁盘占用(字节), 后台 .task 填充, 卡片读取。键为 source.id。
     @State private var sourceSizes: [String: Int64] = [:]
     #if os(iOS)
@@ -507,6 +508,9 @@ struct SourcesContentView: View {
             .navigationDestination(isPresented: $openAppleMusicSettings) {
                 AppleMusicSettingsView()
             }
+            .navigationDestination(isPresented: $openAggregatedMusicSettings) {
+                AggregatedSourcesSettingsView()
+            }
             .navigationDestination(item: $inspectingMetadataSource) { source in
                 SourceMetadataStatusView(source: source)
             }
@@ -625,7 +629,7 @@ struct SourcesContentView: View {
                         }
                     }
                     HStack(spacing: 4) {
-                        Text(source.type.displayName).fixedSize()
+                        Text((source.type == .aggregated || source.id == AggregatedMusicService.systemSourceID) ? "全网在线流媒体" : source.type.displayName).fixedSize()
                         if source.connectionConfiguration == nil,
                            let summary = source.connectionSummary {
                             Text("·").fixedSize()
@@ -686,7 +690,7 @@ struct SourcesContentView: View {
                 }
             }
 
-            if let failureMessage = scanning?.failureMessage, !failureMessage.isEmpty {
+            if source.type != .appleMusic && source.type != .aggregated && source.id != AggregatedMusicService.systemSourceID, let failureMessage = scanning?.failureMessage, !failureMessage.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 8) {
                         Label("notify_scan_failed_title", systemImage: "exclamationmark.triangle.fill")
@@ -796,6 +800,14 @@ struct SourcesContentView: View {
                     ) {
                         openAppleMusicSettings = true
                     }
+                } else if source.type == .aggregated || source.id == AggregatedMusicService.systemSourceID {
+                    sourceActionButton(
+                        "打开聚合音乐设置",
+                        systemImage: "sparkles.rectangle.stack",
+                        prominence: .accent
+                    ) {
+                        openAggregatedMusicSettings = true
+                    }
                 } else if source.type == .local {
                     #if os(iOS)
                     if isManagedLocalImportSource(source) {
@@ -888,7 +900,10 @@ struct SourcesContentView: View {
             }
             // Apple Music 没有 edit / diagnose / delete 概念 ── 删了 AppServices
             // 下次启动会自动重建, 反而带来困惑; 编辑/体检都依赖 connector。
-            if source.id != AppleMusicLibraryService.systemSourceID {
+            let isSystemManaged = source.id == AppleMusicLibraryService.systemSourceID
+                || source.id == AggregatedMusicService.systemSourceID
+                || source.type == .aggregated
+            if !isSystemManaged {
                 Button { editingSource = source } label: { Label("edit", systemImage: "pencil") }
                 Button { diagnosingSource = source } label: { Label("source_diagnostics", systemImage: "stethoscope") }
                 if source.type.scansEntireLibrary || !dirs.isEmpty {
@@ -904,7 +919,10 @@ struct SourcesContentView: View {
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if source.id != AppleMusicLibraryService.systemSourceID {
+            let isSystemManaged = source.id == AppleMusicLibraryService.systemSourceID
+                || source.id == AggregatedMusicService.systemSourceID
+                || source.type == .aggregated
+            if !isSystemManaged {
                 Button(role: .destructive) { requestDelete(source) } label: { Label("delete", systemImage: "trash") }
                 Button { editingSource = source } label: { Label("edit", systemImage: "pencil") }.tint(.orange)
                 Button { diagnosingSource = source } label: { Label("source_diagnostics_short", systemImage: "stethoscope") }.tint(.blue)

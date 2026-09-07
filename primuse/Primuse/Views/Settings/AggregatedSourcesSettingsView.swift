@@ -5,7 +5,6 @@ public struct AggregatedSourcesSettingsView: View {
     @Environment(AggregatedSourceStore.self) private var store
     @State private var showingAddSheet = false
     @State private var editingSource: AggregatedSourceItem?
-    @State private var showingResetAlert = false
 
     public init() {}
 
@@ -62,20 +61,7 @@ public struct AggregatedSourcesSettingsView: View {
                     .font(.footnote)
             }
 
-            Section {
-                Button(role: .destructive) {
-                    showingResetAlert = true
-                } label: {
-                    HStack {
-                        Spacer()
-                        Text("恢复 HALO-Music 默认音源")
-                        Spacer()
-                    }
-                }
-            } footer: {
-                Text("将所有线路重置为 HALO-Music 项目推荐的默认高可用线路。")
-                    .font(.footnote)
-            }
+
         }
         .navigationTitle("聚合音乐源设置")
         #if os(iOS)
@@ -91,14 +77,7 @@ public struct AggregatedSourcesSettingsView: View {
                 store.updateSource(updatedSource)
             }
         }
-        .alert("恢复默认音源？", isPresented: $showingResetAlert) {
-            Button("取消", role: .cancel) {}
-            Button("确认恢复", role: .destructive) {
-                store.resetToDefaults()
-            }
-        } message: {
-            Text("将清除自定义修改并重新加载 HALO-Music 预置的 QQ 音乐与网易云默认线路。")
-        }
+
     }
 
     @ViewBuilder

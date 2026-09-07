@@ -299,6 +299,9 @@ final class ScanService {
             return false
         }
         guard source.isEnabled else { return false }
+        guard source.type != .appleMusic && source.type != .aggregated && source.id != AggregatedMusicService.systemSourceID else {
+            return false
+        }
         if Self.requiresAutomaticServerCatalogResourceGate(source.type),
            Self.shouldDeferAutomaticServerCatalogWork(
                context: snapshotExecutionContext,
@@ -395,7 +398,7 @@ final class ScanService {
         // FnMusic receives only a restart-from-page-1 intent, never a partial
         // catalogue. Apple Music uses its separate library sync path.
         let initialCheckpointWrite: Task<Bool, Never>?
-        if source.type == .appleMusic {
+        if source.type == .appleMusic || source.type == .aggregated || source.id == AggregatedMusicService.systemSourceID {
             initialCheckpointWrite = nil
         } else {
             checkpoints[source.id] = ScanCheckpointPreparationPolicy.preparingCheckpoint(

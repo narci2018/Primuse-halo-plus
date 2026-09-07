@@ -266,6 +266,7 @@ public enum MediaRelaySourcePolicy {
               song.cueSheetPath?.isEmpty != false,
               !song.isStreamDescriptor,
               sourceType != .appleMusic,
+              sourceType != .aggregated,
               !sourceType.isAwaitingPublicAPI else {
             return false
         }

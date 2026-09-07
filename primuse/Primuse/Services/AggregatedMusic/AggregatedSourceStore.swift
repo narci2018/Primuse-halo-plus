@@ -102,12 +102,21 @@ public final class AggregatedSourceStore {
     }
 
     public func loadSources() {
+        let defaults = Self.defaultSources
         if let data = UserDefaults.standard.data(forKey: Self.storageKey),
-           let decoded = try? JSONDecoder().decode([AggregatedSourceItem].self, from: data),
-           !decoded.isEmpty {
-            self.sources = decoded
+           let decoded = try? JSONDecoder().decode([AggregatedSourceItem].self, from: data) {
+            var merged = decoded
+            let existingIDs = Set(decoded.map(\.id))
+            for def in defaults {
+                if !existingIDs.contains(def.id) {
+                    merged.append(def)
+                }
+            }
+            merged.sort { $0.priority > $1.priority }
+            self.sources = merged
+            save()
         } else {
-            self.sources = Self.defaultSources
+            self.sources = defaults
             save()
         }
     }

@@ -630,6 +630,8 @@ final class AppServices {
         #endif
         self.themeService = theme
         let scanService = ScanService()
+        scanService.removeCheckpoint(for: AggregatedMusicService.systemSourceID)
+        scanService.scanStates[AggregatedMusicService.systemSourceID] = nil
         let metadataBackfill = MetadataBackfillService(
             library: library,
             sourceManager: manager,
@@ -791,11 +793,18 @@ final class AppServices {
         self.aggregatedMusic = AggregatedMusicService.shared
 
         let aggSourceID = AggregatedMusicService.systemSourceID
-        if store.allSources.first(where: { $0.id == aggSourceID }) == nil {
+        if let existing = store.allSources.first(where: { $0.id == aggSourceID }) {
+            if existing.type != .aggregated || existing.name != "聚合音乐" {
+                var updated = existing
+                updated.name = "聚合音乐"
+                updated.type = .aggregated
+                store.upsert(updated)
+            }
+        } else {
             store.upsert(MusicSource(
                 id: aggSourceID,
                 name: "聚合音乐",
-                type: .local,
+                type: .aggregated,
                 authType: .none,
                 isEnabled: true,
                 songCount: 0

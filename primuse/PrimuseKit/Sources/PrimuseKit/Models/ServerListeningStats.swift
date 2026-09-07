@@ -24,7 +24,7 @@ public extension MusicSourceType {
              .fnMusic, .daoliyu, .songloft,
              .baiduPan, .aliyunDrive, .googleDrive, .oneDrive,
              .dropbox, .drime, .pan115, .pan123,
-             .appleMusic, .local, .appleMusicLibrary:
+             .appleMusic, .local, .appleMusicLibrary, .aggregated:
             return .unavailable
         }
     }

@@ -915,7 +915,7 @@ struct MacSourcesView: View {
     /// 没有目录/扫描/编辑概念 — Mac 上走 Settings → Apple Music 授权 tab,
     /// 留在 Sources 列表里只会让用户误点 connect 按钮。直接隐藏。
     private var sources: [MusicSource] {
-        sourceStore.sources.filter { $0.type != .appleMusic }
+        sourceStore.sources.filter { $0.type != .appleMusic && $0.type != .aggregated && $0.id != AggregatedMusicService.systemSourceID }
     }
 
     private func beginDirectorySelectionSession(for source: MusicSource) {
