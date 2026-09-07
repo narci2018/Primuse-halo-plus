@@ -223,19 +223,23 @@ struct AggregatedSourceEditSheet: View {
                     }
                 }
 
-                Section("API 接口地址") {
+                Section {
                     TextField("https://...", text: $baseURL)
                         .autocorrectionDisabled()
                         #if os(iOS)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         #endif
+                } header: {
+                    Text("API 接口地址")
                 } footer: {
                     Text("请填写标准的 Meting 兼容接口地址或 Music Open API 地址。")
                 }
 
-                Section("优先级") {
+                Section {
                     Stepper("优先级评分: \(priority)", value: $priority, in: -10...100)
+                } header: {
+                    Text("优先级")
                 } footer: {
                     Text("评分越高的线路，在搜索与音频解析时越优先被调用。")
                 }

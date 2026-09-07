@@ -1687,7 +1687,7 @@ struct SearchView: View {
             }
 
             Button {
-                player.play([primuseSong], startingAt: 0)
+                player.play(song: primuseSong)
             } label: {
                 Label("立即播放", systemImage: "play.circle")
             }

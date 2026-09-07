@@ -7,7 +7,7 @@ import PrimuseKit
 public final class AggregatedMusicService {
     public static let shared = AggregatedMusicService()
 
-    public static let systemSourceID = "system-aggregated-music"
+    public nonisolated static let systemSourceID = "system-aggregated-music"
 
     public private(set) var searchResults: [AggregatedSongItem] = []
     public private(set) var isSearching: Bool = false
