@@ -156,21 +156,10 @@ final class PlaylistSyncService {
         }
 
         // 匹配与恢复歌单
-        let allSongs = library.allSongs
+        let allSongs = library.visibleSongs
         let songMapByID = Dictionary(allSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         for remotePl in resData.playlists {
-            // 查找本地是否已存在同名或同 ID 歌单
-            var targetPlaylist: Playlist? = library.playlists.first(where: {
-                $0.id == remotePl.id || $0.name == remotePl.name
-            })
-
-            if targetPlaylist == nil {
-                targetPlaylist = library.createPlaylist(name: remotePl.name)
-            }
-
-            guard let pl = targetPlaylist else { continue }
-
             // 匹配歌曲：按 ID 匹配，找不到则按 title + artist 匹配
             var matchedSongIDs: [String] = []
             for rs in remotePl.songs {
@@ -183,8 +172,13 @@ final class PlaylistSyncService {
                 }
             }
 
-            if !matchedSongIDs.isEmpty {
-                library.add(songIDs: matchedSongIDs, toPlaylist: pl.id)
+            // 查找本地是否已存在同名或同 ID 歌单
+            if let existing = library.playlists.first(where: { $0.id == remotePl.id || $0.name == remotePl.name }) {
+                if !matchedSongIDs.isEmpty {
+                    library.add(songIDs: matchedSongIDs, toPlaylist: existing.id)
+                }
+            } else {
+                _ = library.createPlaylist(name: remotePl.name, songIDs: matchedSongIDs)
             }
         }
 
