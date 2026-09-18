@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Primuse 歌单同步服务</title>
+  <style>
+    :root {
+      --bg: #0f111a;
+      --card: #1a1d2d;
+      --accent: #3b82f6;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --border: #2e344e;
+      --success: #10b981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px;
+      min-height: 100vh;
+    }
+    .container {
+      width: 100%;
+      max-width: 800px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+    header h1 {
+      font-size: 26px;
+      color: #fff;
+      margin-bottom: 8px;
+    }
+    header p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      border: 1px solid var(--success);
+    }
+    .api-box {
+      background: #111422;
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 1px dashed var(--border);
+      font-family: monospace;
+      font-size: 14px;
+      color: #60a5fa;
+      word-break: break-all;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .device-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    .device-table th, .device-table td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .device-table th { color: var(--muted); font-weight: 500; }
+    .empty-tip {
+      text-align: center;
+      padding: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>☁️ Primuse 歌单同步服务</h1>
+      <p>Cloudflare Pages + D1 Serverless 歌单备份与同步端点</p>
+    </header>
+
+    <div class="card">
+      <div class="card-title">
+        <span>服务状态</span>
+        <span class="badge">运行正常</span>
+      </div>
+      <p style="font-size: 14px; color: var(--muted); margin-bottom: 12px;">
+        在 Primuse App「设置」-「同步」-「歌单同步」中填写的服务器 API URL：
+      </p>
+      <div class="api-box">
+        <span id="apiUrl">加载中...</span>
+        <button class="btn" onclick="copyUrl()">复制</button>
+      </div>
+      <p style="font-size: 12px; color: #6b7280;">
+        端点支持 POST（上传同步备份）与 GET（按 deviceId 拉取歌单）。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <span>已同步设备记录</span>
+        <button class="btn" style="background:#2563eb;" onclick="loadDevices()">刷新列表</button>
+      </div>
+      <div id="deviceContainer">
+        <div class="empty-tip">正在加载设备列表...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const fullApiUrl = window.location.origin + "/api/sync-playlists";
+    document.getElementById("apiUrl").textContent = fullApiUrl;
+
+    function copyUrl() {
+      navigator.clipboard.writeText(fullApiUrl).then(() => {
+        alert("已复制 API URL: " + fullApiUrl);
+      });
+    }
+
+    async function loadDevices() {
+      const container = document.getElementById("deviceContainer");
+      try {
+        const res = await fetch("/api/sync-playlists");
+        const json = await res.json();
+        const devices = json?.data?.devices || [];
+
+        if (!devices.length) {
+          container.innerHTML = '<div class="empty-tip">暂无设备同步记录。请在 Primuse App 中配置此 URL 并点击“歌单同步”。</div>';
+          return;
+        }
+
+        let html = `
+          <table class="device-table">
+            <thead>
+              <tr>
+                <th>设备名称</th>
+                <th>系统</th>
+                <th>设备标识 (UUID)</th>
+                <th>歌单数</th>
+                <th>歌曲数</th>
+                <th>最近同步</th>
+              </tr>
+            </thead>
+            <tbody>
+        `;
+        for (const d of devices) {
+          const time = new Date(d.updated_at).toLocaleString();
+          html += `
+            <tr>
+              <td><strong>${d.device_name || "未知设备"}</strong></td>
+              <td>${d.platform || "Apple"}</td>
+              <td style="font-family:monospace;font-size:11px;color:#93c5fd;">${d.device_id.slice(0, 18)}...</td>
+              <td>${d.playlist_count || 0}</td>
+              <td>${d.song_count || 0}</td>
+              <td style="color:#9ca3af;font-size:12px;">${time}</td>
+            </tr>
+          `;
+        }
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = `<div class="empty-tip" style="color:#ef4444;">加载失败: ${err.message}</div>`;
+      }
+    }
+
+    loadDevices();
+  </script>
+</body>
+</html>

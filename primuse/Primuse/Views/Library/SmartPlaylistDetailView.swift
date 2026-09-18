@@ -456,19 +456,27 @@ struct SmartPlaylistDetailView: View {
 
     // MARK: - Playback
 
-    private func playAll(shuffled: Bool = false) {
+    private func playAll(shuffled: Bool = true) {
         let playable = matched.filteredPlayable()
-        let queue = shuffled ? playable.shuffled() : playable
-        guard let first = queue.first else { return }
-        if shuffled { player.shuffleEnabled = true }
-        player.setQueue(queue, startAt: 0)
-        Task { await player.play(song: first) }
+        guard !playable.isEmpty else { return }
+        if shuffled {
+            player.shuffleEnabled = true
+            let startIndex = Int.random(in: 0..<playable.count)
+            let song = playable[startIndex]
+            player.setQueue(playable, startAt: startIndex, isPlaylist: true)
+            Task { await player.play(song: song) }
+        } else {
+            player.shuffleEnabled = false
+            guard let first = playable.first else { return }
+            player.setQueue(playable, startAt: 0, isPlaylist: true)
+            Task { await player.play(song: first) }
+        }
     }
 
     private func playSong(_ song: Song) {
         let queue = matched.filteredPlayable()
         guard let index = queue.firstIndex(where: { $0.id == song.id }) else { return }
-        player.setQueue(queue, startAt: index)
+        player.setQueue(queue, startAt: index, isPlaylist: true)
         SiriMediaInteractionDonor.donate(song: song)
         Task { await player.play(song: song) }
     }

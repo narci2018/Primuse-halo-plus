@@ -1,0 +1,14 @@
+{
+  "name": "primuse-sync-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Primuse 歌单备份与同步 Cloudflare Pages 服务端",
+  "scripts": {
+    "dev": "wrangler pages dev public",
+    "deploy": "wrangler pages deploy public"
+  },
+  "devDependencies": {
+    "wrangler": "^3.100.0"
+  }
+}

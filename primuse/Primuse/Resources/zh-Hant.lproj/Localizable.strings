@@ -651,6 +651,7 @@
 "sync" = "同步";
 "services_integrations" = "服務與整合";
 "icloud_sync_title" = "iCloud 同步";
+"playlist_sync_title" = "歌單同步";
 "icloud_sync_enabled" = "啟用 iCloud 同步";
 "icloud_sync_footer" = "在使用同一 iCloud 帳號的裝置之間同步歌單、音樂來源、播放紀錄和設定。來源密碼與雲端硬碟登入狀態透過 iCloud 鑰匙圈安全同步。";
 "icloud_sync_status" = "狀態";

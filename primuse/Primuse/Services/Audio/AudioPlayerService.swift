@@ -1003,6 +1003,10 @@ final class AudioPlayerService {
     /// Invalidates prepared gapless transitions when queue order changes.
     private var queueGeneration = 0
 
+    /// When true, current queue is strictly scoped to a playlist, preventing
+    /// shuffle wrap-around from pulling external library songs.
+    var isPlaylistQueue: Bool = false
+
     // MARK: - Decoder Tracking (for seek)
     /// Tracks which decoder pipeline produced the currently-playing audio
     /// stream so seek/crossfade/recovery can reproduce the exact same path.
@@ -8432,7 +8436,8 @@ final class AudioPlayerService {
         updatePlaybackState()
     }
 
-    func setQueue(_ songs: [Song], startAt index: Int = 0) {
+    func setQueue(_ songs: [Song], startAt index: Int = 0, isPlaylist: Bool = false) {
+        self.isPlaylistQueue = isPlaylist
         guard !songs.isEmpty else {
             plog("🎶 setQueue empty — clearing queue")
             clearQueue()
@@ -8571,6 +8576,7 @@ final class AudioPlayerService {
         pendingNextShuffleIndices = nil
         shuffledIndices = []
         shufflePosition = 0
+        isPlaylistQueue = false
         isPrimuseManagingAppleMusicQueue = false
         persistPlaybackSession()
     }
@@ -10450,7 +10456,8 @@ final class AudioPlayerService {
     /// and make only those new entries the next shuffle segment.
     @discardableResult
     private func extendExhaustedShuffleFromLibrary() -> Bool {
-        guard shuffleEnabled,
+        guard !isPlaylistQueue,
+              shuffleEnabled,
               repeatMode != .one,
               nextSongInQueue() == nil,
               let library,

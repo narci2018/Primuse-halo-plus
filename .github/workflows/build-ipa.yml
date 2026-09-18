@@ -5,7 +5,12 @@ on:
     paths:
       - "primuse/**"
       - ".github/workflows/build-ipa.yml"
+    tags:
+      - "v*"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-ipa:
@@ -80,3 +85,12 @@ jobs:
           name: Primuse-unsigned-ipa
           path: Primuse-unsigned.ipa
           retention-days: 14
+
+      - name: Create Release and Upload IPA
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Primuse-unsigned.ipa
+          draft: false
+          prerelease: false
+          generate_release_notes: true

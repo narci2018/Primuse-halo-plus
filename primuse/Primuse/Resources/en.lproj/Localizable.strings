@@ -693,6 +693,7 @@
 "sync" = "Sync";
 "services_integrations" = "Services & Integrations";
 "icloud_sync_title" = "iCloud Sync";
+"playlist_sync_title" = "Playlist Sync";
 "icloud_sync_enabled" = "Enable iCloud Sync";
 "icloud_sync_footer" = "Sync playlists, music sources, playback history, and settings across devices signed in to the same iCloud account. Source passwords and cloud-drive login state sync via iCloud Keychain.";
 "icloud_sync_status" = "Status";

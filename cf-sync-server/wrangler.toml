@@ -1,0 +1,8 @@
+name = "primuse-sync-server"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "halo-music-db"
+database_id = "3f1eaf4d-5d00-4849-857d-51b25e5e7ac6"

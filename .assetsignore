@@ -17,3 +17,8 @@ android/
 /release/**
 capacitor.config.json
 windows/
+primuse/
+音源文件/
+cf-sync-server/
+node_modules/
+tests/

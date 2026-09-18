@@ -42,7 +42,7 @@ enum SettingsPage: String, CaseIterable, Identifiable, Hashable, Sendable {
     case playback, equalizer, effects, lyrics, transcription
     case appearance, themeColor, player, fullscreen, appIcon, home, libraryDisplay
     case sources, scraping, artists, duplicates, deleted, storage
-    case cacheSync, cloud, family, appleTV, relay, dlna
+    case cacheSync, cloud, family, playlistSync, appleTV, relay, dlna
     case intelligence, appleMusic, scrobble, statistics, siri, aggregatedSources
     case domains, about, diagnostics, licenses, keyboard, widgets
 
@@ -52,7 +52,7 @@ enum SettingsPage: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .playback, .equalizer, .effects, .keyboard, .siri: .playback
         case .lyrics, .transcription, .sources, .scraping, .artists, .duplicates, .deleted, .storage, .cacheSync: .library
         case .appearance, .themeColor, .player, .fullscreen, .appIcon, .home, .libraryDisplay, .widgets: .appearance
-        case .cloud, .family: .sync
+        case .cloud, .family, .playlistSync: .sync
         case .appleTV, .relay: .appleTV
         case .intelligence, .appleMusic, .scrobble, .statistics, .dlna, .aggregatedSources: .integrations
         case .domains: .security
@@ -82,6 +82,7 @@ enum SettingsPage: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .cacheSync: "cache_sync_title"
         case .cloud: "icloud_sync_title"
         case .family: "family_sharing_title"
+        case .playlistSync: "playlist_sync_title"
         case .appleTV: "settings_appletv_section"
         case .relay: "settings_relay_section"
         case .dlna: "settings_dlna_section"

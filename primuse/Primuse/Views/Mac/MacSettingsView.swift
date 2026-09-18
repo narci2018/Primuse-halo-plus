@@ -11,7 +11,7 @@ import PrimuseKit
 /// system as the design instead of embedding the older grouped Forms.
 enum MacSettingsTab: String, Hashable, CaseIterable, Identifiable {
     case playback, storage, equalizer, effects, keyboard, theme
-    case scrape, artists, lyrics, appleMusic, intelligence, widgets, cloud, deleted, ssl, siri, about
+    case scrape, artists, lyrics, appleMusic, intelligence, widgets, cloud, playlistSync, deleted, ssl, siri, about
 
     var id: String { rawValue }
 
@@ -29,6 +29,7 @@ enum MacSettingsTab: String, Hashable, CaseIterable, Identifiable {
         case .intelligence: return String(localized: "ai_settings_title")
         case .widgets: return Lz("Widgets")
         case .cloud: return "iCloud"
+        case .playlistSync: return String(localized: "playlist_sync_title")
         case .theme: return Lz("Appearance")
         case .deleted: return Lz("Recently Deleted")
         case .ssl: return Lz("Trusted Domains")
@@ -51,6 +52,7 @@ enum MacSettingsTab: String, Hashable, CaseIterable, Identifiable {
         case .intelligence: return "sparkles"
         case .widgets: return "rectangle.grid.2x2"
         case .cloud: return "icloud"
+        case .playlistSync: return "arrow.triangle.2.circlepath"
         case .theme: return "sun.max"
         case .deleted: return "trash"
         case .ssl: return "lock.shield"
@@ -73,6 +75,7 @@ enum MacSettingsTab: String, Hashable, CaseIterable, Identifiable {
         case .intelligence: return "ST-14"
         case .widgets: return "ST-07"
         case .cloud: return "ST-08"
+        case .playlistSync: return "ST-17"
         case .theme: return "ST-12"
         case .deleted: return "ST-09"
         case .ssl: return "ST-10"
@@ -129,6 +132,7 @@ extension SettingsPage {
         case .intelligence: .intelligence
         case .widgets: .widgets
         case .cloud: .cloud
+        case .playlistSync: .playlistSync
         case .deleted: .deleted
         case .domains: .ssl
         case .about: .about
@@ -154,6 +158,7 @@ private extension MacSettingsTab {
         case .intelligence: .intelligence
         case .widgets: .widgets
         case .cloud: .cloud
+        case .playlistSync: .playlistSync
         case .deleted: .deleted
         case .ssl: .domains
         case .about: .about
@@ -385,6 +390,8 @@ struct MacSettingsView: View {
             MacSTWidgetView()
         case .cloud:
             MacSTCloudView()
+        case .playlistSync:
+            PlaylistSyncSettingsView()
         case .theme:
             MacSTThemeView()
         case .deleted:

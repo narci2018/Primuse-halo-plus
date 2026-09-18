@@ -249,6 +249,10 @@ struct SettingsView: View {
         }
 
         Section("sync") {
+            NavigationLink(value: SettingsDestination.page(.playlistSync, nil)) {
+                Label("playlist_sync_title", systemImage: "arrow.triangle.2.circlepath")
+            }
+
             NavigationLink(value: SettingsDestination.page(.cloud, nil)) {
                 Label("icloud_sync_title", systemImage: "icloud")
             }
@@ -372,6 +376,7 @@ private struct SettingsPageContent: View {
         case .libraryDisplay: LibraryDisplaySettingsView()
         case .cloud: CloudSyncSettingsView()
         case .family: FamilySharingSettingsView()
+        case .playlistSync: PlaylistSyncSettingsView()
         case .appleTV, .about: EmptyView()
         case .relay: RelaySettingsView()
         case .dlna: DLNARendererSettingsView()

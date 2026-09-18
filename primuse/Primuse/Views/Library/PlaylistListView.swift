@@ -845,13 +845,21 @@ struct PlaylistListView: View {
         }
     }
 
-    private func playPlaylist(_ playlist: Playlist, shuffled: Bool = false) {
+    private func playPlaylist(_ playlist: Playlist, shuffled: Bool = true) {
         let playable = library.songs(forPlaylist: playlist.id).filteredPlayable()
-        let queue = shuffled ? playable.shuffled() : playable
-        guard let first = queue.first else { return }
-        if shuffled { player.shuffleEnabled = true }
-        player.setQueue(queue, startAt: 0)
-        Task { await player.play(song: first) }
+        guard !playable.isEmpty else { return }
+        if shuffled {
+            player.shuffleEnabled = true
+            let startIndex = Int.random(in: 0..<playable.count)
+            let song = playable[startIndex]
+            player.setQueue(playable, startAt: startIndex, isPlaylist: true)
+            Task { await player.play(song: song) }
+        } else {
+            player.shuffleEnabled = false
+            guard let first = playable.first else { return }
+            player.setQueue(playable, startAt: 0, isPlaylist: true)
+            Task { await player.play(song: first) }
+        }
     }
 }
 

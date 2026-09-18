@@ -693,6 +693,7 @@
 "sync" = "同步";
 "services_integrations" = "服务与集成";
 "icloud_sync_title" = "iCloud 同步";
+"playlist_sync_title" = "歌单同步";
 "icloud_sync_enabled" = "启用 iCloud 同步";
 "icloud_sync_footer" = "在使用同一 iCloud 账号的设备之间同步歌单、音乐源、播放历史和设置。源密码与云盘登录态通过 iCloud 钥匙串安全同步。";
 "icloud_sync_status" = "状态";
