@@ -1,0 +1,133 @@
+name: Build Primuse macOS DMG
+
+# First time the PrimuseMac target is ever compiled in this repository: the
+# nested target exists in project.yml (PrimuseMac, sharing all of Primuse/) but
+# CI has only ever built the iOS scheme. Treat the first green run as a
+# discovery run — expect toolchain/deployment-target errors and read the log.
+
+on:
+  push:
+    paths:
+      - "primuse/**"
+      - ".github/workflows/build-mac.yml"
+  workflow_dispatch:
+    inputs:
+      thin_arch:
+        description: "lipo -thin arm64 before signing (smaller DMG, fails if a slice is missing)"
+        required: false
+        default: "0"
+
+jobs:
+  build-mac:
+    name: Build PrimuseMac (Apple Silicon)
+    runs-on: macos-26
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Select Xcode with macOS SDK
+        run: |
+          echo "=== Available Xcodes ==="
+          ls -d /Applications/Xcode*.app || true
+          SELECTED=""
+          for xcode in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            if [ -d "$xcode/Contents/Developer/Platforms/MacOSX.platform" ]; then
+              SELECTED="$xcode"
+              break
+            fi
+          done
+          if [ -n "$SELECTED" ]; then
+            echo "Selecting $SELECTED"
+            sudo xcode-select -s "$SELECTED"
+          fi
+          xcodebuild -version
+          echo "=== Deployment target floor in project.yml ==="
+          grep -A5 "deploymentTarget:" primuse/project.yml || true
+          echo "=== MACOSX_DEPLOYMENT_TARGET resolution ==="
+          grep -rn "MACOSX_DEPLOYMENT_TARGET" primuse/project.yml primuse/Config/*.xcconfig || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        working-directory: primuse
+        run: xcodegen generate
+
+      - name: Verify PrimuseMac scheme exists
+        working-directory: primuse
+        run: |
+          xcodebuild -list -project Primuse.xcodeproj | sed -n '/Schemes:/,$p'
+          xcodebuild -list -project Primuse.xcodeproj -json \
+            | python3 -c "import sys,json; s=json.load(sys.stdin)['project']['schemes']; assert 'PrimuseMac' in s, f'PrimuseMac missing in {s}'; print('scheme OK:', s)"
+
+      - name: Build PrimuseMac (Release, arm64)
+        working-directory: primuse
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Primuse.xcodeproj \
+            -scheme PrimuseMac \
+            -configuration Release \
+            -destination "generic/platform=macOS,arch=arm64" \
+            -derivedDataPath build_derived \
+            CLANG_CXX_LANGUAGE_STANDARD="c++20" \
+            OTHER_CPLUSPLUSFLAGS='$(inherited) -fexperimental-library -D_LIBCPP_ENABLE_EXPERIMENTAL' \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee mac-build.log
+
+      - name: Resolve version for artifact name
+        id: ver
+        working-directory: primuse
+        run: |
+          MV=$(grep -m1 'MARKETING_VERSION:' project.yml | sed -E 's/.*"([^"]+)".*/\1/')
+          CV=$(grep -m1 'CURRENT_PROJECT_VERSION:' project.yml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "marketing=$MV build=$CV"
+          echo "name=Primuse-macos-arm64-${MV}-b${CV}" >> "$GITHUB_OUTPUT"
+
+      - name: Package ad-hoc-signed DMG and ZIP
+        working-directory: primuse
+        env:
+          # Ad-hoc by default: no Apple Developer account is configured for this
+          # fork, and Apple Silicon refuses to exec an entirely unsigned binary.
+          PRIMUSE_MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY != '' && secrets.MAC_SIGN_IDENTITY || '-' }}
+          PRIMUSE_MAC_ENTITLEMENTS: ${{ secrets.MAC_SIGN_IDENTITY != '' && 'Config/PrimuseMac.entitlements' || '' }}
+          PRIMUSE_MAC_PROVISIONING: ""
+          PRIMUSE_MAC_NOTARIZE: "0"
+        run: |
+          chmod +x scripts/package-mac-dmg.sh
+          APP=$(find build_derived/Build/Products -maxdepth 2 -name "Primuse.app" -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "No Primuse.app produced — build failed earlier; see mac-build.log" >&2
+            find build_derived/Build/Products -maxdepth 2 || true
+            exit 1
+          fi
+          echo "Packaging: $APP"
+          if [ "${{ inputs.thin_arch || '0' }}" = "1" ]; then
+            find "$APP/Contents" -type f \( -name 'Primuse' -o -name '*.dylib' \) \
+              -exec lipo -thin arm64 -output {} {} \; 2>/dev/null || true
+          fi
+          ./scripts/package-mac-dmg.sh "$APP" "${{ steps.ver.outputs.name }}"
+          ls -lh "${{ steps.ver.outputs.name }}".*
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.name }}
+          path: |
+            primuse/${{ steps.ver.outputs.name }}.dmg
+            primuse/${{ steps.ver.outputs.name }}.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload build log when the build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: primuse-mac-build-log
+          path: primuse/mac-build.log
+          retention-days: 7
+          if-no-files-found: ignore

@@ -27,7 +27,7 @@
   "build": {
     "appId": "com.halomusic.desktop",
     "productName": "HALO Music",
-    "forceCodeSigning": true,
+    "forceCodeSigning": false,
     "publish": {
       "provider": "github",
       "owner": "zhoujungis",
