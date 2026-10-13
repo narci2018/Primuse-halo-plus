@@ -191,7 +191,7 @@ jobs:
           PRIMUSE_MAC_NOTARIZE: "0"
         run: |
           chmod +x scripts/package-mac-dmg.sh
-          APP=$(find build_derived/Build/Products -maxdepth 2 -name "Primuse.app" -type d | head -1)
+          APP=$(find build_derived/Build/Products -maxdepth 2 -name "Primuse.app" -type d | head -1 || true)
           if [ -z "$APP" ]; then
             echo "No Primuse.app produced — build failed earlier; see mac-build.log" >&2
             find build_derived/Build/Products -maxdepth 2 || true
@@ -199,8 +199,20 @@ jobs:
           fi
           echo "Packaging: $APP"
           if [ "${{ inputs.thin_arch || '0' }}" = "1" ]; then
-            find "$APP/Contents" -type f \( -name 'Primuse' -o -name '*.dylib' \) \
-              -exec lipo -thin arm64 -output {} {} \; 2>/dev/null || true
+            # ARCHS=arm64 already makes everything Xcode compiles arm64-only; the
+            # fat parts are the vendored FFmpeg slices, whose mac frameworks are
+            # universal (arm64 + x86_64). Those binaries live at
+            # <fw>.framework/Versions/A/<fw> — a name glob over "*.dylib" never
+            # reaches them, and the framework's top-level <fw> is a symlink, so
+            # `find -type f` skips it. Name the four frameworks explicitly and
+            # thin before signing, or the DMG ships ~30MB of dead x86_64.
+            for f in libavutil libavcodec libavformat libswresample; do
+              b=$(find "$APP/Contents/Frameworks" -path "*$f.framework/Versions/A/$f" -type f | head -1 || true)
+              [ -n "$b" ] || continue
+              lipo -thin arm64 -output "$b" "$b" && echo "thinned $f -> $(lipo -archs "$b")"
+            done
+            lipo -thin arm64 -output "$APP/Contents/MacOS/Primuse" "$APP/Contents/MacOS/Primuse" 2>/dev/null || true
+            find "$APP/Contents" -type f -name '*.dylib' -exec sh -c 'lipo -thin arm64 -output "$1" "$1" 2>/dev/null || true' _ {} \;
           fi
           ./scripts/package-mac-dmg.sh "$APP" "${{ steps.ver.outputs.name }}"
           ls -lh "${{ steps.ver.outputs.name }}".*
