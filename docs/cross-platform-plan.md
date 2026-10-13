@@ -178,12 +178,13 @@ B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从
    - `package.json` 的 `build.files` 已经把整套网页应用（`index.html`、`major.js`、`styles.css`、`admin/`）打进包体，`win.target` 已是 `["nsis","portable"]`，`forceCodeSigning` 已置 `false`。
    - **`major.js`（3464 行）本身就是一个完整播放器**：`<audio>` 元素 + `currentTime` 拖进度 + 时长/进度更新、走 `/api/music` 的同源代理、LRC 歌词解析与"歌词炫酷效果"切换、封面 CDN 模板。
 1. **播放引擎整段取消**。原计划里"Windows 构建 FFmpeg（libavformat/libavcodec/libswresample）→ PCM → WASAPI 共享模式"是围绕 Tauri 写的。Electron = Chromium，`<audio>` 直接解 mp3/m4a/flac/opus，D4 因此砍掉了 M2 里技术风险最高、也最难验收的一块。同理，`SFBAudioEngine 不可移植` 这条风险在 Windows 路线上不再存在。
-2. **缺口 1 · 播放地址没接完**：网页端只调了 `netease_search`/`netease_audio`/`netease_lyric`/`qq_search`（`grep` 结果），后端其实还有 `qq_audio`/`qq_lyric`/`qq_detail`/`bili_audio` 没用上。QQ 目前能搜不能播，这是 M2 第一件要补的事，纯前端改动。
-3. **缺口 2 · 全平台（D6）**：酷狗/酷我走 meting 线路直连。这些地址多为 `http` 且不带 CORS 头，**渲染进程里直连必然失败**（https 页面的混合内容 + 跨域）。方案是在**主进程**做一层转发：`ipcMain.handle("halo:fetch")`，或更好 —— 用 `protocol.handle()` 注册一个自定义 scheme，让渲染进程仍然打"同源"URL，只在 `major.js` 的 fetch 封装处改一处映射，业务代码不动。主进程不受混合内容与页面 CORS 约束，这就是 D4 里写的"网络请求全部放主进程"。线路清单直接复用 iPhone 侧 `AggregatedSourceStore.swift` 的默认值，两端行为一致，日后可对照。
-4. **缺口 3 · 资料库/歌单：优先复用现网，不在 Windows 上建库**。现网 `/api/sync-playlists` 是在线的，而且该端点自带 `CREATE TABLE IF NOT EXISTS device_playlists`（读过 `functions/api/sync-playlists.js:80`），所以**不需要任何迁移**（这正是当初 migration 0004 不需要加的原因）。首版歌单、收藏走这个接口 = 零 schema 工作，而且能和 iPhone 端共享同一份备份。本地 SQLite/GRDB 那套留给 B3。
+2. **缺口 1 · QQ 能搜不能播，而且不是纯前端问题**：网页端只调了 `netease_search`/`netease_audio`/`netease_lyric`/`qq_search`（`grep` 结果），后端还有 `qq_audio`/`qq_lyric`/`qq_detail`/`bili_audio` 没接上。但**后端对播放类接口强制登录**：`functions/api/music.js:1171-1175` 对这六个 action 一律先 `authenticatedUsername()`，取不到就 401 `{"error":"请先登录后播放"}`，而会话令牌来自 cookie + `music_sessions` 表（`functions/api/_auth.js:77-89`）。线上实测印证：`?action=netease_audio&id=17899` → 401。搜索类不需要登录，所以 QQ 搜索一直是通的。
+   ⇒ Windows 端要么把网页 SPA 的登录流程一起带上（`electron/` 加载的就是这套 SPA，登录本来就在同一域名下完成，成本很低），要么 QQ 就只能搜不能播。**这一条推翻了"参考 iPhone 直接访问就行"的直觉** —— iPhone 端根本不接 HALO 后端做播放（见 §12 事实 2）。
+3. **缺口 2 · 全平台（D6）今天做不到，差在酷狗/酷我**：酷狗/酷我走 meting 线路直连，这些地址多为 `http` 且不带 CORS 头，**渲染进程里直连必然失败**（https 页面的混合内容 + 跨域）。方案不变：在**主进程**转发 —— `protocol.handle()` 注册自定义 scheme 让渲染进程仍打"同源"URL，或 `ipcMain.handle("halo:fetch")`，业务代码只改一处 fetch 封装。但**先决条件是线路本身能取到流**，而 §12 的体检结论是：网易两条线路可用，酷狗只有搜索、取流 401/超时，酷我与 QQ 的客户端线路今天全灭。所以 D6 要落地，必须二选一：**(a) 再找能用的酷狗/酷我线路**（体检脚本可直接拿来验），或 **(b) 部署 `cf-sync-server`/重新部署主站，把音源收敛到服务端**。
+4. **缺口 3 · 歌单同步：目前没有任何在线端点可复用**。`halo-music.pages.dev/api/sync-playlists` 回落 SPA HTML（未部署），而 iPhone 实际指向的 `https://primuse-sync-server.pages.dev` **完全不可达**（curl http 000）—— 详见 §12 事实 3。好消息是它的源码就在仓库里：`cf-sync-server/`（`name = "primuse-sync-server"`，绑定**同一个 D1** `halo-music-db`），部署它是独立的小动作、不动主站，而且端点自带 `CREATE TABLE IF NOT EXISTS device_playlists`（`functions/api/sync-playlists.js:80`），**不需要任何迁移**。在此之前，Windows 首版的歌单/收藏只能存本地（`app.getPath("userData")` 下的 JSON），三端一致等这个端点上线。
 5. **缺口 4 · 自动更新指向了错误的仓库**（必须修，否则打包版每次启动都在报错）：`build.publish` 写的是 `owner: "zhoujungis", repo: "halo_music"`，那是上游仓库、也是 `/api/version` 指向的 Android APK 发布地（§10），而本仓库是 `narci2018/Primuse-halo-plus`。改成实际发布仓库，或在首版把 `checkForUpdates()` 关掉。
 6. **UI 范围**（都是 Electron 的常规桌面活儿，一天量级）：四平台搜索标签 / 正在播放 / 歌词 / 歌单 / 设置（后端地址、设备名、线路开关与优先级）；关闭窗口最小化到托盘、`globalShortcut` 媒体键、任务栏 `thumbarButtons`、`MediaSession` 已有的元数据回填。
-7. **验收即"完成"**：Win11 双击 NSIS 安装 → 网易/QQ/酷狗/酷我四个平台都能出结果 → 点击能出声、能拖进度 → 歌词跟唱 → 新建歌单后在 iPhone 版能看到同一份 → 重启记住上次队列与音量 → SmartScreen"未知发布者"放行步骤写进 README 并实测一次。
+7. **验收即"完成"**：Win11 双击 NSIS 安装 → 网易必定能搜能播能看词（已实测线路可用）；QQ 在登录后能播；酷狗/酷我按 §12 结论单列，**能播才算完成，只有搜索结果不算** → 点击能出声、能拖进度 → 歌词跟唱 → 新建歌单在同步端点上线后能在 iPhone 版看到同一份 → 重启记住上次队列与音量 → SmartScreen"未知发布者"放行步骤写进 README 并实测一次。
 8. **明确不做**：本地文件扫描、SMB/NAS/SFTP/WebDAV、CUE、scrobble、无损直连（meting 给的通常是 128/320 kbps mp3，别承诺 Hi-Res）、以及任何需要重新部署后端才能成立的事。
 9. **工作量口径修正**：原估 2–3 人·月是按 Tauri + FFmpeg + WASAPI + 自绘 UI 算的；在 Chromium 播放 + 现网 `/api/music` + 3464 行现成播放器这三个前提下，M2 实际是 **2–3 周**。
 
@@ -358,3 +359,75 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 **仍未验证（必须真机）**：这个包在 M 系列 Mac 上能否双击启动、Gatekeeper 是"仍要打开"一次到位还是需要在「隐私与安全性」里点"允许"；CloudKit 同步与小组件在剥掉 entitlements 后是否只是静默不可用（脚本注释如此假设，但没有实测）。artifact 需要登录才能下载，匿名 GET 返回 401，所以本机无法自证。
 
 **下一轮构建要顺带确认的小改动**：`thin_arch` 之前是无效的（FFmpeg 的二进制在 `Versions/A/` 下，而框架顶层入口是符号链接，`find -type f` 根本走不到），现在显式点名四个框架并排在签名之前；默认仍为关闭，所以线上产物暂时还是 arm64+x86_64 通用包。
+
+---
+
+## 12. M2 前置事实核查：现网到底能给 Windows 什么（2026-10-13，全部只读 GET）
+
+写 M2 的时候我按"现网 `/api/music` + 客户端直连 meting"落笔，随后逐条探测发现其中两条站不住。下面的每条都能用 `curl` 或 `node scripts/probe-aggregated-lines.mjs 晴天` 复现。
+
+### 事实 1 · 后端的播放类接口需要登录
+
+`functions/api/music.js:1171-1175`：`qq_detail`/`qq_audio`/`qq_lyric`/`bili_audio`/`netease_detail`/`netease_audio`/`netease_lyric` 这六个 action 一律先 `authenticatedUsername()`，取不到就返回 401。会话来自 cookie 里的令牌查 `music_sessions` 表（`functions/api/_auth.js:77-89`），**搜索类 action 不需要登录**。
+
+线上印证（同一时刻）：
+
+```
+?action=qq_search&q=晴天      → 200，两条结果，album/cover/albumMid/duration 全有
+?action=qq_audio&id=0039MnYb0qxYhV    → {"error":"请先登录后播放"}
+?action=netease_audio&id=17899        → {"error":"请先登录后播放"}
+```
+
+结论：Windows 端要播网易/QQ，**必须带登录**。`electron/main.cjs` 加载的正是那套自带登录流程的 SPA，所以这不是额外工作，但它推翻了"参考 iPhone 直接访问即可，不用管账号"的直觉 —— 见事实 2。
+
+### 事实 2 · iPhone 端根本不接 HALO 后端
+
+`grep -rn "halo-music|pages.dev|api/music?action" primuse/Primuse primuse/PrimuseKit` 的全部命中只有一条：`PlaylistSyncService.swift:9` 的 `https://primuse-sync-server.pages.dev/api/sync-playlists`。也就是说 iPhone 的搜索/播放/歌词**全部来自客户端直连的聚合线路**，HALO 主站只在歌单同步时被碰、而且碰的还是另一个项目。
+
+所以"跟 iPhone 一样直接访问"在工程上的真实含义是：**照抄 `AggregatedSourceStore.defaultSources` 那 9 条线路**，而不是访问 `halo-music.pages.dev`。这两件事在我的 M2 草案里被混为一谈，现在分开。
+
+### 事实 3 · 目前没有任何在线的歌单同步端点
+
+- `https://primuse-sync-server.pages.dev/api/sync-playlists` → curl **http 000**（连不上，未部署或已删）
+- `https://halo-music.pages.dev/api/sync-playlists` → 回落 SPA HTML（该实例没部署这个函数）
+- `https://halo-music.pages.dev/api/version` → 200 `{"version":"2.0.0", android → zhoujungis/halo_music 的 APK}`，说明主站的 Functions 只上了 `/api/music`、`/api/version` 这一批，比当前工作树旧
+
+仓库里 `cf-sync-server/` 就是那个同步服务器的源码（`wrangler.toml` 的 `name = "primuse-sync-server"`，且 `[[d1_databases]]` 绑的是**同一个 D1** `halo-music-db`）。部署它是独立的小动作、不需要动主站，端点自己会 `CREATE TABLE IF NOT EXISTS device_playlists`（`functions/api/sync-playlists.js:80`），无需迁移。**在三端共享歌单这件事上，这是性价比最高的一步，但它需要你执行部署（或授权我用 `wrangler` 部署）。**
+
+### 事实 4 · 九条聚合线路的体检结果（`scripts/probe-aggregated-lines.mjs`）
+
+脚本逐条复刻 Swift 的搜索/取流/歌词三种请求形状（包括 `.hyw`、`.nxinxz` 两个分支**无视配置里的 baseURL、硬编码打别的域名**这个已知毛病），取流一律用 `Range: bytes=0-4096` 证明"真的能出声音"，而不是只看接口回没回 200。
+
+| 线路 | 平台 | 协议 | 搜索 | 取流 | 歌词 |
+|---|---|---|---|---|---|
+| default-netease-meting-1 | 网易 | meting(qijieya) | 20 条 | **AUDIO `audio/mpeg`** | LRC 970B |
+| default-netease-gdstudio | 网易 | meting(gdstudio) | 20 条 | **URL→AUDIO `audio/mpeg`** | LRC 1063B |
+| default-kugou-hyw | 酷狗 | hyw(硬编码 qijieya 搜 / 103.79 取流) | 20 条 | **401，重试超时** | 400/超时 |
+| default-qq-hyw | QQ | hyw | `[]` | — | — |
+| default-qq-meting-1 | QQ | meting(qijieya) | `[]` | — | — |
+| default-qq-openapi-1 | QQ | openApi(s01s) | 第一轮返回 20 条但字段形状对不上解析，第二轮 `[]` | — | — |
+| default-netease-meting-3e0 | 网易 | meting(3e0) | `{"error":"unknown type"}` | — | — |
+| default-kuwo-nxinxz | 酷我 | nxinxz(硬编码 gdstudio) | `{"detail":"Value of source is not supported"}` 400 | — | — |
+| default-kuwo-hyw | 酷我 | hyw(同上) | 同上 400 | — | — |
+
+**小结：搜索可用 3/9，取流可用 2/9（都是网易），歌词可用 2/9。** 另外 gdstudio 在同一次会话里出现过 200 与 503 交替，脚本因此对 5xx/超时做了一次重试 —— 这些公共线路本身就是抖动的，`§6` 那条"公共解析接口不稳定"的风险不是假设，是今天的实测。
+
+### 这对 D6 意味着什么（需要你拍板的取舍）
+
+"全平台：网易 + QQ + 酷狗 + 酷我"这个目标，按今天的外部线路状态**做不到纯客户端直连**：
+
+- **网易**：客户端直连即可播（两条线路都验证通过），不需要后端、不需要登录。
+- **QQ**：客户端线路全灭；能播的只有后端 `/api/music` 的 `qq_audio`，而它**要登录**。
+- **酷狗**：qijieya 能搜到 20 条，取流 401/超时 —— 半条线路，要么另找 meting 部署，要么放弃。
+- **酷我**：两条依赖的域名都已不支持 `source=kuwo`，客户端侧今天无解。
+
+三条出路，代价各不相同：
+1. **接受首版 = 网易 + QQ(登录) + 酷狗(仅搜索)**，酷我后置。不动后端，最快出包。
+2. **部署 `cf-sync-server` + 重新部署主站**，把酷狗/酷我的线路写进 `functions/api/music.js`，全平台由服务端供给。这需要你做一次部署，但线路失效不再需要客户端发版（也就是原来 D6 想避开的"下沉后端"）。
+3. **我自己找并验证新的第三方线路**（用同一个脚本跑候选域名），能把酷狗/酷我补齐就走 1，且不改后端。
+
+我倾向 **1 + 3 并行**：先按 1 把 Windows 包做出来（网易立刻能播是最小可用闭环），同时用脚本筛新线路，找到就把酷狗/酷我补上；2 留作你哪天愿意重新部署主站时的正式解法。
+
+### 另外：假时长 210 的来源不止一处
+
+`primuse/Primuse/Services/AggregatedMusic/AggregatedMusicService.swift:233` 在解析 meting 搜索结果时写死 `duration: 210 // Meting search often omits duration; defaults to 3.5m`。这与 `_subsonic.js` 里的 `Number(track.duration) || 210` 是同一类假值，而前者影响的是 **iPhone 端自己**。所以 D7 说"真正要修的只剩 `_subsonic.js`"不准确 —— 至少两处，且客户端侧那处同样会让进度条与播放统计失真。修法也一样：宁可回 `0`/未知，让 UI 显示"未知时长"，也不要编一个 210。
