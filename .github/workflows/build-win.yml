@@ -151,3 +151,4 @@ jobs:
 
             两个 exe 都没有代码签名证书（`forceCodeSigning: false`）。首次运行 SmartScreen 会拦：点「更多信息」→「仍要运行」；
             被 Defender 的「未知发布者」提示吓到属正常，不是捆绑了别的东西。
+            选型（Setup vs Portable）、放行步骤与已知边界见仓库 `docs/windows-install-unsigned.md`。

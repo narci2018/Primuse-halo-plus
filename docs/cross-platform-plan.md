@@ -534,6 +534,19 @@ Usage: File [/nonfatal] [/a] (...)
 
 从此推 `v*` tag 一条 Release 上会有：`Primuse-unsigned.ipa` + `Primuse-macos-arm64-*.dmg/.zip` + `HALO-Music-Setup-*.exe` + `HALO-Music-Portable-*.exe` + `latest.yml`，全部匿名可下载。
 
+### 本机真机验证（这台机器就是 Windows 11 build 26200，所以 Windows 这一端不必只靠 CI）
+
+不是"能编译"就算数，我把打出来的包真的跑了一次：
+
+- `release\win-unpacked\HALO Music.exe` 启动后进程组存活，**窗口标题变成「Halo音乐」**。标题来自页面本身，等于证明 `loadURL("https://halo-music.pages.dev")` 真把 SPA 载进来了，不是空壳白屏。
+- `Get-AuthenticodeSignature` 三个产物都是 `NotSigned`（预期，D3）；`FileVersion` / `ProductVersion` 都是发版号，说明 `--config.extraMetadata.version` 真的写进了 PE 版本资源。
+- `@electron/asar` 列包体：313 条，`\electron\{main,preload}.cjs`、`\index.html`、`\major.js`、`\styles.css`、`\admin\index.html` 与 `electron-updater` 都在里面。（顺带一个方法论教训：先用"在 asar 字节里搜 `admin/index.html`"判定缺文件，得到**假阴性** —— asar 的头把目录与文件名分开存，必须用 asar 库列目录。）
+- **旧配置的自动更新是活的、而且指向别人**：修复前那次启动的日志里明确写着
+  `Checking for update` → `Error: Cannot find latest.yml in the latest release artifacts (https://github.com/zhoujungis/halo_music/releases/download/v2.0.0/latest.yml): 404`。
+  改完 `build.publish` 重新打包后，同一句 `Checking for update` 不再报错。这条不是理论风险，是已经发生的网络行为。
+
+CI 侧（tag `v1.9.8`）：`Build Win11 x64 (nsis + portable)` 首次运行 **133 秒全绿**，10 个步骤无一失败，Release 页上匿名可读到 3 个 asset（`HALO-Music-Setup-1.9.8-x64.exe` 88.1MB、`HALO-Music-Portable-1.9.8-x64.exe` 87.9MB、`latest.yml`）。`api.github.com` 匿名 200 验证了这一点；本机 `curl` 取 `browser_download_url` 返回 `http=000`，但同一时刻 `github.com` 与 `raw.githubusercontent.com` 也是 000 而 `api.github.com` 是 200 —— 这是这台机器的 shell 没走系统代理（装了 ProxyBridge / sing-box），不是 GitHub 的权限问题：同一台机器上的 Electron 应用走系统代理，刚才就成功查到了更新。
+
 ### 这个包现在能播什么（重要，别当成 M2 完成了）
 
 首版 Windows 包 = **原样的 `electron/main.cjs`**，即 `loadURL("https://halo-music.pages.dev")` 加载线上 SPA（地址可用 `--url=` 或环境变量 `HALO_MUSIC_URL` 覆盖，`main.cjs:5-13`）。它等价于"用 Chromium 打开 HALO 网页版"，所以：
