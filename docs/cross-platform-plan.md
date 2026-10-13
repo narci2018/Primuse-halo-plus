@@ -210,6 +210,7 @@ B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从
 - **聚合平台取舍**：后端目前只有网易 + QQ（QQ 失效时从 bilibili 补位）。是否把酷狗/酷我线路也下沉到后端？不做则 Windows 首版没有它们。
 - **后端域名与实例**：HALO 是否已部署在你控制的 Cloudflare 账号下（仓库里 D1 `database_id` 写死）？Windows 客户端要指向一个稳定地址。
 - **壳选型**：Tauri（Rust，包体小）还是复用现成 `electron/`（Node，起步最快，`--win nsis/portable` 已配好）。
+- **QQ 搜索的源优先级**（§10 缺陷 3）：官方源字段全但慢，第三方代理快却没有专辑/封面/时长。选 A（官方优先，接受延迟）/ B（赛跑后异步补全）/ C（继续兜默认值，不推荐）。这决定 Windows 与 macOS 端"能不能显示专辑、进度条准不准"，是首屏观感问题，不是可选打磨。
 
 ## 8. 开工后的第一周
 
@@ -256,8 +257,12 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 2. **P1（部分已修）**：`getCoverArt` 对不在资料库里的 `qq_*` id 曾返回 302 → `y.gtimg.cn` **404**。根因是它把**歌曲 mid** 塞进了需要**专辑 mid** 的封面模板 `T002R300x300M000{albumMid}.jpg`，这个拼接值永远无效。
    已改：有 `albumMid` 时才发 302，否则返回占位图（200 image/svg+xml），不再把客户端指向必然 404 的地址 —— 已实测（`qq_001Bbywq2gicae`：修复前 302→404，修复后 200 占位图；库内曲目 `cov_netease-4878606`：仍是 302 → 跟随后 200 `image/jpg` 244KB，未被破坏）。
    残留：搜索结果里 `coverArt` 仍为 undefined、`album` 为占位值，因为 provider 载荷没有 `albumMid`（见下条根因）。要彻底解决需通过 QQ 歌曲详情接口补全。
-3. **P1（待修，根因已定位）**：`duration` 恒为 210、`cover`/`album` 为空。读本地 `search_cache` 得到实证：`{"mid":"001IazE54bpTz7","album":"","cover":"","albumMid":"","duration":0}` —— `QQ_SOURCE_URLS` 里的第三方 provider 返回的载荷根本不含专辑名/封面/时长，`normalizeQQProxy/Official/Legacy` 只能映射成空串和 0，`_subsonic.js:326` 的 `Number(track.duration) || 210` 再把它变成假 210。
-   正确修法：在 `functions/api/music.js` 用 QQ 歌曲详情接口对结果补全 `albumMid`/`interval`，而不是在下游继续兜默认值（进度条与听歌统计都会失真）。
+3. **P1（根因已定位，修法需你拍板）**：`duration` 恒为 210、`cover`/`album` 为空。读本地 `search_cache` 得到实证：`{"mid":"001IazE54bpTz7","album":"","cover":"","albumMid":"","duration":0}`。
+   进一步读代码把原因缩到一处：`searchQQ` 用 `fastestSearch`（`functions/api/music.js:379`，内部是 `Promise.any`）在 `qq-official-musicu`、`qq-official-legacy` 和 N 条 `QQ_SOURCE_URLS` 代理之间赛跑，**谁先返回非空列表谁就赢，并且整份结果直接进 `search_cache`**。官方分支的 `normalizeQQOfficial` 明明读了 `song.album.mid` 与 `song.interval`（`functions/api/music.js:277/286`），代理分支的 `normalizeQQProxy` 也已经兼容 `album_mid/albummid/song_play_time` 等别名（`:322/324`）—— 所以这不是字段映射漏了，而是**第三方代理响应更快，赢了赛跑，而它的载荷根本不带专辑/封面/时长**。
+   三个候选修法（都会改变线上搜索接口的延迟特征，因此不擅自改）：
+   - A. 让官方源优先：给官方分支一个短窗口（例如先等 400ms 的官方结果，超时才接受代理结果）。字段最全，代价是搜索 P95 延迟上升，且官方 fcg 被风控时整体退化。
+   - B. 保持赛跑，但对赢家的前 N 条做异步补全（QQ 歌曲详情接口），补全结果二次写缓存。延迟不变，多一轮上游调用与缓存版本管理。
+   - C. 只在下游兜底（现在的 `Number(track.duration) || 210`）。**不推荐**：进度条与听歌统计都会失真，且封面永远拿不到。
 4. **P2**：搜索结果 `album` 为占位值（"QQ音乐"），按专辑浏览语义弱。
 5. **P2**：经典 `getLyrics`（artist+title）返回空 `value`，只有 `getLyricsBySongId` 有效；Primuse 走后者，暂不阻塞。
 6. **部署事实**：`https://halo-music.pages.dev` 的 `/rest/*` 回落到 SPA HTML，而 `/api/version` 正常返回 2.0.0 并指向 `zhoujungis/halo_music` 的 Android APK 发布 —— 该线上实例**不是用当前工作树部署的**。B1 落地必须先有一个由本仓库部署的 Pages 实例。
