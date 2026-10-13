@@ -66,12 +66,20 @@ jobs:
         working-directory: primuse
         run: |
           set -o pipefail
+          # "generic/platform=macOS,arch=arm64" is rejected outright:
+          # xcodebuild exits 70 with "Unable to find a device matching the
+          # provided destination specifier" because a generic destination must
+          # not carry an arch. Pin arm64 through the ARCHS build setting
+          # instead, which is also what keeps the DMG Apple-Silicon-only.
           xcodebuild build \
             -project Primuse.xcodeproj \
             -scheme PrimuseMac \
             -configuration Release \
-            -destination "generic/platform=macOS,arch=arm64" \
+            -destination "generic/platform=macOS" \
+            -sdk macosx \
             -derivedDataPath build_derived \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
             CLANG_CXX_LANGUAGE_STANDARD="c++20" \
             OTHER_CPLUSPLUSFLAGS='$(inherited) -fexperimental-library -D_LIBCPP_ENABLE_EXPERIMENTAL' \
             CODE_SIGNING_REQUIRED=NO \
@@ -94,11 +102,17 @@ jobs:
           # Every grep below can legitimately find nothing; Actions runs bash with
           # -e -o pipefail, so an unmatched grep would abort the step before the
           # summary is written. Hence the explicit "|| true".
+          # -A4 because xcodebuild puts the useful part (the list of valid
+          # destinations, the failing command, the file/line) *under* the line
+          # that matches "error:".
+          EXTRACT() {
+            grep -E -A4 "error:|fatal error|The following build commands failed|^Command .* failed" "$LOG" \
+              | sed -E 's|/Users/runner/work/[^ ]*/||' | head -120 || true
+          }
           {
-            echo "## Build log tail"
+            echo "## Build log errors"
             echo '```'
-            grep -E "error:|fatal error|The following build commands failed|^Command .* failed" "$LOG" \
-              | sed -E 's|/Users/runner/work/[^ ]*/||' | sort -u | head -40 || true
+            EXTRACT
             echo '```'
             echo
             echo "<details><summary>last 60 lines</summary>"
@@ -108,10 +122,10 @@ jobs:
             echo '```'
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
-          grep -E "error:" "$LOG" | sed -E 's|/Users/runner/work/[^ ]*/||' | sort -u | head -20 \
-            | while IFS= read -r line; do
-                printf '::error::%s\n' "$(printf '%.2000s' "$line")"
-              done || true
+          EXTRACT | head -40 | while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf '::error::%s\n' "$(printf '%.2000s' "$line")"
+          done || true
           exit 1
 
       - name: Resolve version for artifact name
