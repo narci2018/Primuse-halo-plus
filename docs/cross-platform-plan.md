@@ -4,6 +4,7 @@
 
 > 已确认：Windows 走 **B1 薄壳 + 服务端复用**；Windows 音源范围为 **在线聚合 + 服务器型源**；分发 **先出未签名包**（Apple Silicon 侧用 ad-hoc 签名，见 §5 M4）。
 > 同日追加 D4–D7（见 §7）：壳 = **复用现成 `electron/`**；后端 = **沿用已部署的 `halo-music.pages.dev`，不重新部署**，接入口从 `/rest` 改为 `/api/music`；首版音源 = **全平台（网易+QQ+酷狗+酷我）**，酷狗/酷我由客户端主进程直连 meting；QQ 搜索字段 = **维持现状**。§3、§4、§5 M0.5/M2、§6、§9 均已按此修订。
+> **§12–§13 是对上面两段的实测纠正**：HALO 现网只有 `/api/music`+`/api/version`，播放类接口要登录；9 条公开聚合线路今天只有网易能出声。**M2 的主路径已改为「道理鱼（DaoLiYu）薄壳」**（见 §13），因为 iPhone 的四平台播放来自一台地址由用户自填、带账号的服务器，而不是这些公开线路。
 
 ---
 
@@ -431,3 +432,33 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 ### 另外：假时长 210 的来源不止一处
 
 `primuse/Primuse/Services/AggregatedMusic/AggregatedMusicService.swift:233` 在解析 meting 搜索结果时写死 `duration: 210 // Meting search often omits duration; defaults to 3.5m`。这与 `_subsonic.js` 里的 `Number(track.duration) || 210` 是同一类假值，而前者影响的是 **iPhone 端自己**。所以 D7 说"真正要修的只剩 `_subsonic.js`"不准确 —— 至少两处，且客户端侧那处同样会让进度条与播放统计失真。修法也一样：宁可回 `0`/未知，让 UI 显示"未知时长"，也不要编一个 210。
+
+---
+
+## 13. 我把"iPhone 用的服务器"认错了一处（同日，用户指出 iPhone 版四个平台全都能播之后）
+
+我的 §12 线路体检打的是 `AggregatedSourceStore.defaultSources` 那 9 条**公开第三方线路**（聚合直连这条支路）。把"它们今天不行"写成"全平台做不到"，超出了证据能支撑的范围 —— 因为你手机上的播放很可能根本不走这 9 条。回代码核对，应用里另有一条完整的**服务器型源**：
+
+### 道理鱼（DaoLiYu）：地址由用户填、带账号、服务端已把多平台解决
+
+`Primuse/Services/Sources/DaoLiYuSource.swift` + `PrimuseKit/Sources/PrimuseKit/Streaming/DaoLiYu{APIProtocol,ServiceClient,StreamResolver}.swift`：
+
+- 配置项是 `host` / `port` / `useSSL` / `basePath` / `username` / `password`（`DaoLiYuSource.swift:17-26`）—— **地址不写死在代码里，是用户在设置里填的**，所以我从仓库里查不到你部署的是哪一台。
+- 登录 `/api/auth/login`，此后所有请求带 **Bearer token**（`DaoLiYuServiceClient.swift:524`）。
+- 数据面：`/api/tracks/{id}`、`/api/tracks/{id}/download`（`:352/:386/:427`）、封面 `/cover`，歌词一次给两种形态 —— `lyricsSync`（同步）与 `lyrics`（纯文本）（`:132-133`）。协议注释写明"曲目使用不含服务器文件路径的合成引用，播放时始终回到 `/api/tracks/{id}/download` 并附带 Bearer token"。
+
+这是一套"服务器负责音源、客户端只管拉流"的架构，和你说的"用跟 iPhone 一样的服务器、我已经部署好了"完全对得上。你说"全部没问题"，原因大概就在这里：**全平台是服务器给的，不是那 9 条公开线路给的。**
+
+### 同时更新两条仍然成立的实测事实（它们只约束聚合直连这条支路）
+
+- `103.79.184.97`（QQ/酷狗/酷我 三条 `.hyw` 线路的取流主机）今天返回 `{"code":401,"message":"需要卡密才能访问，请在请求中携带 key 参数"}`，而 `.hyw` 的请求构造里根本没有 `key`（`AggregatedMusicService.swift:344-346`）。**即这三条默认线路对当前客户端是死的**，无论你在哪个网络 —— 这是代码层面的结论，不是网络差异。
+- `halo-music.pages.dev` 上 `/rest/*` 与 `/api/sync-playlists` 回落 SPA HTML，`primuse-sync-server.pages.dev` 连不上。它们只说明 HALO 那两个端点没上线，**不能**用来推断你没有可用服务器。
+
+### 对 M2 的影响：换主路径
+
+1. Windows 首版应当做成**道理鱼薄壳**：一个地址 + 一个账号覆盖全平台，线路失效由服务器侧修，不用客户端发版 —— 这才是 D6「全平台」的落地方式，而且已经在 iPhone 上验证过。
+2. 协议面很小（login / tracks / download / cover / lyricsSync），Electron 主进程实现比兼容 9 条第三方线路容易得多。
+3. HALO 的 `/api/music` 与聚合线路降级为"没有自建服务器时的补充来源"，不再是主路径；§5 M2 里的缺口 1（QQ 播放要登录）在道理鱼路线下自然消失（本来就是登录态的服务器）。
+4. 这条路线与 `§6` 的"服务器型源"同源：道理鱼打通后，Subsonic/Navidrome/Jellyfin 这些同形态服务器可以顺势加。
+
+**需要你给一件事**：iPhone 设置里那条服务器的**地址（host / 端口 / 是否 https）和类型**，以及它是否允许公网访问。有了地址我就用 `curl` 把 `login` / 列表 / `download` 的响应结构实测一遍，Windows 端数据层按实测契约写，而不是照抄 Swift 的猜测。
