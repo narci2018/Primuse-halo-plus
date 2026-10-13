@@ -79,6 +79,41 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             2>&1 | tee mac-build.log
 
+      - name: Surface build errors as annotations + summary
+        if: failure()
+        working-directory: primuse
+        run: |
+          # Artifacts and raw logs need an authenticated GET, which this repo's
+          # CI helper cannot do here. Check-run annotations and the job summary
+          # are readable anonymously on a public repo, so mirror the first
+          # compiler errors into both. Capped because each annotation is a
+          # separate row on the run page.
+          LOG=mac-build.log
+          [ -f "$LOG" ] || { echo "::error::no mac-build.log produced"; exit 0; }
+          echo "=== log size: $(wc -c < "$LOG") bytes, $(wc -l < "$LOG") lines ==="
+          # Every grep below can legitimately find nothing; Actions runs bash with
+          # -e -o pipefail, so an unmatched grep would abort the step before the
+          # summary is written. Hence the explicit "|| true".
+          {
+            echo "## Build log tail"
+            echo '```'
+            grep -E "error:|fatal error|The following build commands failed|^Command .* failed" "$LOG" \
+              | sed -E 's|/Users/runner/work/[^ ]*/||' | sort -u | head -40 || true
+            echo '```'
+            echo
+            echo "<details><summary>last 60 lines</summary>"
+            echo
+            echo '```'
+            tail -60 "$LOG"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E "error:" "$LOG" | sed -E 's|/Users/runner/work/[^ ]*/||' | sort -u | head -20 \
+            | while IFS= read -r line; do
+                printf '::error::%s\n' "$(printf '%.2000s' "$line")"
+              done || true
+          exit 1
+
       - name: Resolve version for artifact name
         id: ver
         working-directory: primuse
