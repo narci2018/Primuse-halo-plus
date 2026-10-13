@@ -1049,7 +1049,10 @@ document.addEventListener('click', async (event) => {
 
   // ── 弹层内动作 ───────────────────────
   if (d.sheetCreate) {
-    openSheet({ kind: 'create', backTo: 'add' });
+    const s = state.sheet;
+    // AddToPlaylistSheet（NowPlayingView.swift:4523-4756）的"新建歌单"是从弹层里起的：
+    // 建完要把刚才那首歌直接放进新歌单，并且人还留在弹层里 —— 所以 track 必须带过来。
+    openSheet({ kind: 'create', backTo: 'add', track: s && s.kind === 'add' ? s.track : null });
     return;
   }
   if (d.sheetToggle) {
@@ -1517,7 +1520,7 @@ document.addEventListener('submit', async (event) => {
       await reloadPlaylists();
       if (s.backTo === 'add' && s.track) {
         // 新建完立刻把刚才那首加进去（iPhone 的 alert 关闭后仍在 sheet 里）
-        const added = await api.playlists.add(res.value.id, s.track);
+        const added = await api.playlists.addSong(res.value.id, s.track);
         if (!playlistError(added)) await reloadPlaylists();
         openSheet({ kind: 'add', track: s.track });
       } else {
@@ -1722,12 +1725,33 @@ function hasButton(scope, text) {
 
 let smokePlaylistProbe = null; // { id, was } —— 主进程截图后用 phase:'playlist-cleanup' 收走
 
+// 事件回调都是 async 的，里面的异常会变成 unhandledrejection 被静默吞掉，界面只表现为
+// "点了没反应"。冒烟期间把它们收集起来随报告返回，否则这类 bug 只能靠人肉点界面发现。
+const smokeErrors = [];
+window.addEventListener('unhandledrejection', (event) => {
+  const r = event.reason;
+  smokeErrors.push(String((r && (r.stack || r.message)) || r).split('\n').slice(0, 3).join(' | '));
+});
+
+// 冒烟探针歌单的固定名字。上一次跑到一半失败会把它们留在用户库里，下一次就会撞上
+// "同名歌单已存在"，于是一个真 bug 之后所有复跑都因为残留而红 —— 每段冒烟开头先扫掉。
+const SMOKE_PROBE_NAME = /^冒烟(歌单| UI 歌单|点击歌单|点击新建)/;
+
+async function sweepSmokeProbes() {
+  await reloadPlaylists();
+  const hits = state.playlists.filter((p) => !p.isSystem && SMOKE_PROBE_NAME.test(p.name));
+  for (const p of hits) await api.playlists.remove(p.id);
+  if (hits.length) await reloadPlaylists();
+  return hits.map((p) => p.name);
+}
+
 async function smokePlaylistUI() {
   // 这一段只看 DOM：证明歌单"点得到、看得见"，而不是"代码里写了"。
   // 探针歌单先留着，让主进程截一张歌单页的图；随后由 playlist-cleanup 段删除。
   const probeA = { kind: 'aggregated', platform: 'netease', rawID: 'smoke-ui-a', title: '冒烟 UI 探针 A', artist: '探针', duration: 200 };
   const probeB = { kind: 'aggregated', platform: 'qq', rawID: 'smoke-ui-b', title: '冒烟 UI 探针 B', artist: '探针', duration: 180 };
   const was = { route: state.route, playlistView: state.playlistView };
+  await sweepSmokeProbes();
   const created = await api.playlists.create('冒烟 UI 歌单');
   const id = created.ok ? created.value.id : LIKED_PLAYLIST_ID;
   if (created.ok) {
@@ -1807,8 +1831,111 @@ async function smokePlaylistCleanup() {
   return { removed: Boolean(res && res.ok), stillThere: state.playlists.some((p) => p.id === id), left: state.playlists.filter((p) => !p.isSystem).length };
 }
 
-/* ── 启动 ─────────────────────────────── */
+async function smokePlaylistClicks() {
+  // 真派发 click，而不是直接调内部函数：走的是用户点下去的那条路径
+  // （事件委托 → CLICK_SELECTOR → 各分支 → IPC → 重绘）。
+  // 这一段覆盖"＋歌单 / 新建并立即加入 / 再点取消 / 手动调序 / 移除 / 删除歌单"。
+  const click = (el) => {
+    if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    return Boolean(el);
+  };
+  const settle = (ms = 220) => new Promise((r) => setTimeout(r, ms));
+  const probeA = { kind: 'aggregated', platform: 'netease', rawID: 'smoke-click-a', title: '点击探针 A', artist: '探针', duration: 200 };
+  const probeB = { kind: 'aggregated', platform: 'qq', rawID: 'smoke-click-b', title: '点击探针 B', artist: '探针', duration: 180 };
+  const out = {};
+  await sweepSmokeProbes();
+  const created = await api.playlists.create('冒烟点击歌单');
+  if (!created.ok) return { ok: false, error: created.error };
+  const p1 = created.value.id;
+  await api.playlists.addSong(p1, probeA);
+  await api.playlists.addSong(p1, probeB);
+  await reloadPlaylists();
+  let p2 = null;
+  try {
+    await openPlaylist(p1);
+    click(document.querySelector('#detail [data-add-to-playlist="currentPlaylist:0"]'));
+    await settle();
+    out.addSheetOpened = !$('sheet').hidden && $('sheet-title').textContent === '添加到歌单';
 
+    click(document.querySelector('#sheet-body [data-sheet-create]'));
+    await settle();
+    out.createFormShown = Boolean($('sheet-name'));
+    const sheetNow = state.sheet || {};
+    out.diag = {
+      kindBeforeCreate: sheetNow.kind,
+      backTo: sheetNow.backTo || null,
+      track: sheetNow.track ? `${sheetNow.track.rawID}` : null,
+    };
+    $('sheet-name').value = '冒烟点击新建';
+    document.getElementById('sheet-form').requestSubmit();
+    await settle(500);
+    const newOne = state.playlists.find((x) => x.name === '冒烟点击新建');
+    p2 = newOne ? newOne.id : null;
+    out.newPlaylistCreated = Boolean(p2);
+    // iPhone 的 alert 关掉后仍在 sheet 里，并且刚才那首已经进去了
+    out.newPlaylistHasTrack = Boolean(newOne && newOne.songs.some((t) => t.rawID === probeA.rawID));
+    out.addSheetReopened = !$('sheet').hidden && $('sheet-title').textContent === '添加到歌单';
+
+    const checkedCount = () => [...document.querySelectorAll('#sheet-body .check')].filter((e) => e.textContent.trim() === '✓').length;
+    const checkedBefore = checkedCount();
+    click(document.querySelector(`#sheet-body [data-sheet-toggle="${p2}"]`));
+    await settle(500);
+    out.retapRemoves = checkedBefore === 2 && checkedCount() === 1;
+
+    click($('sheet')); // 点遮罩关闭
+    await settle();
+    out.sheetClosed = $('sheet').hidden;
+
+    click(document.querySelector('#detail [data-pl-menu]'));
+    await settle();
+    out.menuOpened = Boolean(document.querySelector('#detail .menu-pop'));
+    click(document.querySelector('#detail [data-reorder]'));
+    await settle();
+    out.reorderOpened = $('sheet-title').textContent === '调整播放顺序';
+    const titles = () => [...document.querySelectorAll('#sheet-body .queue-item .t')].map((e) => e.childNodes[0].textContent.trim());
+    const before = titles();
+    click(document.querySelector('#sheet-body [data-move="0:1"]'));
+    await settle();
+    const after = titles();
+    out.rows = [before.join('|'), after.join('|')];
+    out.moved = before.length === 2 && after.length === 2 && before[0] === after[1] && before[1] === after[0];
+    out.hintChanged = /顺序已更改/.test((document.querySelector('#sheet-body .muted') || {}).textContent || '');
+    click(document.querySelector('#sheet-body [data-sheet-done]'));
+    await settle(500);
+    const persisted = await api.playlists.get(p1);
+    out.orderPersisted = persisted.ok && persisted.value.songs.map((t) => t.title).join('|') === after.join('|');
+
+    await openPlaylist(p1);
+    click(document.querySelector('#detail [data-remove-from-playlist="currentPlaylist:1"]'));
+    await settle(500);
+    const afterRemove = await api.playlists.get(p1);
+    out.songRemoved = afterRemove.ok && afterRemove.value.songs.length === 1 && afterRemove.value.songs[0].title === after[0];
+
+    await openPlaylist(p1);
+    click(document.querySelector('#detail [data-pl-menu]'));
+    await settle();
+    out.deletedFromMenu = click(document.querySelector('#detail [data-remove-playlist]'));
+    await settle(500);
+    out.playlistDeleted = !state.playlists.some((x) => x.id === p1) && state.route === 'playlists';
+
+    out.errors = smokeErrors.slice(-6);
+    out.ok = Object.keys(out)
+      .filter((k) => k !== 'ok' && k !== 'rows' && k !== 'diag' && k !== 'errors' && k !== 'swept')
+      .every((k) => out[k] === true);
+    return out;
+  } finally {
+    closeSheet();
+    state.menu = null;
+    if (p2) await api.playlists.remove(p2);
+    await api.playlists.remove(p1); // 删除那一步没走通时也要清干净；已经删过则返回 ok:false，不抛
+    out.swept = await sweepSmokeProbes(); // 兜底：这一段里任何一步失败都不许留残骸
+    state.playlistView = null;
+    state.route = 'home';
+    render();
+  }
+}
+
+/* ── 启动 ─────────────────────────────── */
 api.sources.onLatency(({ id, latencyMs }) => {
   const hit = state.sources.find((s) => s.id === id);
   if (hit) hit.latencyMs = latencyMs;
@@ -1859,6 +1986,10 @@ api.sources.onLatency(({ id, latencyMs }) => {
       }
       if (phase === 'playlist-cleanup') {
         api.smokeReport(await smokePlaylistCleanup());
+        return;
+      }
+      if (phase === 'playlist-clicks') {
+        api.smokeReport(await smokePlaylistClicks());
         return;
       }
       $('search-input').value = keyword;

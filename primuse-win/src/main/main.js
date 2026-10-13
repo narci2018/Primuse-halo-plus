@@ -677,6 +677,19 @@ async function runSmoke() {
       .playlists.some((p) => p.name === '冒烟 UI 歌单');
     step('歌单 UI 探针已清理', Boolean(cleaned.removed) && cleaned.stillThere === false && !stillOnDisk,
       `${JSON.stringify(cleaned)}；落盘残留 ${stillOnDisk}`);
+
+    // 第三段：真派发 click 走一遍用户路径（弹层、新建并立即加入、再点取消、手动调序、移除、删除）。
+    // 前两段只看 DOM；这一段验的是"点下去到底发生了什么"。
+    send('smoke:run', { keyword: '', phase: 'playlist-clicks' });
+    const clicks = (await waitUI(40000)) || { ok: false, note: '渲染层 40s 内未回报点击结果' };
+    store.save(true);
+    const leftovers = JSON.parse(fs2.readFileSync(path.join(app.getPath('userData'), 'primuse.json'), 'utf8'))
+      .playlists.filter((p) => /^冒烟(歌单| UI 歌单|点击歌单|点击新建)/.test(p.name || ''));
+    step(
+      '歌单点击流（＋歌单 / 新建 / 取消包含 / 调序 / 移除 / 删除）',
+      clicks.ok === true && leftovers.length === 0,
+      JSON.stringify(leftovers.length ? { ...clicks, 落盘残留: leftovers.map((p) => p.name) } : clicks)
+    );
   } catch (error) {
     report.errors.push(String(error && error.stack ? error.stack : error));
   }

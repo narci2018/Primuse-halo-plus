@@ -1,6 +1,6 @@
 # Primuse 跨平台方案：Windows 11 + macOS (Apple Silicon)
 
-状态：**决策已确认，可执行** · 起草：2026-10-13 · 最后更新：2026-10-14（§18：Windows 端歌单层与云端歌单同步，v1.9.10） · 适用范围：仓库 `C:\Tools2\halo_music`（Git 根，`primuse/` 为其子目录）
+状态：**决策已确认，可执行** · 起草：2026-10-13 · 最后更新：2026-10-14（§18：Windows 端歌单层与云端歌单同步，v1.9.10；v1.9.11 修掉弹层新建歌单的两处断链） · 适用范围：仓库 `C:\Tools2\halo_music`（Git 根，`primuse/` 为其子目录）
 
 > 已确认：Windows 走 **B1 薄壳 + 服务端复用**；Windows 音源范围为 **在线聚合 + 服务器型源**；分发 **先出未签名包**（Apple Silicon 侧用 ad-hoc 签名，见 §5 M4）。
 > 同日追加 D4–D7（见 §7）：壳 = **复用现成 `electron/`**；后端 = **沿用已部署的 `halo-music.pages.dev`，不重新部署**，接入口从 `/rest` 改为 `/api/music`；首版音源 = **全平台（网易+QQ+酷狗+酷我）**，酷狗/酷我由客户端主进程直连 meting；QQ 搜索字段 = **维持现状**。§3、§4、§5 M0.5/M2、§6、§9 均已按此修订。
@@ -17,6 +17,7 @@
    ~~**修订（D4 + §15）**：首版不重写，直接把现成的 `electron/` 壳打包成 Windows 包。~~ **该修订已作废（D4 是错的，见顶部与 §16）**：`electron/` 是 HALO 网页壳，打开是登录墙，不是 Primuse。
    **最终交付（§17）**：新建独立工程 `primuse-win/`，用 Electron **复刻 Primuse 本体**（自己的界面、自己的 9 条聚合线路、自己的道理鱼源），数据层按 §16.5/§16.6 的 HTTP 契约在 JS 里重实现，与 iPhone 版行为对齐。已在本机 Win11 出 `Primuse-Setup` + `Primuse-Portable` 两个 exe 并冒烟通过。
    **v1.9.10 追加（§18）**：Windows 端补齐了**歌单层** —— 建/改名/删歌单、搜索结果"＋歌单"、从歌单移除、手动调序，随机/顺序/单曲循环，以及与 iPhone 共用 `primuse-sync-server` 的歌单上传/下载（同步的是歌单结构，不是歌曲源）。UI 与交互逐条对着 iPhone 的 Swift 视图抄，省略项见 §18.4。
+   **v1.9.11**：歌单点击流的冒烟测试暴露两处"点了没反应"——「加入歌单」弹层里新建的歌单没把待加入的那首歌带过去（`sheetCreate` 丢了 `track`），以及新建后调用的是不存在的 `api.playlists.add`（preload 只暴露了 `addSong`），TypeError 被 async 监听器吞掉。两处都已修，并新增 CI 离线断言 `scripts/preload-api-check.js`：渲染层每一个 `api.*` 调用链必须能在 preload 里解析到。
 3. **真正可复用的资产是 `PrimuseKit`**：331 个文件中只有 17 个 import 了平台受限框架，模型层、GRDB 资料库、扫描/去重/CUE/流解析/元数据策略几乎全部是 Foundation 级别逻辑。
 4. ~~建议按"层"而不是按"平台"组织目录，核心下沉 + 各端薄壳；Windows 目录建议 `clients/primuse-win/`。~~
    ~~**修订（D4）**：Windows 首版不新建目录，直接复用仓库根已有的 `electron/`。~~ **两处均已作废（§16）**：Windows 首版**新建了** `primuse-win/`（不是 `clients/primuse-win/`，也不复用 `electron/`）。`core/primuse-core` 下沉属于后续 B3 形态，不是首版前置。
@@ -31,7 +32,7 @@
 |---|---|---|
 | HALO Music（Web + Cloudflare） | 仓库根：`index.html`、`major.js`、`functions/`、`admin/`、`migrations/`、`schema.sql`、`wrangler.toml` | 多源搜索/播放/歌单/歌词的网页应用，Pages Functions + D1；Electron 桌面壳在 `electron/`，`package.json` 配了 `electron-builder --win nsis/portable`（**注意：`nsis.script` 原来指着一份旧版模板抄本，会让打包 100% 失败，已修，见 §15**） |
 | HALO Subsonic 服务端 | `functions/rest/[[catchall]].js` + `_subsonic.js` | 实现 ping / getLicense / getMusicFolders / getIndexes / getMusicDirectory / getArtists / getArtist / getAlbum / getSong / search2 / search3 / stream / download / getCoverArt / getLyrics(BySongID) / getPlaylists / getPlaylist / create/update/deletePlaylist / star / unstar / getStarred / getAlbumList / getScanStatus。**曾是"Windows 端最省力的接入口"，但线上实例并未部署这一面**（`/rest/*` 回落到 SPA HTML，§10 线上实例复核），因此 Windows 首版改用已在线的 `/api/music`（D5） |
-| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，当前版本 1.9.10 (build 72)（唯一来源 `primuse/project.yml:25-26`，发版按 +1 规则走；`primuse-win/package.json` 必须同步同一个号） |
+| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，当前版本 1.9.11 (build 73)（唯一来源 `primuse/project.yml:25-26`，发版按 +1 规则走；`primuse-win/package.json` 必须同步同一个号） |
 | 聚合音源接入层 | `primuse/Primuse/Services/AggregatedMusic/` | 本地新增：meting / hyw / nxinxz / openApi 四类协议，默认 9 条硬编码线路，平台 QQ/网易/酷狗/酷我/bilibili |
 | lx 音源脚本 | `音源文件/`（23 个 .js，约 4.8 万行） | **无任何 Swift 代码引用**，当前为死资源；唯一 JS 引擎属于刮削器（`ConfigurableScraper.swift`），与 lx 音源格式不兼容 |
 
@@ -742,7 +743,7 @@ PASS 界面截图
 
 ---
 
-## 18. 歌单层：把 iPhone 的歌单与云端同步搬进 Windows（2026-10-14，v1.9.10 / build 72）
+## 18. 歌单层：把 iPhone 的歌单与云端同步搬进 Windows（2026-10-14，v1.9.10 / build 72 落地，v1.9.11 / build 73 修断链）
 
 用户提了 5 条：① 歌单同步（`https://primuse-sync-server.pages.dev/api/sync-playlists` 上传/下载）② 搜索结果可"添加到歌单"③ 可创建/删除/编辑歌单 ④ 歌单内可随机/顺序/单曲循环 ⑤ 忠于原版 UI，去掉 iPhone 苹果体系特有的东西。并给了两条硬约束：**"服务器同步的是歌单，不是歌曲源"**、**"优选忠于 UI、忠于功能"**（据此我没有去全网抓更多公开第三方线路 —— 那是在扩大抓取受版权保护音频的入口，不做；扩源走 §17.5 的自建协议路线 W5）。
 
@@ -777,12 +778,18 @@ PASS 界面截图
 ### 18.6 验证（本机全绿）
 
 1. `scripts/playlist-sync-contract-test.js` —— 往 `require.cache` 注入假 store，让 `sync.js` 在纯 Node 下跑，起一个 D1 语义的本地假服务器，**种子就是 iPhone 那行真实备份的代表样本**（4 个歌单的 id/名称/字段逐字照抄现网，232 首的「经典」里取 3 首代表，所以假服务器上 iPhone 行的 `song_count` 是 6、`playlist_count` 是 4，断言按这个写）。11 项断言全绿：上行字段与 iPhone 实测逐字段相同、`agg_*` 往返、`filePath` 兜底反解、外来 `dly_*` 标 `unresolved`、备份用自己的机器码且**绝不改动 iPhone 那行**、`ownedByThisDevice=false` 时拒绝且不发请求、恢复合并、设备列表与跨设备导入只读、拒绝导入自己、404 转可读错误、从未备份过时 `restore()` 返回 `empty`。**CI 里跑的是这个假服务器，真网络路径不进 CI**：流水线不许往用户的云端备份写东西。
-2. `npm run smoke` —— 19 项全 PASS，其中 5 项是这次新加的数据层断言（歌单 CRUD+落盘、「我喜欢」= 系统歌单、`agg_*` 映射、上报含自建歌单与我喜欢、探针清理）与 3 项渲染层断言（歌单 UI 已接线、**歌单页渲染**：列表/详情/⋯菜单/加入弹层/同步页的 DOM 实测、歌单 UI 探针已清理）。渲染层这一段会**建一个真歌单、开三个页面读 DOM、截图、再删掉**，所以它证明的是"看得见点得到"，不是"代码写了"。`smoke-ui-playlist.png` 里能看到 ⋯ 菜单六项与两行曲目的 →/✕。
-3. CI `preflight` 新增一步 `node scripts/playlist-sync-contract-test.js`（与道理鱼契约、线路契约并列），红了就挡住 `build`。`verify-asar.js` 的必需文件表加了 `/src/main/sync.js`（现 13 项）。
-4. `scripts/probe-live-sync.js` —— **只读**打真云端，用 App 自己的网络栈（`httpx` = Node https）拉设备列表与 iPhone 备份，再走一遍真实 `fromWireSong` 反解。2026-10-14 实测：`1 台设备 · iPhone/iOS · 4 个歌单 · 241 首（经典 232 / 我喜欢 1 / 神咒 2 / 佛经 6）`，**241 首全部可反解为聚合轨道，`unresolved` 0 首**。这是"字段没写错"之外唯一能证明"这台机器真能连上、真能读懂 iPhone 留下的备份"的证据；它绝不 POST。
-5. 打包形态也回归过：本机 `npx electron-builder --win nsis portable` 出的 `dist/win-unpacked/Primuse.exe --primuse-smoke` 同样 19 项 PASS（退出码 0）。
+2. `npm run smoke` —— 20 项全 PASS（连跑两次都绿，第二次 `swept: []` 证明上一次没留残骸）：5 项数据层断言（歌单 CRUD+落盘、「我喜欢」= 系统歌单、`agg_*` 映射、上报含自建歌单与我喜欢、探针清理）+ 3 项渲染层 DOM 断言（歌单 UI 已接线、**歌单页渲染**：列表/详情/⋯菜单/加入弹层/同步页、歌单 UI 探针已清理）+ 1 项**点击流**断言。`smoke-ui-playlist.png` 里能看到 ⋯ 菜单六项与两行曲目的 →/✕。
+3. **点击流那一段是这次真正抓到 bug 的地方**（前两段只看 DOM，看不出"点了没反应"）：它用 `dispatchEvent(new MouseEvent('click'))` 走真实事件委托路径，依次验 `＋歌单` 开弹层 → 弹层里「＋ 新建歌单」→ 填名提交 → 新歌单立刻含刚才那首且人还留在弹层 → 再点一次 ✓ 取消包含 → 点遮罩关闭 → ⋯ 菜单 → 重新排序 ▲▼ → 完成 → 落盘顺序变了 → ✕ 移除 → ⋯ 删除歌单 → 列表回到歌单页。它抓到两个真 bug：
+   - `d.sheetCreate` 重建 sheet 时**丢了 `track`**，"在加入歌单弹层里新建歌单"因此不会把歌加进去；
+   - 修好之后暴露出第二层：app.js 调的是 `api.playlists.add(...)`，preload 里叫 `addSong` —— 一句 `TypeError` 被 async 事件回调吞成未处理拒绝，界面表现就是"点了没反应"，而 19 项断言当时全绿。
+   两条都在 v1.9.11 修掉。教训写进代码注释：**async 监听器里的异常不会让 CI 红，只会让用户觉得功能没做**。
+4. `scripts/preload-api-check.js`（新增，进 CI preflight）—— 把 `preload.js` 用假 `electron` 在 `vm` 里跑一遍拿到真实暴露对象，再逐条解析 app.js 里出现过的 `api.x.y` 调用链；对不上就红。已反向验证：把 `addSong` 改回 `add` 立刻报 `api.playlists.add —— preload 里没有这个入口`。当前 48 条链全通过。
+5. `scripts/probe-live-sync.js` —— **只读**打真云端，用 App 自己的网络栈（`httpx` = Node https）拉设备列表与 iPhone 备份，再走一遍真实 `fromWireSong` 反解。2026-10-14 实测：`1 台设备 · iPhone/iOS · 4 个歌单 · 241 首（经典 232 / 我喜欢 1 / 神咒 2 / 佛经 6）`，**241 首全部可反解为聚合轨道，`unresolved` 0 首**。这是"字段没写错"之外唯一能证明"这台机器真能连上、真能读懂 iPhone 留下的备份"的证据；它绝不 POST。
+6. 打包形态回归：本机 `npx electron-builder --win nsis portable` 出的 `dist/win-unpacked/Primuse.exe --primuse-smoke` 同样全 PASS（退出码 0）。
+7. 冒烟自己也要可重复：每段歌单冒烟开头会 `sweepSmokeProbes()` 扫掉历史残留的同名探针（一次崩溃的复跑会因"同名歌单已存在"把后续所有断言带崩，实测踩过），结尾再扫一遍兜底，主进程另外断言落盘里没有 `冒烟*` 歌单。
+8. CI `preflight` 现在跑四项离线断言：道理鱼契约、歌单同步契约、preload API 面、聚合线路契约，红了就挡住 `build`。`verify-asar.js` 的必需文件表加了 `/src/main/sync.js`（现 13 项）。
 
-一个**只在这台机器上出现**的网络坑，别误判成"服务端挂了"：本机 `curl` 访问 `*.pages.dev` 会以 `schannel: CRYPT_E_REVOCATION_OFFLINE`（`http=000`）失败，那是 Windows 证书吊销列表取不到，加 `--ssl-no-revoke` 就通；而 Electron/Node 用 BoringSSL、默认不做吊销检查，所以 App 本身连得上（上面第 4 条就是证据）。判断"同步服务在不在"要以 `probe-live-sync.js` 或 App 内的实际响应为准，不要拿一条 curl 的 000 下结论。
+一个**只在这台机器上出现**的网络坑，别误判成"服务端挂了"：本机 `curl` 访问 `*.pages.dev` 会以 `schannel: CRYPT_E_REVOCATION_OFFLINE`（`http=000`）失败，那是 Windows 证书吊销列表取不到，加 `--ssl-no-revoke` 就通；而 Electron/Node 用 BoringSSL、默认不做吊销检查，所以 App 本身连得上（上面第 5 条就是证据）。判断"同步服务在不在"要以 `probe-live-sync.js` 或 App 内的实际响应为准，不要拿一条 curl 的 000 下结论。
 
 ### 18.7 还没做
 

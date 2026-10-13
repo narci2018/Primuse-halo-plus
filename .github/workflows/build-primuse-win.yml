@@ -107,6 +107,12 @@ jobs:
         # iPhone 行 —— 所以它必须在 CI 里跑，而真网络路径只能在离线断言里覆盖。
         run: node scripts/playlist-sync-contract-test.js
 
+      - name: Preload API surface check (offline)
+        # 渲染层调了 preload 没暴露的方法 = 运行时一句被 async 回调吞掉的 TypeError，
+        # 界面只表现为"点了没反应"。v1.9.10 的"在加入歌单弹层里新建歌单"就是这么坏的
+        # （app.js 写 api.playlists.add，preload 叫 addSong）。这条断言把它钉死。
+        run: node scripts/preload-api-check.js
+
       - name: Aggregated line contract is intact
         # No live requests: assert the 9 default lines, their priorities and the
         # URL-building rules still match AggregatedSourceStore.swift /
