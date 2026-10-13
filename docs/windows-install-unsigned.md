@@ -44,4 +44,4 @@
 1. **Setup 安装向导的完整流程**：我没有在这台机器上真的安装（会写 Program Files 并弹 UAC）。`perMachine: true` 需要管理员账号；"创建桌面快捷方式 / 开机自启动"两个勾选项来自 `build/installer.nsh` 的 `customPageAfterChangeDir` 宏 —— 官方 NSIS 模板确实会调用它（`assistedInstaller.nsh:42-43`），但界面是否如预期出现，只有跑一次安装才知道。
 2. **登录态存在哪里**：Electron 默认把 cookie/缓存放在 `%APPDATA%\HALO Music`，理论上是"装一次登一次、重启还在"。没实测。
 3. **未签名包被自动更新装上时的行为**：`autoDownload=true` 会让它静默下载 89 MB 的未签名 Setup 并在退出时执行，SmartScreen 会不会在这一步拦死 —— 未知。若你遇到"更新失败/装不上"，先手动下载 Release 里的 Setup 覆盖安装。
-4. **Release 大文件的匿名下载**：`api.github.com` 能匿名读到 Release 与三个 asset 的元数据（已验证 HTTP 200），但这台机器的 `curl` 拿 `github.com/.../releases/download/...` 返回 000 —— 本机 shell 不走系统代理（装了 ProxyBridge / sing-box）导致的网络问题，不是权限问题：同一个包里的应用自己查更新是成功的，而它走的是系统代理。浏览器下载正常即可。
+4. **Release 大文件的匿名下载**：`api.github.com` 能匿名读到 Release 与三个 asset 的元数据（已验证 HTTP 200，三个 asset 都是 `state: uploaded`，大小正确），但这台机器的 `curl` 拿 `github.com/.../releases/download/...` 返回 `http=000`；改成走本机代理（`-x http://127.0.0.1:10808`）后 `api.github.com` 正常 200、`github.com` 的下载路径仍是 TLS 失败（curl exit 35）。结论不变：这是本机网络栈的问题，不是发布权限 —— 公开仓库的 Release asset 本来就不需要登录，而且同一台机器上的 Electron 应用走系统代理时查更新是成功的。请在浏览器里点一次下载确认。

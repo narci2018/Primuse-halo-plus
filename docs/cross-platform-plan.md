@@ -10,8 +10,9 @@
 
 ## 0. 结论摘要
 
-1. **macOS 支持在代码层面已经存在**，不需要新建 `Primuse-mac/` 目录。`project.yml` 中 `PrimuseMac` target（第 413 行起）复用 `Primuse/` 全部源码，含 `Views/Mac/` 三栏桌面 UI、菜单栏播放器、桌面歌词浮窗、mini player、iTunesLibrary 导入、SFBAudioEngine + FFmpeg 解码、WidgetKit 组件；bundle id 与 iOS 相同（`com.welape.yuanyin`，Universal Purchase）。Mac 侧缺的是**工程化**：可编译性验证（**已完成**，CI 已出 `Primuse-macos-arm64-1.9.6-b68` 的 DMG+ZIP，见 §11）、部署门槛过高（macOS 26.0，仍未降级）、以及真机上的安装/启动验证。
+1. **macOS 支持在代码层面已经存在**，不需要新建 `Primuse-mac/` 目录。`project.yml` 中 `PrimuseMac` target（第 413 行起）复用 `Primuse/` 全部源码，含 `Views/Mac/` 三栏桌面 UI、菜单栏播放器、桌面歌词浮窗、mini player、iTunesLibrary 导入、SFBAudioEngine + FFmpeg 解码、WidgetKit 组件；bundle id 与 iOS 相同（`com.welape.yuanyin`，Universal Purchase）。Mac 侧缺的是**工程化**：可编译性验证（**已完成**，见 §11）、部署门槛过高（macOS 26.0，仍未降级）、以及真机上的安装/启动验证。打包分发也已完成：DMG+ZIP 由 `v*` tag 自动挂到 Release（§14）。
 2. **Windows 不是移植而是新做客户端**。SwiftUI / AVFoundation / SFBAudioEngine / CloudKit / MusicKit / WidgetKit / CarPlay / App Intents / Translation / iTunesLibrary 在 Windows 无对应物。UI 层（191 个 SwiftUI 文件）必须重写；播放引擎必须替换。
+   **修订（D4 + §15）**：首版不重写，直接把现成的 `electron/` 壳打包成 Windows 包 —— 打包与分发这一环已经在本机与 CI 双向验证通过（Setup + Portable 两个 exe 进 Release）。剩下的全部在"数据层"：接你那台自建服务器（§13）。
 3. **真正可复用的资产是 `PrimuseKit`**：331 个文件中只有 17 个 import 了平台受限框架，模型层、GRDB 资料库、扫描/去重/CUE/流解析/元数据策略几乎全部是 Foundation 级别逻辑。
 4. 建议按"层"而不是按"平台"组织目录，核心下沉 + 各端薄壳；Windows 目录建议 `clients/primuse-win/`。
    **修订（D4）**：Windows 首版不新建目录，直接复用仓库根已有的 `electron/` + `package.json` 里的 `electron-builder --win` 配置；`clients/primuse-win/` 与 `core/primuse-core` 都属于 B3 阶段的形态，不是 B1 首版的前置。
@@ -24,9 +25,9 @@
 
 | 组件 | 路径 | 性质 |
 |---|---|---|
-| HALO Music（Web + Cloudflare） | 仓库根：`index.html`、`major.js`、`functions/`、`admin/`、`migrations/`、`schema.sql`、`wrangler.toml` | 多源搜索/播放/歌单/歌词的网页应用，Pages Functions + D1；Electron 桌面壳在 `electron/`，`package.json` 已配 `electron-builder --win nsis/portable` |
+| HALO Music（Web + Cloudflare） | 仓库根：`index.html`、`major.js`、`functions/`、`admin/`、`migrations/`、`schema.sql`、`wrangler.toml` | 多源搜索/播放/歌单/歌词的网页应用，Pages Functions + D1；Electron 桌面壳在 `electron/`，`package.json` 配了 `electron-builder --win nsis/portable`（**注意：`nsis.script` 原来指着一份旧版模板抄本，会让打包 100% 失败，已修，见 §15**） |
 | HALO Subsonic 服务端 | `functions/rest/[[catchall]].js` + `_subsonic.js` | 实现 ping / getLicense / getMusicFolders / getIndexes / getMusicDirectory / getArtists / getArtist / getAlbum / getSong / search2 / search3 / stream / download / getCoverArt / getLyrics(BySongID) / getPlaylists / getPlaylist / create/update/deletePlaylist / star / unstar / getStarred / getAlbumList / getScanStatus。**曾是"Windows 端最省力的接入口"，但线上实例并未部署这一面**（`/rest/*` 回落到 SPA HTML，§10 线上实例复核），因此 Windows 首版改用已在线的 `/api/music`（D5） |
-| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，版本 1.9.6 (build 68)（tag `v1.9.6` 已存在），约 20 条本地提交 |
+| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，当前版本 1.9.8 (build 70)（唯一来源 `primuse/project.yml:25-26`，发版按 +1 规则走） |
 | 聚合音源接入层 | `primuse/Primuse/Services/AggregatedMusic/` | 本地新增：meting / hyw / nxinxz / openApi 四类协议，默认 9 条硬编码线路，平台 QQ/网易/酷狗/酷我/bilibili |
 | lx 音源脚本 | `音源文件/`（23 个 .js，约 4.8 万行） | **无任何 Swift 代码引用**，当前为死资源；唯一 JS 引擎属于刮削器（`ConfigurableScraper.swift`），与 lx 音源格式不兼容 |
 
@@ -545,7 +546,9 @@ Usage: File [/nonfatal] [/a] (...)
   `Checking for update` → `Error: Cannot find latest.yml in the latest release artifacts (https://github.com/zhoujungis/halo_music/releases/download/v2.0.0/latest.yml): 404`。
   改完 `build.publish` 重新打包后，同一句 `Checking for update` 不再报错。这条不是理论风险，是已经发生的网络行为。
 
-CI 侧（tag `v1.9.8`）：`Build Win11 x64 (nsis + portable)` 首次运行 **133 秒全绿**，10 个步骤无一失败，Release 页上匿名可读到 3 个 asset（`HALO-Music-Setup-1.9.8-x64.exe` 88.1MB、`HALO-Music-Portable-1.9.8-x64.exe` 87.9MB、`latest.yml`）。`api.github.com` 匿名 200 验证了这一点；本机 `curl` 取 `browser_download_url` 返回 `http=000`，但同一时刻 `github.com` 与 `raw.githubusercontent.com` 也是 000 而 `api.github.com` 是 200 —— 这是这台机器的 shell 没走系统代理（装了 ProxyBridge / sing-box），不是 GitHub 的权限问题：同一台机器上的 Electron 应用走系统代理，刚才就成功查到了更新。
+CI 侧（tag `v1.9.8`）：`Build Win11 x64 (nsis + portable)` 首次运行 **133 秒全绿**，10 个步骤无一失败，Release 页上匿名可读到 3 个 asset（`HALO-Music-Setup-1.9.8-x64.exe` 88.1MB、`HALO-Music-Portable-1.9.8-x64.exe` 87.9MB、`latest.yml`）。`api.github.com` 匿名 200 验证了这一点；本机 `curl` 取 `browser_download_url` 返回 `http=000`，但同一时刻 `github.com` 与 `raw.githubusercontent.com` 也是 000 而 `api.github.com` 是 200 —— 这是这台机器的 shell 没走系统代理（装了 ProxyBridge / sing-box），不是 GitHub 的权限问题：同一台机器上的 Electron 应用走系统代理，刚才就成功查到了更新。补测：给 curl 加 `-x http://127.0.0.1:10808` 后 `api.github.com` 正常返回（限速额度也换了一个 IP），但 `github.com/.../releases/download/...` 变成 TLS 失败（curl exit 35）—— 所以本机命令行下载不通，能拿到的硬证据是 asset 的 `state: uploaded` 与正确大小；浏览器里点一次下载由你来确认。
+
+刻意**没有**上传的东西：`HALO-Music-Setup-*.exe.blockmap`（electron-builder 本地会生成）。有它 electron-updater 才能差分下载，没有就每次更新整包下 89 MB。现阶段更新链路本身还没在真机上验过（未签名 + `autoDownload = true`），先不多挂一个文件。
 
 ### 这个包现在能播什么（重要，别当成 M2 完成了）
 
