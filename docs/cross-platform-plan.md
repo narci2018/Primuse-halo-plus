@@ -353,11 +353,13 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 
 ### 为什么必须加前置校验
 
-在 Windows 上 `git add -A` 会**再次**把这 20 条打回 `100644`（这就是当初坏掉的方式）。所以在 `build-mac.yml` 里加了一个构建前的结构校验步骤：逐个检查 4 个 framework 的 5 个入口是不是真符号链接、`Headers/<name>.h` 能否解析、`Versions/Current/<name>` 是否为真文件，并打印索引里 `120000` 的条数（应为 20）。它把 28 分钟的失败压缩成几秒钟的明确报错。
+在 Windows 上 `git add -A` 会**再次**把这 20 条打回 `100644`（这就是当初坏掉的方式）。所以加了一个构建前的结构校验（起初内联在 `build-mac.yml`，§14 起抽成 `scripts/ci-check-ffmpeg-xcframework.sh`，preflight 与 build 两个 job 各调一次）：逐个检查 4 个 framework 的 5 个入口是不是真符号链接、`Headers/<name>.h` 能否解析、`Versions/Current/<name>` 是否为真文件，并打印索引里 `120000` 的条数（应为 20）。它把 28 分钟的失败压缩成几秒钟的明确报错。
 
 **M0 结果（同日）**：第五轮 run `38381672057` 全绿，26.1 分钟，13 个步骤无一失败，产物 artifact `Primuse-macos-arm64-1.9.6-b68`（DMG + ZIP，133.2 MB）。也就是说 Mac target 的 Swift 主体、WidgetKit 宿主页、FFmpeg 链接、ad-hoc 逐个签名与 `hdiutil` 打包一次性全部通过，M0 的代码部分到此结束。
 
-**仍未验证（必须真机）**：这个包在 M 系列 Mac 上能否双击启动、Gatekeeper 是"仍要打开"一次到位还是需要在「隐私与安全性」里点"允许"；CloudKit 同步与小组件在剥掉 entitlements 后是否只是静默不可用（脚本注释如此假设，但没有实测）。artifact 需要登录才能下载，匿名 GET 返回 401，所以本机无法自证。
+**仍未验证（必须真机）**：这个包在 M 系列 Mac 上能否双击启动、Gatekeeper 是"仍要打开"一次到位还是需要在「隐私与安全性」里点"允许"；CloudKit 同步与小组件在剥掉 entitlements 后是否只是静默不可用（脚本注释如此假设，但没有实测）。artifact 需要登录才能下载，匿名 GET 返回 401，所以本机无法自证。（**已改进，见 §14**：DMG/ZIP 现在直接挂到版本 Release 上，匿名可下载。）
+
+**这一节的 FFmpeg 校验步骤已经抽成 `scripts/ci-check-ffmpeg-xcframework.sh`**，工作流拆成 preflight/build 两个 job，见 §14。
 
 **下一轮构建要顺带确认的小改动**：`thin_arch` 之前是无效的（FFmpeg 的二进制在 `Versions/A/` 下，而框架顶层入口是符号链接，`find -type f` 根本走不到），现在显式点名四个框架并排在签名之前；默认仍为关闭，所以线上产物暂时还是 arm64+x86_64 通用包。
 
@@ -462,3 +464,23 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 4. 这条路线与 `§6` 的"服务器型源"同源：道理鱼打通后，Subsonic/Navidrome/Jellyfin 这些同形态服务器可以顺势加。
 
 **需要你给一件事**：iPhone 设置里那条服务器的**地址（host / 端口 / 是否 https）和类型**，以及它是否允许公网访问。有了地址我就用 `curl` 把 `login` / 列表 / `download` 的响应结构实测一遍，Windows 端数据层按实测契约写，而不是照抄 Swift 的猜测。
+
+---
+
+## 14. 推 tag 就能自动出可下载的安装包（同日，补齐 macOS 的发布环节）
+
+你问"推到 github 自动发布编译版本了吗"，我去 Releases 页面核对的实际状态是：
+
+- **iOS 是自动的** —— 打 `v1.9.7` 后 `build-ios.yml` 自动建出 Release，挂着 `Primuse-unsigned.ipa`（105 MB）。
+- **macOS 不是** —— 同一条 tag 的 `build-mac.yml` 只把 DMG/ZIP 存成 **workflow artifact**，artifact 需要登录才能下载，且 14 天后过期，Release 页面上根本没有 Mac 的下载入口。也就是说"自动编译"有，"自动发布"没有。
+
+改法（`.github/workflows/build-mac.yml` + 新增 `scripts/ci-check-ffmpeg-xcframework.sh`）：
+
+1. **拆成两个 job**。`preflight` 每次推 main 都跑（几分钟：FFmpeg 符号链接校验 + XcodeGen 生成工程 + 断言 `PrimuseMac` scheme 存在）；`build` 只在 **tag（v\*）或手动 dispatch** 时跑。之前一次发版会跑两遍 25 分钟的构建，因为推 main 和推 tag 都命中同一个 `push` 触发器，纯浪费。
+2. **校验脚本抽成文件**（`scripts/ci-check-ffmpeg-xcframework.sh`），两个 job 各调一次 —— `build` 里重复是为了它能单独跑，而这条检查只花几秒，比对一个 28 分钟才失败的构建。脚本在 Windows 本机会**正确地失败**（本机没符号链接权限，28 条 `::error::`），但在 CI 的 macOS checkout 上是绿的，所以我不能拿本机结果当发布判据，只能拿流水线结果。
+3. **构建产物发布到 Release**：新增 `softprops/action-gh-release@v2` 步骤，把 DMG 与 ZIP 挂到同一个版本 tag 上，`append_body: true` 是必须的 —— iOS 与 macOS 两个 job 竞争写同一条 Release，后完成的那个不能抹掉先生成好的 changelog。顶部加了 `permissions: contents: write`（默认 token 没有写 Release 的权限）。
+4. **手动 dispatch 加了 `release_tag` 输入**，可以给已有版本补出包而不新建 tag；不填就只构建、不发布（否则 `github.ref_name` 是分支名，会造出一个叫 `main` 的 tag 和 Release）。
+
+效果：从现在起 **推 `v*` tag → Release 页面同时有 `.ipa`、`.dmg`、`.zip`**，匿名可下载，不需要登录 Actions。这次改动本身只触发 `preflight`（推的是 main 不是 tag），所以它的第一次真实验证是 preflight 变绿；macOS 的 Release 发布要等下一个 tag，或者用 dispatch 填 `release_tag=v1.9.7` 给已经发出去的 1.9.7 补上 Mac 包。
+
+仍未实测的部分：`softprops/action-gh-release@v2` 与 iOS 那条 job 的发布步骤在同一 tag 上的竞态（`append_body` 只保证不互相清空正文，不保证不重复创建 Release；两个 action 都是"存在即复用"，理论上安全，但要等下一次真发版才能确认）。

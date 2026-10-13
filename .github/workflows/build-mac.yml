@@ -1,25 +1,46 @@
 name: Build Primuse macOS DMG
 
-# First time the PrimuseMac target is ever compiled in this repository: the
-# nested target exists in project.yml (PrimuseMac, sharing all of Primuse/) but
-# CI has only ever built the iOS scheme. Treat the first green run as a
-# discovery run — expect toolchain/deployment-target errors and read the log.
+# Two jobs, on purpose:
+#
+#   preflight — every push to main. A couple of minutes, and it answers "is the
+#               tree still buildable": the vendored FFmpeg macOS slices must stay
+#               symlinks, and XcodeGen must still emit a PrimuseMac scheme. That is
+#               the guard against the Windows-import flattening which silently made
+#               the Mac target unbuildable (see scripts/ci-check-ffmpeg-xcframework.sh).
+#   build     — only for a version tag (v*) or a manual dispatch. The ~25 minute
+#               compile + ad-hoc sign + DMG/ZIP, and on a tag it publishes the
+#               DMG/ZIP onto that version's GitHub Release.
+#
+# Before this split a release produced two identical 25-minute builds, because
+# pushing main and pushing the tag both matched one `push` trigger.
 
 on:
   push:
     paths:
       - "primuse/**"
       - ".github/workflows/build-mac.yml"
+      - "scripts/ci-check-ffmpeg-xcframework.sh"
   workflow_dispatch:
     inputs:
       thin_arch:
         description: "lipo -thin arm64 before signing (smaller DMG, fails if a slice is missing)"
         required: false
         default: "0"
+      release_tag:
+        description: "Also publish DMG/ZIP to this existing GitHub Release tag (empty = build only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-mac-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-mac:
-    name: Build PrimuseMac (Apple Silicon)
+  preflight:
+    name: Preflight (xcframework + project + scheme)
     runs-on: macos-26
     steps:
       - name: Checkout Repository
@@ -49,47 +70,7 @@ jobs:
           grep -rn "MACOSX_DEPLOYMENT_TARGET" primuse/project.yml primuse/Config/*.xcconfig || true
 
       - name: Verify vendored FFmpeg xcframework is intact
-        run: |
-          # The macOS slices of primuse/Frameworks/FFmpeg are versioned
-          # frameworks, i.e. everything a checkout touches except Versions/A is a
-          # symlink. This repo has zero symlinks in its index (git ls-files -s |
-          # awk '$1=="120000"' returns nothing on the broken tree) because it was
-          # imported from Windows, where a plain `git add -A` turns
-          # Headers/Modules/Resources/Versions/Current/<binary> into 1-27 byte
-          # text files holding the link target. iOS never notices — its slices are
-          # flat — but PrimuseMac dies 28 minutes later with
-          # "'libavcodec/avcodec.h' file not found". Fail here, in seconds, and
-          # say why.
-          cd primuse/Frameworks/FFmpeg
-          status=0
-          for fw in libavcodec libavformat libavutil libswresample; do
-            root="$fw.xcframework/macos-arm64_x86_64/$fw.framework"
-            for link in Headers Modules Resources Versions/Current "$fw"; do
-              if [ ! -L "$root/$link" ]; then
-                echo "::error::$root/$link is not a symlink — the xcframework was committed from a filesystem without symlink support"
-                status=1
-              fi
-            done
-            # The umbrella header is not <framework>.h: avcodec/avformat/avutil
-            # drop the "lib" prefix, and swresample is spelled without it. This
-            # list must match the umbrella header in Versions/A/Modules/module.modulemap.
-            case "$fw" in
-              libavcodec) umbrella="avcodec.h" ;;
-              libavformat) umbrella="avformat.h" ;;
-              libavutil) umbrella="avutil.h" ;;
-              libswresample) umbrella="swresample.h" ;;
-            esac
-            if [ ! -f "$root/Headers/$umbrella" ]; then
-              echo "::error::$root/Headers/$umbrella does not resolve through the Headers symlink"
-              status=1
-            fi
-            if [ ! -f "$root/Versions/Current/$fw" ]; then
-              echo "::error::$root/$fw is not a real Mach-O"
-              status=1
-            fi
-          done
-          echo "symlink-mode entries git will materialise: $(git ls-files -s . | awk '$1=="120000"' | wc -l) (expect 20)"
-          exit "$status"
+        run: bash scripts/ci-check-ffmpeg-xcframework.sh
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -104,6 +85,46 @@ jobs:
           xcodebuild -list -project Primuse.xcodeproj | sed -n '/Schemes:/,$p'
           xcodebuild -list -project Primuse.xcodeproj -json \
             | python3 -c "import sys,json; s=json.load(sys.stdin)['project']['schemes']; assert 'PrimuseMac' in s, f'PrimuseMac missing in {s}'; print('scheme OK:', s)"
+
+  build:
+    name: Build PrimuseMac (Apple Silicon)
+    needs: preflight
+    # A plain commit to main does not need a 25-minute Mac package; preflight
+    # already says whether the tree is buildable. Build for releases, and on demand.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Select Xcode with macOS SDK
+        run: |
+          SELECTED=""
+          for xcode in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            if [ -d "$xcode/Contents/Developer/Platforms/MacOSX.platform" ]; then
+              SELECTED="$xcode"
+              break
+            fi
+          done
+          if [ -n "$SELECTED" ]; then
+            echo "Selecting $SELECTED"
+            sudo xcode-select -s "$SELECTED"
+          fi
+          xcodebuild -version
+
+      - name: Verify vendored FFmpeg xcframework is intact
+        # Repeated from preflight on purpose: this job must stay runnable on its
+        # own, and the check costs seconds against a 25-minute wasted build.
+        run: bash scripts/ci-check-ffmpeg-xcframework.sh
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        working-directory: primuse
+        run: xcodegen generate
 
       - name: Build PrimuseMac (Release, arm64)
         working-directory: primuse
@@ -134,11 +155,10 @@ jobs:
         if: failure()
         working-directory: primuse
         run: |
-          # Artifacts and raw logs need an authenticated GET, which this repo's
-          # CI helper cannot do here. Check-run annotations and the job summary
-          # are readable anonymously on a public repo, so mirror the first
-          # compiler errors into both. Capped because each annotation is a
-          # separate row on the run page.
+          # Artifacts and raw logs need an authenticated GET. Check-run annotations
+          # and the job summary are readable anonymously on a public repo, so the
+          # first compiler errors are mirrored into both. Capped because each
+          # annotation is its own row on the run page.
           LOG=mac-build.log
           [ -f "$LOG" ] || { echo "::error::no mac-build.log produced"; exit 0; }
           echo "=== log size: $(wc -c < "$LOG") bytes, $(wc -l < "$LOG") lines ==="
@@ -226,6 +246,31 @@ jobs:
             primuse/${{ steps.ver.outputs.name }}.zip
           retention-days: 14
           if-no-files-found: error
+
+      # The iOS workflow attaches the IPA to the same tag; this attaches the Mac
+      # package, so "push a tag" gives one Release page with both downloads.
+      # Whichever job finishes first creates the Release, the other appends its file.
+      #
+      # A manual dispatch only publishes when release_tag is filled in: otherwise
+      # github.ref_name is the branch, and the action would happily create a tag
+      # and a Release named "main".
+      - name: Publish DMG and ZIP to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          # append, not replace: the iOS job writes an auto-generated changelog into
+          # the same release, and whichever job lands second must not erase it.
+          append_body: true
+          files: |
+            primuse/${{ steps.ver.outputs.name }}.dmg
+            primuse/${{ steps.ver.outputs.name }}.zip
+          body: |
+            ## macOS (Apple Silicon) — 未签名 / ad-hoc 签名
+
+            `${{ steps.ver.outputs.name }}.dmg` 与 `.zip` 由 CI 以 ad-hoc 签名（`codesign -s -`，不含 entitlements，未公证）。
+            装不上或打不开请先读 `docs/macos-install-unsigned.md`（Gatekeeper 放行步骤）。
+            CloudKit 同步、桌面小组件、App Group 在这种分发形态下静默不可用。
 
       - name: Upload build log when the build fails
         if: failure()
