@@ -269,3 +269,10 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 - `package.json`：`forceCodeSigning` → `false`，无证书时 Windows 打包不再直接失败。
 - `README.md`：数据库初始化段落补上 migration 0004 的适用条件与症状。
 - `functions/rest/[[catchall]].js`：`getCoverArt` 不再用歌曲 mid 拼腾讯专辑封面模板（该 URL 恒 404），改为有 `albumMid` 才 302、否则回占位图；已在本地 dev 实例上前后对照实测。
+
+### 远端新提交带来的两处变化（同日 rebase 后核实）
+
+变基到 `origin/main`（新增 `cf-sync-server/`、播放列表云同步等 3 个提交 + `v1.9.6`）后，`schema.sql` 出现冲突，已按**并集**解决：保留远端的 `device_playlists`（含 `idx_device_playlists_updated`）与本次的 `subsonic_auth`、`subsonic_request_log`。
+
+- **`device_playlists` 不补 migration，是有意为之**：它看起来与缺陷 1 同类（只在 `schema.sql`、不在 `migrations/`），但 `functions/api/sync-playlists.js:80` 每次请求先执行 `CREATE TABLE IF NOT EXISTS device_playlists`（作者注释"容错自动建表"），且该表只被这一个端点使用，因此 migrations 建库同样能自愈。`subsonic_auth` 之所以是 P0，正因为 `/rest/*` 路径上没有任何自动建表。**判据**：表只存在于 `schema.sql` 时，先看写它的那段代码有没有兜底建表，再决定要不要加 migration，不要机械补齐。
+- **换行符回归**：本次编辑把 `README.md`、`package.json` 从仓库既有的 LF 写成了 CRLF，导致整文件假变更（README 一度显示 482 增 / 473 删）。已归一化回 LF，实际内容改动仍是 9 行。后续在 Windows 上编辑这两个文件时注意同样问题，否则 review 噪声会淹没真实 diff。
