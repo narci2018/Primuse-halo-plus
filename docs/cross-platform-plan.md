@@ -23,7 +23,7 @@
 |---|---|---|
 | HALO Music（Web + Cloudflare） | 仓库根：`index.html`、`major.js`、`functions/`、`admin/`、`migrations/`、`schema.sql`、`wrangler.toml` | 多源搜索/播放/歌单/歌词的网页应用，Pages Functions + D1；Electron 桌面壳在 `electron/`，`package.json` 已配 `electron-builder --win nsis/portable` |
 | HALO Subsonic 服务端 | `functions/rest/[[catchall]].js` + `_subsonic.js` | 实现 ping / getLicense / getMusicFolders / getIndexes / getMusicDirectory / getArtists / getArtist / getAlbum / getSong / search2 / search3 / stream / download / getCoverArt / getLyrics(BySongID) / getPlaylists / getPlaylist / create/update/deletePlaylist / star / unstar / getStarred / getAlbumList / getScanStatus。**这是 Windows 端最省力的接入口** |
-| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，版本 1.9.5 (build 67)，20 条本地提交 |
+| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，版本 1.9.6 (build 68)（tag `v1.9.6` 已存在），约 20 条本地提交 |
 | 聚合音源接入层 | `primuse/Primuse/Services/AggregatedMusic/` | 本地新增：meting / hyw / nxinxz / openApi 四类协议，默认 9 条硬编码线路，平台 QQ/网易/酷狗/酷我/bilibili |
 | lx 音源脚本 | `音源文件/`（23 个 .js，约 4.8 万行） | **无任何 Swift 代码引用**，当前为死资源；唯一 JS 引擎属于刮削器（`ConfigurableScraper.swift`），与 lx 音源格式不兼容 |
 
@@ -161,7 +161,7 @@ B1 的本质是"Windows 客户端只是眼睛和耳朵"，能力上限等于后�
 B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从关键路径移除，但下面这几项无论选哪条路都该做：
 - 补 `AggregatedMusic` 的半成品与测试：`.customJson` 目前返回空数组；`.hyw` / `.nxinxz` 搜索分支忽略用户配置的 `baseURL` 仍打硬编码地址；`.nxinxz` 解析不校验；该模块 0 测试（Kit 侧现有 179 个测试未覆盖它）。
 - 决定 `音源文件/`（23 个 lx 脚本、4.8 万行，无任何代码引用）的去留：接入需实现 lx 的 `createApi` 沙箱语义，或直接删除。
-- 统一版本与工具链口径：README 写 Xcode 26 / macOS 26，`project.yml` 写 `xcodeVersion: "16.0"`，iOS CI 用 `macos-15` + Xcode_16.0/16.1，`CHANGELOG.md` 还停在 1.7.3/build 24 而版本已是 1.9.5/67。
+- 统一版本与工具链口径（2026-10-13 复核后的准确清单）：`primuse/README.md:185` 要求 Xcode 26.0+，`primuse/project.yml:9` 却写 `xcodeVersion: "16.0"`；两个 CI workflow 都跑 `macos-26` 并按"有 iOS/macOS platform 的最高 Xcode"自动选版本，因此实际用的是 Xcode 26，`xcodeVersion` 只是生成工程时写入的兼容性标记，不参与选版；`primuse/CHANGELOG.md` / `CHANGELOG.en.md` 停在 **1.7.3 (build 24)**，而 `project.yml` 与 tag 已是 **1.9.6 (build 68)** —— 跨 40 多个 build 的更新日志缺口，需要单独一次回填，不适合顺手改。另外 `primuse/.github/workflows/build-ipa.yml` 是被 GitHub 忽略的死配置（GitHub 只读仓库根 `.github/`），内容严格陈旧于根目录那份（`macos-15` + 硬锁 Xcode_16.0/16.1、缺 `-sdk iphoneos` 与 c++20 实验库标志、`working-directory` 错误），已删除以止住"改错文件"的坑。
 
 ### M2 · Windows 客户端最小闭环（2–3 周）
 - 壳：**Tauri 2**（Rust 宿主，包体 ~8MB、内存友好）；若你更熟 Node，可复用仓库已有 `electron/` + `electron-builder --win` 配置直接开工，代价是包体 90MB+。二选一在开工第一天定。
@@ -192,7 +192,7 @@ B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从
 | 公共解析接口不稳定 | 9 条默认线路随时失效，客户端发版无法救 | 线路配置服务端化 + 优先级/健康检查（现有 `isPinging` 可复用） |
 | NIO/AMSMB2/NFSKit 无 Windows 支持 | 影响 SMB/SFTP/NFS 移植 | 提前选型（Rust `smbclient`/`supersapien`、`ssh2`、`webdav` crate），或 M3 只做服务器型源 |
 | SFBAudioEngine 不可移植 | Windows 高保真路径缺失 | Windows 端统一走 FFmpeg 解码，AC-3/DTS 反而更稳 |
-| 文档与工程口径漂移 | README 要求 Xcode 26 / macOS 26，`project.yml` 写 `xcodeVersion: "16.0"`，CI 用 `macos-15` + Xcode_16.0/16.1，且有提交信息称"switch to macos-26"；CHANGELOG 停在 1.7.3/24 而版本已 1.9.5/67 | M0 期间统一版本与工具链口径 |
+| 文档与工程口径漂移 | `primuse/README.md` 要求 Xcode 26.0+，`project.yml` 写 `xcodeVersion: "16.0"`（该键不决定 CI 用哪个 Xcode，仅影响生成工程的兼容性标记）；CHANGELOG 停在 1.7.3/24 而版本已是 1.9.6/68；`primuse/.github/` 下还有一份被 GitHub 忽略的旧 iOS workflow | 死配置已删（2026-10-13）；版本回填见 §5 M1 清单，需要单独一次提交 |
 | 死资源 | `音源文件/` 4.8 万行 lx 脚本无引用 | 接入（需实现 lx 沙箱 API）或删除，二选一，不要长期挂着 |
 | 聚合模块半成品 | `.customJson` 返回空；`.hyw`/`.nxinxz` 搜索忽略用户配置的 `baseURL`；`.nxinxz` 解析不校验；零测试 | M1 顺带补齐并加测试 |
 
