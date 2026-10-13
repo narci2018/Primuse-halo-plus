@@ -70,8 +70,17 @@ jobs:
                 status=1
               fi
             done
-            if [ ! -f "$root/Headers/$fw.h" ]; then
-              echo "::error::$root/Headers/$fw.h does not resolve"
+            # The umbrella header is not <framework>.h: avcodec/avformat/avutil
+            # drop the "lib" prefix, and swresample is spelled without it. This
+            # list must match the umbrella header in Versions/A/Modules/module.modulemap.
+            case "$fw" in
+              libavcodec) umbrella="avcodec.h" ;;
+              libavformat) umbrella="avformat.h" ;;
+              libavutil) umbrella="avutil.h" ;;
+              libswresample) umbrella="swresample.h" ;;
+            esac
+            if [ ! -f "$root/Headers/$umbrella" ]; then
+              echo "::error::$root/Headers/$umbrella does not resolve through the Headers symlink"
               status=1
             fi
             if [ ! -f "$root/Versions/Current/$fw" ]; then
