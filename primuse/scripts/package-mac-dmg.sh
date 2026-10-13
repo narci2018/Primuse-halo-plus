@@ -65,7 +65,9 @@ CONTENTS="$APP_PATH/Contents"
 
 # 1. provisioning profile, when a real identity is in play
 if [[ -n "$PROVISIONING" && -f "$PROVISIONING" ]]; then
-  mkdir -p "$CONTENTS/Embedded.provisionprofile" 2>/dev/null || true
+  # Not "mkdir -p Embedded.provisionprofile" first: APFS is case-insensitive by
+  # default, so that directory and the target file are the same path, and cp
+  # would silently drop the profile one level too deep.
   cp "$PROVISIONING" "$CONTENTS/embedded.provisionprofile"
   echo "==> embedded provisioning profile"
 fi
@@ -95,15 +97,18 @@ sign_all "$CONTENTS/Helpers"
 codesign "${SIGN_ARGS[@]}" --sign "$IDENTITY" "$APP_PATH"
 
 echo "==> verifying signature"
-codesign --verify --verbose=2 "$APP_PATH"
+codesign --verify --strict --verbose=2 "$APP_PATH"
 codesign -dv --verbose=4 "$APP_PATH" 2>&1 | grep -E "^(Identifier|CodeDirectory|TeamIdentifier|Signature|Format)" || true
 echo "==> architectures present"
 lipo -archs "$CONTENTS/MacOS/"* 2>/dev/null || true
-find "$CONTENTS/Frameworks" -name '*.dylib' -maxdepth 2 -exec sh -c 'echo "$(basename "$1"): $(lipo -archs "$1")"' _ {} \; 2>/dev/null || true
+find -maxdepth 3 "$CONTENTS/Frameworks" -name '*.dylib' -exec sh -c 'echo "$(basename "$1"): $(lipo -archs "$1")"' _ {} \; 2>/dev/null || true
 
 # 3. DMG with a drop-to-Applications symlink
 STAGE="$(mktemp -d)"
-cp -R "$APP_PATH" "$STAGE/"
+# ditto, not cp -R: it preserves the bundle's resource forks, symlinks inside
+# versioned frameworks and the exact bytes codesign hashed, so what the DMG
+# carries is byte-identical to what was verified above.
+ditto "$APP_PATH" "$STAGE/$(basename "$APP_PATH")"
 ln -s /Applications "$STAGE/Applications"
 DMG="${OUT_BASE}.dmg"
 hdiutil create -quiet -volname "$(basename "$APP_PATH" .app)" -srcfolder "$STAGE" \
