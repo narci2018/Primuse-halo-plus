@@ -779,6 +779,10 @@ PASS 界面截图
 1. `scripts/playlist-sync-contract-test.js` —— 往 `require.cache` 注入假 store，让 `sync.js` 在纯 Node 下跑，起一个 D1 语义的本地假服务器，**种子就是 iPhone 那行真实备份的代表样本**（4 个歌单的 id/名称/字段逐字照抄现网，232 首的「经典」里取 3 首代表，所以假服务器上 iPhone 行的 `song_count` 是 6、`playlist_count` 是 4，断言按这个写）。11 项断言全绿：上行字段与 iPhone 实测逐字段相同、`agg_*` 往返、`filePath` 兜底反解、外来 `dly_*` 标 `unresolved`、备份用自己的机器码且**绝不改动 iPhone 那行**、`ownedByThisDevice=false` 时拒绝且不发请求、恢复合并、设备列表与跨设备导入只读、拒绝导入自己、404 转可读错误、从未备份过时 `restore()` 返回 `empty`。**CI 里跑的是这个假服务器，真网络路径不进 CI**：流水线不许往用户的云端备份写东西。
 2. `npm run smoke` —— 19 项全 PASS，其中 5 项是这次新加的数据层断言（歌单 CRUD+落盘、「我喜欢」= 系统歌单、`agg_*` 映射、上报含自建歌单与我喜欢、探针清理）与 3 项渲染层断言（歌单 UI 已接线、**歌单页渲染**：列表/详情/⋯菜单/加入弹层/同步页的 DOM 实测、歌单 UI 探针已清理）。渲染层这一段会**建一个真歌单、开三个页面读 DOM、截图、再删掉**，所以它证明的是"看得见点得到"，不是"代码写了"。`smoke-ui-playlist.png` 里能看到 ⋯ 菜单六项与两行曲目的 →/✕。
 3. CI `preflight` 新增一步 `node scripts/playlist-sync-contract-test.js`（与道理鱼契约、线路契约并列），红了就挡住 `build`。`verify-asar.js` 的必需文件表加了 `/src/main/sync.js`（现 13 项）。
+4. `scripts/probe-live-sync.js` —— **只读**打真云端，用 App 自己的网络栈（`httpx` = Node https）拉设备列表与 iPhone 备份，再走一遍真实 `fromWireSong` 反解。2026-10-14 实测：`1 台设备 · iPhone/iOS · 4 个歌单 · 241 首（经典 232 / 我喜欢 1 / 神咒 2 / 佛经 6）`，**241 首全部可反解为聚合轨道，`unresolved` 0 首**。这是"字段没写错"之外唯一能证明"这台机器真能连上、真能读懂 iPhone 留下的备份"的证据；它绝不 POST。
+5. 打包形态也回归过：本机 `npx electron-builder --win nsis portable` 出的 `dist/win-unpacked/Primuse.exe --primuse-smoke` 同样 19 项 PASS（退出码 0）。
+
+一个**只在这台机器上出现**的网络坑，别误判成"服务端挂了"：本机 `curl` 访问 `*.pages.dev` 会以 `schannel: CRYPT_E_REVOCATION_OFFLINE`（`http=000`）失败，那是 Windows 证书吊销列表取不到，加 `--ssl-no-revoke` 就通；而 Electron/Node 用 BoringSSL、默认不做吊销检查，所以 App 本身连得上（上面第 4 条就是证据）。判断"同步服务在不在"要以 `probe-live-sync.js` 或 App 内的实际响应为准，不要拿一条 curl 的 000 下结论。
 
 ### 18.7 还没做
 

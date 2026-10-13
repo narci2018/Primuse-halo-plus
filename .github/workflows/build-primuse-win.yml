@@ -22,10 +22,11 @@ name: Build Primuse Windows (primuse-win)
 #               installer + portable exe and publishes both onto that tag's
 #               GitHub Release, next to the iOS .ipa and the macOS .dmg/.zip.
 #
-# Deliberately *not* in CI: the networked smoke (`npm run smoke`) and
-# scripts/data-check.js. They hit third-party meting/HYW/nxinxz/openApi lines
-# that go down within days -- a green build must not depend on strangers'
-# servers. Those checks run on this machine before a tag is pushed.
+# Deliberately *not* in CI: the networked smoke (`npm run smoke`),
+# scripts/data-check.js, and scripts/probe-live-sync.js. The first two hit
+# third-party meting/HYW/nxinxz/openApi lines that go down within days -- a green
+# build must not depend on strangers' servers. The last one is read-only but
+# still talks to the user's own cloud backup, so it runs on this machine only.
 
 on:
   # No `paths:` filter, on purpose. A tag push filtered by paths only fires when
