@@ -223,7 +223,7 @@ B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从
 
 ## 9. 本方案未验证的部分
 
-- **`PrimuseMac` 是否真能编译，完全未验证**（本机 Windows，无 Xcode/macOS）。历史提交只修过 iOS 侧构建，Mac target 从未出现在 CI。这是 M0 要回答的第一个问题，工作量可能因此上浮。
+- **`PrimuseMac` 是否真能编译** —— 已在 CI 上真跑三轮（见 §11）。结论：**目前编不过，但原因不在 Swift 代码**。第三轮跑了约 28 分钟后只报 2 个失败点，且都在 Objective-C 文件的前置头文件扫描阶段（`ScanDependencies ... FFmpegDecoderBridge.m`、`CloudInputSourceObjC.m`），根因是仓库自带的 FFmpeg macOS 切片里 20 个符号链接在 Windows 导入时被压成了普通文本文件。Swift 侧那一轮没有出现编译错误，说明 Mac target 的主体是可编的，工作量主要落在 vendored framework 与打包环节。
 - HALO 的 Subsonic 实现是否满足 Primuse 客户端的实际调用习惯 —— **已实测，见 §10**。
 - `forceCodeSigning: true` 下的 Windows 打包在无证书环境下必然失败 —— **已改为 `false`**。
 - Tauri + WASAPI 的位深/采样率协商、以及未签名 macOS 包在各版本 Gatekeeper 下的实际放行路径，需出包后实测。
@@ -281,3 +281,32 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 
 - **`device_playlists` 不补 migration，是有意为之**：它看起来与缺陷 1 同类（只在 `schema.sql`、不在 `migrations/`），但 `functions/api/sync-playlists.js:80` 每次请求先执行 `CREATE TABLE IF NOT EXISTS device_playlists`（作者注释"容错自动建表"），且该表只被这一个端点使用，因此 migrations 建库同样能自愈。`subsonic_auth` 之所以是 P0，正因为 `/rest/*` 路径上没有任何自动建表。**判据**：表只存在于 `schema.sql` 时，先看写它的那段代码有没有兜底建表，再决定要不要加 migration，不要机械补齐。
 - **换行符回归**：本次编辑把 `README.md`、`package.json` 从仓库既有的 LF 写成了 CRLF，导致整文件假变更（README 一度显示 482 增 / 473 删）。已归一化回 LF，实际内容改动仍是 9 行。后续在 Windows 上编辑这两个文件时注意同样问题，否则 review 噪声会淹没真实 diff。
+---
+
+## 11. CI 实测记录：PrimuseMac 第一次进流水线（2026-10-13）
+
+`PrimuseMac` 此前从未在任何 CI 上构建过，本机又是 Windows，所以 M0 的全部信息只能从 GitHub Actions 拿。三轮运行的实际结果：
+
+| 轮次 | commit | 卡在哪 | 真实原因 |
+|---|---|---|---|
+| 1 | `8ca9944` | 第 7 步之前，3 分半 | —— 只留下一个需要鉴权才能下载的 log artifact（匿名 GET 返回 401），当时完全读不到错误 |
+| 2 | `1a790f8` | Build 步骤，exit 70 | `xcodebuild: error: Unable to find a device matching the provided destination specifier` —— `generic/platform=macOS,arch=arm64` 是非法组合，generic destination 不能带 arch |
+| 3 | `0cbcb05` | Build 步骤，约 28 分钟后 exit 65 | `'libavcodec/avcodec.h' file not found` + `Did not find header 'avcodec.h' in framework 'libavcodec'` |
+
+第 2、3 轮的错误都是靠新加的 `::error::` 注解拿到的：**check-run annotations 和 job summary 在公开仓库上可以匿名 GET，而 artifact 与原始日志必须带 token**。这条机制本身比某一次修复更值钱，已固化在 `build-mac.yml` 里。
+
+### 第 3 轮的根因：vendored FFmpeg 的 macOS 切片在仓库里就是坏的
+
+`primuse/Frameworks/FFmpeg/*.xcframework/macos-arm64_x86_64/` 是**带版本的 framework**（`Versions/A/...` 结构），除 `Versions/A` 以外全是符号链接。而整个仓库的索引里 **`120000` 模式一条都没有**（`git ls-files -s | awk '$1=="120000"' | wc -l` = 0，`git log --all --raw` 也从未出现过 120000），因为这棵树是在 Windows 上导入的：`Headers`、`Modules`、`Resources`、`Versions/Current`、`libavcodec` 这 5 个链接被压成了 24/24/26/1/27 字节的**普通文本文件**，内容正是链接目标字符串（`Versions/Current/Headers`）。四个 framework 共 20 条。
+
+- iOS 侧看不出问题：`ios-arm64` 与模拟器切片是扁平结构，不需要符号链接，所以历史上所有 CI 都是绿的。
+- 光看编译错误会以为缺 `-F` 搜索路径，实际二进制与头文件都在 `Versions/A` 里，只是顶层入口是文本文件，clang 顺着 `libavcodec.framework/Headers` 找不到目录。
+- 运行时同样会死：顶层 `libavcodec` 是 27 字节的文本，dyld 拿到的不是 Mach-O。
+
+修法：不重新下载 FFmpeg，只把这 20 条索引项的模式从 `100644` 改回 `120000`（内容已经恰好是链接目标，直接复用原 blob）。Windows 本机没有符号链接权限也无所谓 —— 改的是索引，CI 在 macOS/Linux 上 checkout 时会正确生成链接。
+
+### 为什么必须加前置校验
+
+在 Windows 上 `git add -A` 会**再次**把这 20 条打回 `100644`（这就是当初坏掉的方式）。所以在 `build-mac.yml` 里加了一个构建前的结构校验步骤：逐个检查 4 个 framework 的 5 个入口是不是真符号链接、`Headers/<name>.h` 能否解析、`Versions/Current/<name>` 是否为真文件，并打印索引里 `120000` 的条数（应为 20）。它把 28 分钟的失败压缩成几秒钟的明确报错。
+
+**待办（M0 收尾）**：下一次运行仍可能暴露新的 macOS 专属问题（`iTunesLibrary.framework` 链接、WidgetKit 在 mac 上的宿主嵌入、deployment target 26.0 的 API 覆盖）。修完编过之后，还要验证 `package-mac-dmg.sh` 产出的 DMG 在真机上能装能开 —— 未签名 + ad-hoc 的 Gatekeeper 放行路径仍未实测（§9）。

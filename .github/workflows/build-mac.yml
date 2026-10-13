@@ -48,6 +48,40 @@ jobs:
           echo "=== MACOSX_DEPLOYMENT_TARGET resolution ==="
           grep -rn "MACOSX_DEPLOYMENT_TARGET" primuse/project.yml primuse/Config/*.xcconfig || true
 
+      - name: Verify vendored FFmpeg xcframework is intact
+        run: |
+          # The macOS slices of primuse/Frameworks/FFmpeg are versioned
+          # frameworks, i.e. everything a checkout touches except Versions/A is a
+          # symlink. This repo has zero symlinks in its index (git ls-files -s |
+          # awk '$1=="120000"' returns nothing on the broken tree) because it was
+          # imported from Windows, where a plain `git add -A` turns
+          # Headers/Modules/Resources/Versions/Current/<binary> into 1-27 byte
+          # text files holding the link target. iOS never notices — its slices are
+          # flat — but PrimuseMac dies 28 minutes later with
+          # "'libavcodec/avcodec.h' file not found". Fail here, in seconds, and
+          # say why.
+          cd primuse/Frameworks/FFmpeg
+          status=0
+          for fw in libavcodec libavformat libavutil libswresample; do
+            root="$fw.xcframework/macos-arm64_x86_64/$fw.framework"
+            for link in Headers Modules Resources Versions/Current "$fw"; do
+              if [ ! -L "$root/$link" ]; then
+                echo "::error::$root/$link is not a symlink — the xcframework was committed from a filesystem without symlink support"
+                status=1
+              fi
+            done
+            if [ ! -f "$root/Headers/$fw.h" ]; then
+              echo "::error::$root/Headers/$fw.h does not resolve"
+              status=1
+            fi
+            if [ ! -f "$root/Versions/Current/$fw" ]; then
+              echo "::error::$root/$fw is not a real Mach-O"
+              status=1
+            fi
+          done
+          echo "symlink-mode entries git will materialise: $(git ls-files -s . | awk '$1=="120000"' | wc -l) (expect 20)"
+          exit "$status"
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
