@@ -721,11 +721,23 @@ export async function onRequest({ request, env, waitUntil }) {
       }
 
       const { source, rawId } = parseRawId(id);
-      if (source === "qq" && rawId) {
-        const coverUrl = `https://y.gtimg.cn/music/photo_new/T002R300x300M000${rawId}.jpg`;
+      // QQ artwork keys off the ALBUM mid: T002R300x300M000{albumMid}.jpg.
+      // The previous fallback here interpolated the SONG mid into that same
+      // template, which is never a valid photo id, so every off-library QQ
+      // track answered 302 -> y.gtimg.cn 404 (verified: 404 text/plain).
+      // Use an album mid when we have one; otherwise fall through to the
+      // placeholder instead of pointing clients at a guaranteed 404.
+      // TODO(B1): populate albumMid/cover/duration for provider-sourced QQ
+      // results by enriching them through QQ's song-detail endpoint; the
+      // third-party providers in QQ_SOURCE_URLS return neither.
+      const albumMid = matched?.albumMid || "";
+      if (source === "qq" && albumMid) {
         return new Response(null, {
           status: 302,
-          headers: { Location: coverUrl, "Access-Control-Allow-Origin": "*" },
+          headers: {
+            Location: `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg`,
+            "Access-Control-Allow-Origin": "*",
+          },
         });
       }
 

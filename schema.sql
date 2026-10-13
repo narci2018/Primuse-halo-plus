@@ -46,6 +46,21 @@ CREATE TABLE IF NOT EXISTS subsonic_auth (
   FOREIGN KEY (username) REFERENCES "user"(username) ON DELETE CASCADE
 );
 
+-- Written by functions/rest/[[catchall]].js for every /rest/* request
+-- (action, sanitized URL, headers). Auth failures and log insert errors are
+-- swallowed there, but without this table the debug logging is silently dead.
+CREATE TABLE IF NOT EXISTS subsonic_request_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  url TEXT NOT NULL,
+  headers TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_subsonic_request_log_created_at ON subsonic_request_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_subsonic_request_log_action ON subsonic_request_log(action);
+
+-- Per-device cloud playlist backup, used by functions/api/sync-playlists.js.
 CREATE TABLE IF NOT EXISTS device_playlists (
   device_id TEXT PRIMARY KEY,
   device_name TEXT,

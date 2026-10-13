@@ -314,6 +314,15 @@ npx wrangler d1 create halo-music-db
 npx wrangler d1 execute halo-music-db --remote --file schema.sql
 ```
 
+> 若数据库是用 `migrations/` 而不是 `schema.sql` 建立的，请补跑
+> `npx wrangler d1 execute halo-music-db --remote --file migrations/0004_add_subsonic_tables.sql`。
+> `subsonic_auth` 和 `subsonic_request_log` 只写在 `schema.sql` 里，缺表的库会让 `/rest/*`
+> 的 token 鉴权一律返回 `code 40 Wrong username or password`，且 `/rest/*` 调试日志静默失效。
+> 新库两条路径都已覆盖，无需额外操作。
+>
+> Windows 桌面打包在没有代码签名证书时，`package.json` 的 `forceCodeSigning` 已设为
+> `false`；拿到证书后可改回 `true` 强制签名。
+
 `wrangler.toml` 的核心绑定如下：
 
 ```toml
