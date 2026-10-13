@@ -550,6 +550,18 @@ CI 侧（tag `v1.9.8`）：`Build Win11 x64 (nsis + portable)` 首次运行 **13
 
 刻意**没有**上传的东西：`HALO-Music-Setup-*.exe.blockmap`（electron-builder 本地会生成）。有它 electron-updater 才能差分下载，没有就每次更新整包下 89 MB。现阶段更新链路本身还没在真机上验过（未签名 + `autoDownload = true`），先不多挂一个文件。
 
+### tag `v1.9.8` 的实测结果：三条流水线第一次落在同一个 Release 上
+
+| run | 工作流 | 结果 | 用时 | 挂上 Release 的产物 |
+|---|---|---|---|---|
+| `38396898700` | Build HALO Music Windows (Electron) | success | 2.2 分 | `HALO-Music-Setup-1.9.8-x64.exe` 88.1MB、`HALO-Music-Portable-1.9.8-x64.exe` 87.9MB、`latest.yml` |
+| `38396898666` | Build Primuse macOS DMG | success | 19.6 分 | `Primuse-macos-arm64-1.9.8-b70.dmg` 72.1MB、同名 `.zip` 63.9MB |
+| `38396898742` | Build Primuse iOS IPA | success | 22.4 分 | `Primuse-unsigned.ipa` 105.0MB |
+
+Release `v1.9.8` 现在 6 个 asset 全部 `state: uploaded`，正文里 Windows / macOS / Full Changelog 三段并存 —— 这就是 `append_body: true` 起作用的证据（§14 里标注为"待下次真发版才能确认"的那条竞态，已经确认安全）。从此发版动作只有一个：改 `primuse/project.yml` 的版本号 → 提交 → 打 `v*` tag → 三平台的包自动出现在 Release，全部匿名可下载。
+
+仍然没有的：**iOS 那条流水线还没做"分支 push 不构建"的拆分**（`.github/workflows/build-ipa.yml` 的 `on.push.paths` 含 `primuse/**`），所以每次改 Apple 侧代码都会白跑一次 26 分钟的 IPA 构建，tag 上再跑一次。要不要照 macOS 那样拆（或者限定只在 tag 构建）由你决定，因为这会同时失去"每次 push 都有一个可侧载的 artifact"这个副作用。
+
 ### 这个包现在能播什么（重要，别当成 M2 完成了）
 
 首版 Windows 包 = **原样的 `electron/main.cjs`**，即 `loadURL("https://halo-music.pages.dev")` 加载线上 SPA（地址可用 `--url=` 或环境变量 `HALO_MUSIC_URL` 覆盖，`main.cjs:5-13`）。它等价于"用 Chromium 打开 HALO 网页版"，所以：
