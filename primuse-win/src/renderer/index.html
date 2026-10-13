@@ -34,7 +34,9 @@
           </div>
           <div class="nav-group">
             <div class="nav-title">音乐库</div>
-            <button class="nav-item" data-route="favorites">我喜欢的</button>
+            <button class="nav-item" data-route="favorites">我喜欢<span class="nav-count" id="nav-liked-count"></span></button>
+            <button class="nav-item" data-route="playlists">歌单</button>
+            <div id="playlist-nav"></div>
             <button class="nav-item" data-route="history">最近播放</button>
           </div>
           <div class="nav-group">
@@ -72,10 +74,13 @@
         </div>
 
         <div class="pb-center">
+          <!-- 按钮顺序照 MacBottomBar.swift:146-192：shuffle · 上一曲 · 播放/暂停 · 下一曲 · repeat -->
           <div class="pb-buttons">
+            <button id="pb-shuffle" class="mode" title="随机播放">随机</button>
             <button id="pb-prev" title="上一曲">⏮</button>
             <button id="pb-play" class="primary" title="播放 / 暂停 (空格)">▶</button>
             <button id="pb-next" title="下一曲">⏭</button>
+            <button id="pb-repeat" class="mode" title="播放模式：关 → 列表循环 → 单曲循环">循环: 关</button>
           </div>
           <div class="pb-progress">
             <span id="pb-current">0:00</span>
@@ -85,7 +90,6 @@
         </div>
 
         <div class="pb-right">
-          <button id="pb-repeat" class="ghost small" title="循环">单曲循环: 关</button>
           <span class="vol-label">音量</span>
           <input id="pb-volume" type="range" min="0" max="1" step="0.01" value="0.8" />
         </div>
@@ -94,6 +98,18 @@
 
     <audio id="audio" preload="auto"></audio>
     <div id="toast" class="toast" hidden></div>
+
+    <!-- 弹层：添加到歌单 / 新建歌单 / 重命名 / 同步设备选择 -->
+    <div id="sheet" class="sheet" hidden>
+      <div class="sheet-card">
+        <div class="sheet-head">
+          <span id="sheet-title"></span>
+          <button class="ghost" id="sheet-close">×</button>
+        </div>
+        <div class="sheet-body" id="sheet-body"></div>
+      </div>
+    </div>
+
     <script src="app.js"></script>
   </body>
 </html>

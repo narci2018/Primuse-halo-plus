@@ -12,6 +12,7 @@ const required = [
   '/src/main/daoliyu.js',
   '/src/main/proxy.js',
   '/src/main/store.js',
+  '/src/main/sync.js',
   '/src/main/httpx.js',
   '/src/preload.js',
   '/src/renderer/index.html',

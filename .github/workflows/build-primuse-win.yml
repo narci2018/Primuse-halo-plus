@@ -15,8 +15,9 @@ name: Build Primuse Windows (primuse-win)
 #
 # Two jobs, mirroring build-mac.yml:
 #   preflight -- every push that touches primuse-win/. Offline and fast: syntax
-#               checks plus the DaoLiYu contract test against a fake local
-#               server. Answers "is the tree still packable" in under a minute.
+#               checks plus the DaoLiYu and playlist-sync contract tests against
+#               a fake local server. Answers "is the tree still packable" in
+#               under a minute.
 #   build     -- only on a version tag (v*) or manual dispatch. Packs the NSIS
 #               installer + portable exe and publishes both onto that tag's
 #               GitHub Release, next to the iOS .ipa and the macOS .dmg/.zip.
@@ -53,7 +54,7 @@ concurrency:
 
 jobs:
   preflight:
-    name: Preflight (syntax + DaoLiYu contract)
+    name: Preflight (syntax + source/playlist contracts)
     runs-on: windows-latest
     defaults:
       run:
@@ -98,6 +99,13 @@ jobs:
         # and it runs against a localhost stub so it is deterministic.
         run: node scripts/daoliyu-contract-test.js
 
+      - name: Playlist sync contract test (fake server, no network)
+        # 歌单同步是对 iPhone 版 D1 契约的第二次 JS 重写（POST 备份 / GET 恢复 /
+        # 设备列表），字段写错就变成"用户在云端留下一份谁都读不了的备份"。
+        # 这个测试用本地假服务器跑同一套断言，并且断言本机备份*不会*改动真实的
+        # iPhone 行 —— 所以它必须在 CI 里跑，而真网络路径只能在离线断言里覆盖。
+        run: node scripts/playlist-sync-contract-test.js
+
       - name: Aggregated line contract is intact
         # No live requests: assert the 9 default lines, their priorities and the
         # URL-building rules still match AggregatedSourceStore.swift /
@@ -124,9 +132,9 @@ jobs:
 
   build:
     name: Build Win11 x64 (nsis + portable)
-    # A failing preflight blocks the release: it is four offline assertions, so
-    # the only way it goes red is the code genuinely diverging from the Swift
-    # contract it is supposed to mirror.
+    # A failing preflight blocks the release: it is a handful of offline
+    # assertions, so the only way it goes red is the code genuinely diverging
+    # from the Swift contract it is supposed to mirror.
     needs: preflight
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
@@ -264,3 +272,4 @@ jobs:
             两个 exe 都没有代码签名证书（`forceCodeSigning: false`，见决策 D3）。首次运行 SmartScreen 会拦：点「更多信息」→「仍要运行」；
             Defender 提示「未知发布者」属正常，不是捆绑了别的东西。
             要在 Win11 上用自己那台服务器型音源（道理鱼），在 App 内「设置 → 音乐源」里填地址和账号；凭据只存在本机（DPAPI 加密），不会上传。
+            歌单（含「我喜欢」）可在「歌单」页上传/下载到 `primuse-sync-server`，与 iPhone 版共用同一份云端备份；同步的是**歌单结构**，能不能播仍取决于本机是否有对应音源。

@@ -12,11 +12,12 @@
  */
 
 const path = require('path');
-const { app, BrowserWindow, Menu, Tray, ipcMain, shell, nativeImage, globalShortcut } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, shell, nativeImage, globalShortcut, dialog } = require('electron');
 
 const aggregated = require('./aggregated');
 const { DaoLiYuClient, originOf } = require('./daoliyu');
 const store = require('./store');
+const sync = require('./sync');
 const { startProxy } = require('./proxy');
 
 const SMOKE = process.argv.includes('--primuse-smoke');
@@ -51,6 +52,11 @@ function send(channel, payload) {
 
 async function resolveStreamURL(track, force = false) {
   if (!track) throw new Error('缺少曲目信息');
+  // 从别的设备同步下来的歌单里可能有"本机没有那台服务器源"的曲目。
+  // 同步的是歌单结构不是歌曲源，所以这里必须给可读原因，不能让它变成一句 "播放失败"。
+  if (track.unresolved) {
+    throw new Error(`这首歌来自其它设备的音源${track.sourceName ? `（${track.sourceName}）` : ''}，本机没有对应线路，无法播放`);
+  }
   if (track.kind === 'server') {
     const client = clientFor(track.sourceID);
     return {
@@ -176,6 +182,98 @@ function registerIpc() {
   ipcMain.handle('player:load', () => store.library.player());
   ipcMain.handle('settings:save', (_e, patch) => store.library.setSettings(patch));
   ipcMain.handle('settings:load', () => store.library.settings());
+
+  // 歌单（含系统歌单「我喜欢」= primuse.system.liked）
+  const guard = (fn) => {
+    try {
+      return { ok: true, value: fn() };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  };
+  ipcMain.handle('playlist:list', () => guard(() => store.playlists.list()));
+  ipcMain.handle('playlist:get', (_e, id) => guard(() => store.playlists.get(id)));
+  ipcMain.handle('playlist:create', (_e, name) => guard(() => store.playlists.create(name)));
+  ipcMain.handle('playlist:rename', (_e, { id, name }) => guard(() => store.playlists.rename(id, name)));
+  ipcMain.handle('playlist:remove', (_e, id) => guard(() => store.playlists.remove(id)));
+  ipcMain.handle('playlist:addSong', (_e, { id, track }) => guard(() => store.playlists.add(id, track)));
+  ipcMain.handle('playlist:toggleSong', (_e, { id, track }) => guard(() => store.playlists.toggle(id, track)));
+  ipcMain.handle('playlist:removeSong', (_e, { id, track }) => guard(() => store.playlists.removeSong(id, track)));
+  ipcMain.handle('playlist:move', (_e, { id, from, to }) => guard(() => store.playlists.move(id, from, to)));
+  ipcMain.handle('playlist:belongsTo', (_e, track) =>
+    guard(() => store.playlists.list().filter((p) => store.playlists.contains(p.id, track)).map((p) => p.id))
+  );
+
+  // 云端同步：备份 / 恢复 / 设备列表 / 跨设备导入（契约见 src/main/sync.js 顶部注释）
+  ipcMain.handle('sync:config', () => store.sync.config());
+  ipcMain.handle('sync:setServerURL', (_e, url) => {
+    try {
+      return { ok: true, config: store.sync.setServerURL(url) };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sync:setDeviceName', (_e, name) => ({ ok: true, config: store.sync.setDeviceName(name) }));
+  ipcMain.handle('sync:backup', async () => {
+    try {
+      return { ok: true, data: await sync.backup() };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sync:restore', async () => {
+    try {
+      return { ok: true, data: await sync.restore() };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sync:devices', async () => {
+    try {
+      return { ok: true, devices: await sync.devices() };
+    } catch (error) {
+      return { ok: false, error: error.message, devices: [] };
+    }
+  });
+  ipcMain.handle('sync:import', async (_e, deviceId) => {
+    try {
+      return { ok: true, data: await sync.importFromDevice(deviceId) };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sync:export', async (_e, playlist) => {
+    // 「导出」：把歌单存成本机 JSON（结构走云端同一套字段，方便和 iPhone 的备份互换）
+    const safeName = String(playlist?.name || 'playlist').replace(/[\\/:*?"<>|]/g, '_');
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: '导出歌单',
+      defaultPath: `${safeName}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    try {
+      require('fs').writeFileSync(filePath, JSON.stringify({ playlists: [playlist] }, null, 2), 'utf8');
+      return { ok: true, filePath };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sync:importFile', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: '从文件导入歌单',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (canceled || !filePaths[0]) return { ok: false, canceled: true };
+    try {
+      const raw = JSON.parse(require('fs').readFileSync(filePaths[0], 'utf8'));
+      const list = Array.isArray(raw) ? raw : raw.playlists || [];
+      const incoming = list.map(sync.fromWirePlaylist).filter((p) => p.name);
+      return { ok: true, data: store.playlists.mergeIncoming(incoming) };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
 
   ipcMain.handle('app:openExternal', (_e, url) => {
     if (/^https?:\/\//i.test(String(url))) shell.openExternal(url);
@@ -450,6 +548,66 @@ async function runSmoke() {
       step('本地库持久化', false, error.message);
     }
 
+    // 歌单：CRUD、系统歌单「我喜欢」、以及云端映射（同步的是歌单结构，不是歌曲源）
+    try {
+      const fs = require('fs');
+      const dataFile = path.join(app.getPath('userData'), 'primuse.json');
+      const trackA = { kind: 'aggregated', platform: 'netease', rawID: '31477687', title: '晴天', artist: '周杰伦', album: '叶惠美', duration: 269 };
+      const trackB = { kind: 'aggregated', platform: 'qq', rawID: '004TXgZ41ST7lB', title: '黄昏', artist: '落日微醺', duration: 245.28 };
+
+      const created = store.playlists.create('冒烟歌单');
+      store.playlists.add(created.id, trackA);
+      store.playlists.add(created.id, trackB);
+      store.playlists.add(created.id, trackB); // 重复加入应被 trackKey 去掉
+      store.playlists.rename(created.id, '冒烟歌单改名');
+      store.playlists.move(created.id, 1, 0);
+
+      const likedBefore = store.library.favorites().length;
+      store.library.toggleFavorite(trackA); // 收藏 = 写进 primuse.system.liked
+      const liked = store.playlists.get(store.LIKED_PLAYLIST_ID);
+
+      const wire = sync.localPlaylistSnapshot();
+      const likedWire = wire.find((p) => p.id === store.LIKED_PLAYLIST_ID);
+      const songWire = likedWire && likedWire.songs[0];
+      const roundTrip = songWire ? sync.fromWireSong(songWire) : null;
+
+      store.save(true);
+      const onDisk = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+      const persisted = (onDisk.playlists || []).find((p) => p.name === '冒烟歌单改名');
+
+      step(
+        '歌单 CRUD + 落盘',
+        Boolean(persisted) && persisted.songs.length === 2 && persisted.songs[0].rawID === trackB.rawID,
+        `成员 ${persisted ? persisted.songs.length : '未落盘'} 首，重排后第一首 ${persisted ? persisted.songs[0].title : '-'}`
+      );
+      step(
+        '「我喜欢」= 系统歌单 primuse.system.liked',
+        Boolean(liked) && liked.id === 'primuse.system.liked' && liked.songs.length === likedBefore + 1 && store.library.isFavorite(trackA),
+        `收藏数 ${liked ? liked.songs.length : '-'}（原有 ${likedBefore}）`
+      );
+      step(
+        '云端映射：agg_{platform}_{id} 与 /aggregated/… 可往返',
+        Boolean(songWire) && songWire.id === `agg_${trackA.platform}_${trackA.rawID}` && songWire.filePath === `/aggregated/${trackA.platform}/${trackA.rawID}.mp3` && songWire.sourceId === 'system-aggregated-music' && roundTrip && roundTrip.rawID === trackA.rawID && roundTrip.unresolved === false,
+        `上报 id=${songWire ? songWire.id : '-'} filePath=${songWire ? songWire.filePath : '-'}（与 iPhone 实测字段一致）`
+      );
+      step('同步上报包含自建歌单与我喜欢', wire.some((p) => p.id === created.id) && Boolean(likedWire), `${wire.map((p) => `${p.name}(${p.songs.length})`).join('、')}`);
+
+      // 探针数据不许留在用户库里（含刚收藏的那首）
+      store.library.toggleFavorite(trackA);
+      store.playlists.remove(created.id);
+      store.save(true);
+      const after = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+      step(
+        '歌单冒烟探针已清理',
+        !after.playlists.some((p) => p.id === created.id) && store.library.favorites().length === likedBefore,
+        `剩余歌单 ${after.playlists.length} 个，收藏 ${store.library.favorites().length} 首`
+      );
+      // 真网络路径不在冒烟里跑：CI 不许往用户的云端备份里写东西，契约由
+      // scripts/playlist-sync-contract-test.js 用本地假服务器覆盖（11 项断言）。
+    } catch (error) {
+      step('歌单 CRUD + 落盘', false, error.message);
+    }
+
     report.ui = await new Promise((resolve) => {
       // 让渲染层跑一次真实搜索，把它自己看到的 DOM 状态报回来
       send('smoke:run', { keyword: '晴天' });
@@ -468,12 +626,57 @@ async function runSmoke() {
       tick();
     });
     step('渲染层自检', Boolean(report.ui && report.ui.ready), JSON.stringify(report.ui));
+    step(
+      '歌单 UI 已接线（侧栏 / 播放模式 / 加入歌单入口）',
+      Boolean(report.ui && report.ui.navHasPlaylists && report.ui.playlistNav && report.ui.shuffleButton && report.ui.repeatButton && report.ui.addToPlaylistButtons > 0),
+      `侧栏歌单入口 ${report.ui && report.ui.navHasPlaylists}、播放队列 ${report.ui && report.ui.playlistNav}、随机按钮 ${report.ui && report.ui.shuffleButton}、循环按钮 ${report.ui && report.ui.repeatButton}、行内「＋歌单」${report.ui && report.ui.addToPlaylistButtons} 个`
+    );
 
     const image = await mainWindow.webContents.capturePage();
     require('fs').mkdirSync(OUT_DIR, { recursive: true });
     const shotPath = path.join(OUT_DIR, 'smoke-ui.png');
     require('fs').writeFileSync(shotPath, image.toPNG());
     step('界面截图', true, shotPath);
+
+    // 第二段：歌单页 / 详情 / ⋯菜单 / 加入弹层 / 同步页的真实 DOM。
+    // 上面那张截图是搜索页，证明不了这次新加的主体功能"看得见、点得到"。
+    const waitUI = (timeoutMs) =>
+      new Promise((resolve) => {
+        smokeUIState = null;
+        const waitStart = Date.now();
+        const tick = () => {
+          if (smokeUIState) return resolve(smokeUIState);
+          if (Date.now() - waitStart > timeoutMs) return resolve(null);
+          setTimeout(tick, 250);
+        };
+        tick();
+      });
+
+    send('smoke:run', { keyword: '', phase: 'playlist-ui' });
+    const pui = (await waitUI(20000)) || { ok: false, note: '渲染层 20s 内未回报歌单状态' };
+    const puiOk = Boolean(
+      pui.ok &&
+        pui.list && pui.list.rows >= 1 && pui.list.navItems >= 1 && pui.list.upload && pui.list.download &&
+        pui.detail && pui.detail.name && pui.detail.caption && pui.detail.playAll && pui.detail.shufflePlay &&
+        pui.detail.menuButton && pui.detail.songs === 2 && pui.detail.removeInRow === 2 && pui.detail.nextInRow === 2 &&
+        pui.menuItems && pui.menuItems.includes('重新排序') && pui.menuItems.includes('删除歌单') &&
+        pui.sheet && pui.sheet.visible && pui.sheet.title === '添加到歌单' && pui.sheet.createRow && pui.sheet.checked === 1 &&
+        pui.syncView && pui.syncView.form && pui.syncView.deviceId && pui.syncView.backup && pui.syncView.restore && pui.syncView.honest
+    );
+    step('歌单页渲染（列表 / 详情 / ⋯菜单 / 加入弹层 / 同步页）', puiOk, JSON.stringify(pui));
+
+    const playlistShot = path.join(OUT_DIR, 'smoke-ui-playlist.png');
+    require('fs').writeFileSync(playlistShot, (await mainWindow.webContents.capturePage()).toPNG());
+    step('歌单页截图', true, playlistShot);
+
+    send('smoke:run', { keyword: '', phase: 'playlist-cleanup' });
+    const cleaned = (await waitUI(10000)) || { removed: false, note: '渲染层未回报' };
+    const fs2 = require('fs');
+    store.save(true); // 渲染层的删除只走了 IPC，落盘还有 250ms 防抖
+    const stillOnDisk = JSON.parse(fs2.readFileSync(path.join(app.getPath('userData'), 'primuse.json'), 'utf8'))
+      .playlists.some((p) => p.name === '冒烟 UI 歌单');
+    step('歌单 UI 探针已清理', Boolean(cleaned.removed) && cleaned.stillThere === false && !stillOnDisk,
+      `${JSON.stringify(cleaned)}；落盘残留 ${stillOnDisk}`);
   } catch (error) {
     report.errors.push(String(error && error.stack ? error.stack : error));
   }

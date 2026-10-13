@@ -1,6 +1,6 @@
 # Primuse 跨平台方案：Windows 11 + macOS (Apple Silicon)
 
-状态：**决策已确认，可执行** · 起草：2026-10-13 · 适用范围：仓库 `C:\Tools2\halo_music`（Git 根，`primuse/` 为其子目录）
+状态：**决策已确认，可执行** · 起草：2026-10-13 · 最后更新：2026-10-14（§18：Windows 端歌单层与云端歌单同步，v1.9.10） · 适用范围：仓库 `C:\Tools2\halo_music`（Git 根，`primuse/` 为其子目录）
 
 > 已确认：Windows 走 **B1 薄壳 + 服务端复用**；Windows 音源范围为 **在线聚合 + 服务器型源**；分发 **先出未签名包**（Apple Silicon 侧用 ad-hoc 签名，见 §5 M4）。
 > 同日追加 D4–D7（见 §7）：壳 = **复用现成 `electron/`**；后端 = **沿用已部署的 `halo-music.pages.dev`，不重新部署**，接入口从 `/rest` 改为 `/api/music`；首版音源 = **全平台（网易+QQ+酷狗+酷我）**，酷狗/酷我由客户端主进程直连 meting；QQ 搜索字段 = **维持现状**。§3、§4、§5 M0.5/M2、§6、§9 均已按此修订。
@@ -16,6 +16,7 @@
 2. **Windows 不是移植而是新做客户端**。SwiftUI / AVFoundation / SFBAudioEngine / CloudKit / MusicKit / WidgetKit / CarPlay / App Intents / Translation / iTunesLibrary 在 Windows 无对应物。UI 层（191 个 SwiftUI 文件）必须重写；播放引擎必须替换。
    ~~**修订（D4 + §15）**：首版不重写，直接把现成的 `electron/` 壳打包成 Windows 包。~~ **该修订已作废（D4 是错的，见顶部与 §16）**：`electron/` 是 HALO 网页壳，打开是登录墙，不是 Primuse。
    **最终交付（§17）**：新建独立工程 `primuse-win/`，用 Electron **复刻 Primuse 本体**（自己的界面、自己的 9 条聚合线路、自己的道理鱼源），数据层按 §16.5/§16.6 的 HTTP 契约在 JS 里重实现，与 iPhone 版行为对齐。已在本机 Win11 出 `Primuse-Setup` + `Primuse-Portable` 两个 exe 并冒烟通过。
+   **v1.9.10 追加（§18）**：Windows 端补齐了**歌单层** —— 建/改名/删歌单、搜索结果"＋歌单"、从歌单移除、手动调序，随机/顺序/单曲循环，以及与 iPhone 共用 `primuse-sync-server` 的歌单上传/下载（同步的是歌单结构，不是歌曲源）。UI 与交互逐条对着 iPhone 的 Swift 视图抄，省略项见 §18.4。
 3. **真正可复用的资产是 `PrimuseKit`**：331 个文件中只有 17 个 import 了平台受限框架，模型层、GRDB 资料库、扫描/去重/CUE/流解析/元数据策略几乎全部是 Foundation 级别逻辑。
 4. ~~建议按"层"而不是按"平台"组织目录，核心下沉 + 各端薄壳；Windows 目录建议 `clients/primuse-win/`。~~
    ~~**修订（D4）**：Windows 首版不新建目录，直接复用仓库根已有的 `electron/`。~~ **两处均已作废（§16）**：Windows 首版**新建了** `primuse-win/`（不是 `clients/primuse-win/`，也不复用 `electron/`）。`core/primuse-core` 下沉属于后续 B3 形态，不是首版前置。
@@ -30,7 +31,7 @@
 |---|---|---|
 | HALO Music（Web + Cloudflare） | 仓库根：`index.html`、`major.js`、`functions/`、`admin/`、`migrations/`、`schema.sql`、`wrangler.toml` | 多源搜索/播放/歌单/歌词的网页应用，Pages Functions + D1；Electron 桌面壳在 `electron/`，`package.json` 配了 `electron-builder --win nsis/portable`（**注意：`nsis.script` 原来指着一份旧版模板抄本，会让打包 100% 失败，已修，见 §15**） |
 | HALO Subsonic 服务端 | `functions/rest/[[catchall]].js` + `_subsonic.js` | 实现 ping / getLicense / getMusicFolders / getIndexes / getMusicDirectory / getArtists / getArtist / getAlbum / getSong / search2 / search3 / stream / download / getCoverArt / getLyrics(BySongID) / getPlaylists / getPlaylist / create/update/deletePlaylist / star / unstar / getStarred / getAlbumList / getScanStatus。**曾是"Windows 端最省力的接入口"，但线上实例并未部署这一面**（`/rest/*` 回落到 SPA HTML，§10 线上实例复核），因此 Windows 首版改用已在线的 `/api/music`（D5） |
-| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，当前版本 1.9.8 (build 70)（唯一来源 `primuse/project.yml:25-26`，发版按 +1 规则走） |
+| Primuse 客户端（fork） | `primuse/` | 上游 `chenqi92/primuse`，本地 `narci2018/Primuse-halo-plus`，当前版本 1.9.10 (build 72)（唯一来源 `primuse/project.yml:25-26`，发版按 +1 规则走；`primuse-win/package.json` 必须同步同一个号） |
 | 聚合音源接入层 | `primuse/Primuse/Services/AggregatedMusic/` | 本地新增：meting / hyw / nxinxz / openApi 四类协议，默认 9 条硬编码线路，平台 QQ/网易/酷狗/酷我/bilibili |
 | lx 音源脚本 | `音源文件/`（23 个 .js，约 4.8 万行） | **无任何 Swift 代码引用**，当前为死资源；唯一 JS 引擎属于刮削器（`ConfigurableScraper.swift`），与 lx 音源格式不兼容 |
 
@@ -705,7 +706,7 @@ Release `v1.9.8` 现在 6 个 asset 全部 `state: uploaded`，正文里 Windows
 
 ### 17.3 真机冒烟（`npm run smoke` / 打包后的 `Primuse.exe --primuse-smoke`）
 
-同一份断言在 **dev、`dist/win-unpacked`、以及 NSIS 安装到 `%LOCALAPPDATA%\Programs\Primuse` 之后**三种形态下都跑过，1.9.9 全部 10 项 PASS（退出码 0）：
+同一份断言在 **dev、`dist/win-unpacked`、以及 NSIS 安装到 `%LOCALAPPDATA%\Programs\Primuse` 之后**三种形态下都跑过，1.9.9 全部 10 项 PASS（退出码 0）。v1.9.10 加歌单层后为 19 项（本机 dev 全绿，见 §18.6），三种形态的重跑是发版前动作：
 
 ```
 PASS 默认线路数量 — 实际 9 条（Swift 侧应为 9）
@@ -738,4 +739,48 @@ PASS 界面截图
 - **四平台靠道理鱼**：§13 的结论没变 —— 用户那台自建服务器才是四平台出声的来源。App 内"设置 → 音乐源 → 添加服务器源"可填地址与账号（凭据只进本机 DPAPI，不进日志、不进聊天）。**这一条只经过假服务器验证，没经过真服务器**。
 - 未做（W2 后半与 W5）：SQLite 曲库（收藏/最近播放/队列现在是 `primuse.json` 持久化，够用但不是 GRDB）、歌词翻译、其余服务器型源（subsonic/navidrome/jellyfin/emby/plex/fnMusic/songloft）、本地文件与 NAS 扫描（D1 明确不做）。
 - macOS 真机安装验证（任务 #5）与 Windows 安装器的 GUI 交互（拖拽进度条、托盘、媒体键）仍需人手；前者在这台机器上无法完成。
+
+---
+
+## 18. 歌单层：把 iPhone 的歌单与云端同步搬进 Windows（2026-10-14，v1.9.10 / build 72）
+
+用户提了 5 条：① 歌单同步（`https://primuse-sync-server.pages.dev/api/sync-playlists` 上传/下载）② 搜索结果可"添加到歌单"③ 可创建/删除/编辑歌单 ④ 歌单内可随机/顺序/单曲循环 ⑤ 忠于原版 UI，去掉 iPhone 苹果体系特有的东西。并给了两条硬约束：**"服务器同步的是歌单，不是歌曲源"**、**"优选忠于 UI、忠于功能"**（据此我没有去全网抓更多公开第三方线路 —— 那是在扩大抓取受版权保护音频的入口，不做；扩源走 §17.5 的自建协议路线 W5）。
+
+### 18.1 数据层：「我喜欢」是派生视图，不是第二份数据
+
+`store.js` 新增 `playlists` 模块，但**没有**给「我喜欢」建表。iPhone 侧它就是一个 `id = primuse.system.liked` 的系统歌单（`MusicLibrary.swift:5138`，首次点心形时才懒建 `:5140`），Windows 侧的收藏早就存在 `state.favorites` 里 —— 所以 `playlists.get(LIKED_PLAYLIST_ID)` 返回的是**按引用包住 `state.favorites` 的视图**，点心形与在歌单里移除是同一份数组，天然不会漂移；`load()` 会把任何持久化进来的 `primuse.system.liked` 行丢掉（它是派生的，落盘就是第二真源的开端）。`list()` 的顺序照抄 `MusicLibrary.swift:7707`：「我喜欢」置顶 + 用户歌单按 `updatedAt` 倒序。
+
+去重与匹配统一走 `trackKey(track)`（`kind|platform|sourceID|rawID`），所以 `add` 重复加入是 no-op，`toggle` 再点一次就是移除（对应 `AddToPlaylistSheet` 的 ✓ 行为）。
+
+### 18.2 云端契约：字段与 iPhone 实测逐字节对齐
+
+2026-10-14 只读 GET 现网拿到的真实行：`86A75176-7E98-48AC-9E80-32FD9875974F` / 设备名 iPhone / iOS / 4 个歌单（经典 232、我喜欢 1、神咒 2、佛经 6）。POST 备份体与 GET 恢复的包封见 `src/main/sync.js` 头注释。要点：
+
+- 上行歌曲只有 7 个字段：`id / title / artist / album / duration / filePath / sourceId`。聚合曲目必须写成 `agg_{platform}_{rawID}` + `/aggregated/{platform}/{rawID}.mp3` + `system-aggregated-music`（`AggregatedMusicService.swift:10,228,269`），自建服务器源写成 `dly_{sourceID}_{rawID}`。
+- 下行反解三层：`agg_*` → 可播聚合轨道；`dly_*` 且本机有同一台源 → 可播；`dly_*` 但本机没有那台源 → **`unresolved: true`**，UI 打「无对应源」徽标、播放时给一句可读错误，而不是假装能播。这就是"同步的是歌单不是歌曲源"在代码里的落点。
+- 超时 20 s，成功判定 `HTTP 200 && code === 0`，包封 `{code,message?,error?,data?}`。
+
+### 18.3 防覆盖：备份有硬闸，跨设备只读
+
+`sync.config.ownedByThisDevice` 是备份的**前置条件**：机器码不是本机持有的（例如刚从云端导入过别人的设备行）时，`backup()` 直接抛错并根本不发 POST。跨设备"下载歌单"只走 GET，绝不回写；导入自己的 deviceId 被拒（避免自覆盖）。恢复走 `mergeIncoming()`：同 id 或同名合并，不复制出两份同名歌单。
+
+### 18.4 UI 忠于原版的地方，以及**有意**不做的地方
+
+照抄的：歌单列表过滤掉「我喜欢」（`PlaylistListView.swift:36-38`）、行副标题「N 首 · 日期」、空态「没有歌单 / 创建歌单来整理你的音乐」、详情页「N 首歌曲」+ 全部播放/随机播放/⋯ 菜单、⋯ 菜单顺序（重新排序·加入播放队列·接下来播放·重命名·导出·删除歌单）、删除**不弹二次确认**（原版就没有）、「添加到歌单」弹层里"新建歌单"是输入框式表单且 ✓ 再点取消、封面用 `playlist.id` + 排序后成员 ID 的 FNV-1a 稳定哈希（`PrimuseKit/.../Playlist.swift:169-227`，故意不取第一首）。底部播放条顺序改成 shuffle·prev·play·next·repeat（`MacBottomBar.swift:146-192`），循环图标 off→all→one 循环、非 off 时点亮。
+
+**不做**（都在代码注释里点名了原因，别当 bug 补回来）：AI/规则智能歌单、更换封面（依赖本地封面文件）、批量选择（无多选态）、刮削缺失元数据（Windows 版没有本地歌曲表）。**重新排序是手动 ▲▼**（`PlaylistReorderSheet`，标题「调整播放顺序」）—— 原版根本没有"按标题排序"，我一开始写错了，已删掉 `sort()` 与那条菜单。
+
+### 18.5 播放模式
+
+`buildOrder(length, currentIndex, shuffle)`：无种子 Fisher–Yates 后把当前曲挪到最前（`AudioPlayerService.swift:10726-10737` 同规则），`indexAfter(delta)` 在 repeat=off 且走到头时返回 null（停），all 取模，one 原地。歌单内"随机播放"= `shuffleEnabled = true` + 随机起点（`PlaylistDetailView.swift:1106-1121`），不是打乱队列再从头放。
+
+### 18.6 验证（本机全绿）
+
+1. `scripts/playlist-sync-contract-test.js` —— 往 `require.cache` 注入假 store，让 `sync.js` 在纯 Node 下跑，起一个 D1 语义的本地假服务器，**种子就是 iPhone 那行真实备份的代表样本**（4 个歌单的 id/名称/字段逐字照抄现网，232 首的「经典」里取 3 首代表，所以假服务器上 iPhone 行的 `song_count` 是 6、`playlist_count` 是 4，断言按这个写）。11 项断言全绿：上行字段与 iPhone 实测逐字段相同、`agg_*` 往返、`filePath` 兜底反解、外来 `dly_*` 标 `unresolved`、备份用自己的机器码且**绝不改动 iPhone 那行**、`ownedByThisDevice=false` 时拒绝且不发请求、恢复合并、设备列表与跨设备导入只读、拒绝导入自己、404 转可读错误、从未备份过时 `restore()` 返回 `empty`。**CI 里跑的是这个假服务器，真网络路径不进 CI**：流水线不许往用户的云端备份写东西。
+2. `npm run smoke` —— 19 项全 PASS，其中 5 项是这次新加的数据层断言（歌单 CRUD+落盘、「我喜欢」= 系统歌单、`agg_*` 映射、上报含自建歌单与我喜欢、探针清理）与 3 项渲染层断言（歌单 UI 已接线、**歌单页渲染**：列表/详情/⋯菜单/加入弹层/同步页的 DOM 实测、歌单 UI 探针已清理）。渲染层这一段会**建一个真歌单、开三个页面读 DOM、截图、再删掉**，所以它证明的是"看得见点得到"，不是"代码写了"。`smoke-ui-playlist.png` 里能看到 ⋯ 菜单六项与两行曲目的 →/✕。
+3. CI `preflight` 新增一步 `node scripts/playlist-sync-contract-test.js`（与道理鱼契约、线路契约并列），红了就挡住 `build`。`verify-asar.js` 的必需文件表加了 `/src/main/sync.js`（现 13 项）。
+
+### 18.7 还没做
+
+云端"整库同步/歌曲源同步"（按用户纠正，不做）；歌单封面真图（现在依赖远端封面 URL 能否加载，加载不到退回 ♪）；批量选择与拖拽排序；把 Windows 的歌单结构回灌给 iPhone（现网契约是同一份，理论上 iPhone 下载 Windows 备份即可，**未验证**）。
 

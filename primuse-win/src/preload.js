@@ -66,6 +66,31 @@ contextBridge.exposeInMainWorld('primuse', {
     load: () => ipcRenderer.invoke('settings:load'),
   },
 
+  playlists: {
+    list: () => ipcRenderer.invoke('playlist:list'),
+    get: (id) => ipcRenderer.invoke('playlist:get', id),
+    create: (name) => ipcRenderer.invoke('playlist:create', name),
+    rename: (id, name) => ipcRenderer.invoke('playlist:rename', { id, name }),
+    remove: (id) => ipcRenderer.invoke('playlist:remove', id),
+    addSong: (id, track) => ipcRenderer.invoke('playlist:addSong', { id, track }),
+    toggleSong: (id, track) => ipcRenderer.invoke('playlist:toggleSong', { id, track }),
+    removeSong: (id, track) => ipcRenderer.invoke('playlist:removeSong', { id, track }),
+    move: (id, from, to) => ipcRenderer.invoke('playlist:move', { id, from, to }),
+    belongsTo: (track) => ipcRenderer.invoke('playlist:belongsTo', track),
+  },
+
+  sync: {
+    config: () => ipcRenderer.invoke('sync:config'),
+    setServerURL: (url) => ipcRenderer.invoke('sync:setServerURL', url),
+    setDeviceName: (name) => ipcRenderer.invoke('sync:setDeviceName', name),
+    backup: () => ipcRenderer.invoke('sync:backup'),
+    restore: () => ipcRenderer.invoke('sync:restore'),
+    devices: () => ipcRenderer.invoke('sync:devices'),
+    importFromDevice: (deviceId) => ipcRenderer.invoke('sync:import', deviceId),
+    exportPlaylist: (playlist) => ipcRenderer.invoke('sync:export', playlist),
+    importFile: () => ipcRenderer.invoke('sync:importFile'),
+  },
+
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 
   // 主进程菜单 / 系统媒体键 → 渲染层
