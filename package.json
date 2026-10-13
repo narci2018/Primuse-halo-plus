@@ -30,8 +30,8 @@
     "forceCodeSigning": false,
     "publish": {
       "provider": "github",
-      "owner": "zhoujungis",
-      "repo": "halo_music",
+      "owner": "narci2018",
+      "repo": "Primuse-halo-plus",
       "releaseType": "release"
     },
     "icon": "icon.svg",
@@ -67,8 +67,7 @@
       "createStartMenuShortcut": true,
       "shortcutName": "HALO Music",
       "runAfterFinish": true,
-      "include": "build/installer.nsh",
-      "script": "build/custom-installer.nsi"
+      "include": "build/installer.nsh"
     },
     "portable": {
       "artifactName": "HALO-Music-Portable-${version}-${arch}.${ext}"

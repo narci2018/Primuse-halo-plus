@@ -170,6 +170,8 @@ B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从
 
 ### M2 · Windows 客户端最小闭环（**修订版**，2026-10-13，依据 D4/D5/D6）
 
+> **进度（同日）**：M2 剩下的只是"数据层接道理鱼服务器"（§13）。打包与分发这一块已经打通并本地验证：nsis + portable 两个 exe 都能出、已进 CI、会挂到版本 Release（§15）。下面第 3、4 条"缺口 2/3"里以公开聚合线路为依据的判断，凡涉及"全平台能不能做到"，一律以 §13 为准。
+
 > 本节替换 0010 版计划。原来的四条前提被实测和你的决策改写了：`/rest/*` 在现网**没有部署**（§10 线上实例复核），后端**不重新部署**（D5），壳**用现成 `electron/`**（D4），音源**要全平台**（D6）。所以接入口从 Subsonic 改为 `/api/music`，酷狗/酷我从"下沉进后端"改为"客户端直连"。
 
 先回答你问的"下沉后端是什么意思"：**同一条第三方线路，可以让服务器去访问（下沉后端），也可以让用户自己的电脑直接访问（客户端直连）**。现在网页版 `major.js` 就是前者 —— 它只打同源的 `/api/music?action=netease_search`，由 Cloudflare 函数去访问网易/QQ，浏览器永远不碰第三方域名，所以既没有跨域（CORS）问题，也没有混合内容问题。好处是线路失效改服务器就行、客户端不用发版；代价是必须动后端，而你说不动后端。于是酷狗/酷我这两条只能选后者：**由 Windows 客户端自己直接去请求第三方 meting 接口**，iPhone 版现在就是这么干的（`AggregatedSourceStore.swift` 里 `api.qijieya.cn/meting?...server=kugou`、`music-api.gdstudio.xyz/api.php?...source=kuwo` 都是客户端直连）。这条路的固有代价：第三方线路挂了只能靠发版补救，而且这些线路多数是明文 `http`，在浏览器里会被混合内容拦截 —— 但在 Electron 里把请求放到**主进程**就绕开了，见下面的"缺口 2"。
@@ -389,6 +391,8 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 
 所以"跟 iPhone 一样直接访问"在工程上的真实含义是：**照抄 `AggregatedSourceStore.defaultSources` 那 9 条线路**，而不是访问 `halo-music.pages.dev`。这两件事在我的 M2 草案里被混为一谈，现在分开。
 
+> **本段已被 §13 部分纠正**：这里证明的只是"HALO 主站不是 iPhone 的数据源"。iPhone 上还有**服务器型**来源（道理鱼，地址与账号在设置里填），"跟 iPhone 一样"首先指接你那台自建服务器，其次才是那 9 条聚合线路。别把本段读成"iPhone 只有聚合线路"。
+
 ### 事实 3 · 目前没有任何在线的歌单同步端点
 
 - `https://primuse-sync-server.pages.dev/api/sync-playlists` → curl **http 000**（连不上，未部署或已删）
@@ -481,6 +485,59 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 3. **构建产物发布到 Release**：新增 `softprops/action-gh-release@v2` 步骤，把 DMG 与 ZIP 挂到同一个版本 tag 上，`append_body: true` 是必须的 —— iOS 与 macOS 两个 job 竞争写同一条 Release，后完成的那个不能抹掉先生成好的 changelog。顶部加了 `permissions: contents: write`（默认 token 没有写 Release 的权限）。
 4. **手动 dispatch 加了 `release_tag` 输入**，可以给已有版本补出包而不新建 tag；不填就只构建、不发布（否则 `github.ref_name` 是分支名，会造出一个叫 `main` 的 tag 和 Release）。
 
-效果：从现在起 **推 `v*` tag → Release 页面同时有 `.ipa`、`.dmg`、`.zip`**，匿名可下载，不需要登录 Actions。这次改动本身只触发 `preflight`（推的是 main 不是 tag），所以它的第一次真实验证是 preflight 变绿；macOS 的 Release 发布要等下一个 tag，或者用 dispatch 填 `release_tag=v1.9.7` 给已经发出去的 1.9.7 补上 Mac 包。
+效果：从现在起 **推 `v*` tag → Release 页面同时有 `.ipa`、`.dmg`、`.zip`**，匿名可下载，不需要登录 Actions。这次改动本身只触发 `preflight`（推的是 main 不是 tag），所以它的第一次真实验证是 preflight 变绿；macOS 的 Release 发布要等下一个 tag，或者用 dispatch 填 `release_tag=v1.9.7` 给已经发出去的 1.9.7 补上 Mac 包。**（Windows 的 `.exe` 随后由 §15 的 `build-win.yml` 一起挂到同一条 Release。）**
 
 仍未实测的部分：`softprops/action-gh-release@v2` 与 iOS 那条 job 的发布步骤在同一 tag 上的竞态（`append_body` 只保证不互相清空正文，不保证不重复创建 Release；两个 action 都是"存在即复用"，理论上安全，但要等下一次真发版才能确认）。
+
+---
+
+## 15. Windows 包：本地把 nsis 修好，再进 CI 发到同一条 Release（同日）
+
+你指出 Releases 上只有 iOS，macOS 已经有了，Windows 完全没有。确实：这个仓库的流水线里**从来没有过 Windows job**，`electron/` 那个壳也从没被打包验证过。所以我没有直接写 CI，而是先在本机（Windows）跑了一遍 `electron-builder`，因为出问题时 5 分钟就能定位，比在 CI 上盲跑快。
+
+### 第一个包直接失败，根因不在我们的代码里
+
+`npm ci` 同步正常，`win-unpacked` 与 `icon.svg → icon.ico` 都成功（SVG 图标会被自动转换，不是问题），失败在 NSIS 打包这一步：
+
+```
+Error in macro installApplicationFiles on macroline 91
+Error in script "<stdin>" on line 201 -- aborting creation process
+Usage: File [/nonfatal] [/a] (...)
+```
+
+逐层查下去：
+
+1. 报错的那条 `File` 是 `node_modules/app-builder-lib/templates/nsis/include/installer.nsh:100`：
+   `File "/oname=${UNINSTALL_FILENAME}" "${UNINSTALLER_OUT_FILE}"` —— 展开后第二个参数是**空字符串**，NSIS 因此把它当成"没给文件名"，打出 usage 并中止。
+2. `UNINSTALLER_OUT_FILE` 为空是 `out/targets/nsis/NsisTarget.js:340-345` 造成的：只要配置了 `nsis.script`（自定义 installer.nsi），这个函数就 `return { script, isCustomScript: true }` **提前返回**，既不会先跑一遍 `BUILD_UNINSTALLER` 生成卸载器，也不会给 `defines.UNINSTALLER_OUT_FILE` 赋值；第 298 行再把 undefined 拷进主 defines。也就是说"自定义脚本 + 复用官方 include"这条路在 26.x 上自己就是断的。
+3. `package.json` 里那个 `nsis.script: "build/custom-installer.nsi"` 值不值得为它承担这个断裂？`diff` 过了：**它和 26.15.3 自带的 `templates/nsis/installer.nsi` 逐行相同**（只差 CRLF），是从旧版 electron-builder 抄来的模板副本，没有任何定制内容。它唯一的实际效果就是触发第 2 条那个早退分支。
+4. 那个自定义"快捷方式选择页"靠的是 `nsis.include: "build/installer.nsh"` 里的 `customPageAfterChangeDir` 宏，而这个宏**官方模板就会调用**（`templates/nsis/assistedInstaller.nsh:42-43`）。所以删掉 `script` 不丢功能。
+
+改动：`package.json` 的 `build.nsis` 去掉 `script` 一行（`build/custom-installer.nsi` 文件留着不再引用，避免动上游作者的目录）。改完本机两个目标全绿：
+
+| 产物 | 大小 |
+|---|---|
+| `HALO-Music-Setup-1.9.7-x64.exe`（nsis，`perMachine: true` 需要管理员授权） | 89 MB |
+| `HALO-Music-Portable-1.9.7-x64.exe`（免安装单文件，不需要管理员） | 88 MB |
+| `latest.yml`（应用内更新元数据，`version: 1.9.7` + sha512） | 356 B |
+
+### 两个配置漂移顺手修掉
+
+- **`build.publish` 指向上游**：`owner/repo` 原来是 `zhoujungis/halo_music`，而 `electron/main.cjs:45-51` 在打包版里会 `autoUpdater.checkForUpdates()` 且 `autoDownload = true`（`:46` 的 `if (!app.isPackaged) return` 只在开发模式生效）。也就是说从本仓库发出去的 exe 会去下载**别人的**构建并静默自动安装。已改成本仓库 `narci2018/Primuse-halo-plus`，并把 `latest.yml` 一起挂到 Release，更新只来自这里。仍未验证：无证书时自动更新下载到的是未签名 exe，SmartScreen 会不会把自动安装卡住 —— 真机才知道。
+- **版本号来源**：`package.json` 自己的 `version` 是 HALO 上游的 2.0.0，和 Primuse 的 1.9.x 是两条血脉。CI 不改 `package.json`，而是 `--config.extraMetadata.version=<tag>`（本机验证过：产物名与 `latest.yml` 都变成 1.9.7），这样同一条 Release 上 iOS / macOS / Windows 三个包号数一致。
+
+### CI：新增 `.github/workflows/build-win.yml`
+
+`windows-latest` + Node 22 + `npm ci`（lock 已核对同步），只在 **tag（v\*）或手动 dispatch** 时跑，`--publish never`（不让 electron-builder 自己往 GitHub 传，发布统一交给 `softprops/action-gh-release@v2`，和 §14 的 macOS 步骤同一个形状、同样 `append_body: true`）。多了一步 `Verify artifacts`：断言两个 exe 非空且 `latest.yml` 里的 `version:` 等于本次 tag —— 防的是"job 全绿但根本没产出包"和"忘了传版本号于是又打出 2.0.0"。
+
+同一条 tag 现在有三个写正文的人，所以把 `build-ipa.yml` 的发布步骤也补了 `append_body: true`（它原来只有 `generate_release_notes: true`，最后完成的那个会把另外两个的安装说明覆盖掉）。
+
+从此推 `v*` tag 一条 Release 上会有：`Primuse-unsigned.ipa` + `Primuse-macos-arm64-*.dmg/.zip` + `HALO-Music-Setup-*.exe` + `HALO-Music-Portable-*.exe` + `latest.yml`，全部匿名可下载。
+
+### 这个包现在能播什么（重要，别当成 M2 完成了）
+
+首版 Windows 包 = **原样的 `electron/main.cjs`**，即 `loadURL("https://halo-music.pages.dev")` 加载线上 SPA（地址可用 `--url=` 或环境变量 `HALO_MUSIC_URL` 覆盖，`main.cjs:5-13`）。它等价于"用 Chromium 打开 HALO 网页版"，所以：
+
+- 能做的：网页版本身能做的（浏览、搜索、播放已登录态允许的音源、管理后台）。
+- **还没有**：iPhone 那条道理鱼自建服务器的薄壳（§13 的 M2 主路径）、播放控件常驻、以及 `音源文件/` 那 23 个 lx 脚本 —— 这些是 M2 的工作，需要你先给服务器地址。
+- 分发限制：无代码签名证书（D3），首次运行必过 SmartScreen「更多信息 → 仍要运行」。

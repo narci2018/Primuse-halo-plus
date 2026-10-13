@@ -1,0 +1,153 @@
+name: Build HALO Music Windows (Electron)
+
+# Windows 11 package for the fork: the existing Electron shell in electron/ +
+# the existing web player (index.html / major.js / styles.css / admin/), packed
+# by electron-builder straight out of package.json's "build" field. Nothing here
+# compiles Swift or PrimuseKit -- D1 (thin shell + server reuse) means the
+# Windows client is exactly this shell.
+#
+# Runs on a version tag (or on demand) only, and publishes the two EXEs plus
+# latest.yml onto that tag's GitHub Release, so one Release page carries
+# .ipa (iOS) + .dmg/.zip (macOS) + .exe (Windows).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish the EXEs to this existing GitHub Release tag (empty = build only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-win-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-win:
+    name: Build Win11 x64 (nsis + portable)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      # package-lock.json is committed, so ci (not install): a lock drift fails
+      # here in seconds instead of silently packing a different electron.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          npm ci
+          node -e "for (const p of ['electron','electron-builder']) console.log(p, require('./node_modules/'+p+'/package.json').version)"
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          # A tag is authoritative (v1.9.7 -> 1.9.7). For a manual dispatch the
+          # operator says which release this belongs to; with nothing given, fall
+          # back to the repository-wide version source primuse/project.yml.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            T="${{ github.event.inputs.release_tag }}"
+            if [ -n "$T" ]; then
+              V="${T#v}"
+            else
+              V=$(grep -m1 'MARKETING_VERSION:' primuse/project.yml | sed -E 's/.*"([^"]+)".*/\1/')
+            fi
+          fi
+          [ -n "$V" ] || { echo "::error::could not resolve a version"; exit 1; }
+          echo "resolved version: $V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Build nsis installer and portable exe
+        shell: bash
+        run: |
+          set -o pipefail
+          # --publish never: electron-builder would push the artifacts and
+          # latest.yml to the `publish` repo itself, using a token it must not
+          # have here. Publishing is done by the action-gh-release step below.
+          #
+          # extraMetadata.version overwrites package.json's own "2.0.0" (HALO's
+          # upstream lineage) with the release number, so the Setup/Portable file
+          # names, latest.yml, and the iOS/macOS assets on this tag all carry the
+          # same version. It only rewrites the packaged app's metadata.
+          npx electron-builder --win nsis portable \
+            --publish never \
+            --config.extraMetadata.version="${{ steps.ver.outputs.version }}" \
+            2>&1 | tee win-build.log
+
+      - name: Verify artifacts
+        shell: bash
+        run: |
+          # The failure mode worth guarding against is a "green" job that packed
+          # nothing (or packed 2.0.0 because the version override was dropped).
+          V="${{ steps.ver.outputs.version }}"
+          cd release
+          status=0
+          for f in "HALO-Music-Setup-$V-x64.exe" "HALO-Music-Portable-$V-x64.exe" "latest.yml"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::release/$f is missing or empty"
+              status=1
+            fi
+          done
+          grep -q "version: $V" latest.yml || { echo "::error::latest.yml is not stamped with $V"; status=1; }
+          ls -lh *.exe latest.yml
+          exit "$status"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: HALO-Music-win-x64-${{ steps.ver.outputs.version }}
+          path: |
+            release/HALO-Music-Setup-${{ steps.ver.outputs.version }}-x64.exe
+            release/HALO-Music-Portable-${{ steps.ver.outputs.version }}-x64.exe
+            release/latest.yml
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload build log when the build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: halo-win-build-log
+          path: win-build.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # A dispatch without release_tag only builds -- otherwise github.ref_name is
+      # the branch and the action would create a tag and Release named "main".
+      - name: Publish EXEs and latest.yml to the GitHub Release
+        if: github.event_name == 'push' || github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          # append, not replace: iOS and macOS publish onto the same Release, and
+          # whichever job lands last must not erase the others' notes.
+          append_body: true
+          files: |
+            release/HALO-Music-Setup-${{ steps.ver.outputs.version }}-x64.exe
+            release/HALO-Music-Portable-${{ steps.ver.outputs.version }}-x64.exe
+            release/latest.yml
+          body: |
+            ## Windows 11 x64 — 未签名
+
+            - `HALO-Music-Setup-${{ steps.ver.outputs.version }}-x64.exe`：安装版（NSIS，需要管理员授权，安装到 Program Files）
+            - `HALO-Music-Portable-${{ steps.ver.outputs.version }}-x64.exe`：免安装单文件，解压即用，不需要管理员权限 —— 自分发推荐这个
+            - `latest.yml`：应用内自动更新元数据；`build.publish` 已指向本仓库，所以更新只来自这里的 Release
+
+            两个 exe 都没有代码签名证书（`forceCodeSigning: false`）。首次运行 SmartScreen 会拦：点「更多信息」→「仍要运行」；
+            被 Defender 的「未知发布者」提示吓到属正常，不是捆绑了别的东西。

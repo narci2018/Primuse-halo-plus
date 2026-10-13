@@ -94,3 +94,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          # The macOS and Windows jobs publish onto this same tag. Without
+          # append_body, whichever of the three lands last rewrites the notes and
+          # drops the other two's install instructions.
+          append_body: true
