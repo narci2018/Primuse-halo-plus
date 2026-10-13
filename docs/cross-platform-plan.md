@@ -8,7 +8,7 @@
 
 ## 0. 结论摘要
 
-1. **macOS 支持在代码层面已经存在**，不需要新建 `Primuse-mac/` 目录。`project.yml` 中 `PrimuseMac` target（第 413 行起）复用 `Primuse/` 全部源码，含 `Views/Mac/` 三栏桌面 UI、菜单栏播放器、桌面歌词浮窗、mini player、iTunesLibrary 导入、SFBAudioEngine + FFmpeg 解码、WidgetKit 组件；bundle id 与 iOS 相同（`com.welape.yuanyin`，Universal Purchase）。Mac 侧缺的是**工程化**：可编译性验证、部署门槛过高（macOS 26.0）、arm64 打包/签名/公证流水线。
+1. **macOS 支持在代码层面已经存在**，不需要新建 `Primuse-mac/` 目录。`project.yml` 中 `PrimuseMac` target（第 413 行起）复用 `Primuse/` 全部源码，含 `Views/Mac/` 三栏桌面 UI、菜单栏播放器、桌面歌词浮窗、mini player、iTunesLibrary 导入、SFBAudioEngine + FFmpeg 解码、WidgetKit 组件；bundle id 与 iOS 相同（`com.welape.yuanyin`，Universal Purchase）。Mac 侧缺的是**工程化**：可编译性验证（**已完成**，CI 已出 `Primuse-macos-arm64-1.9.6-b68` 的 DMG+ZIP，见 §11）、部署门槛过高（macOS 26.0，仍未降级）、以及真机上的安装/启动验证。
 2. **Windows 不是移植而是新做客户端**。SwiftUI / AVFoundation / SFBAudioEngine / CloudKit / MusicKit / WidgetKit / CarPlay / App Intents / Translation / iTunesLibrary 在 Windows 无对应物。UI 层（191 个 SwiftUI 文件）必须重写；播放引擎必须替换。
 3. **真正可复用的资产是 `PrimuseKit`**：331 个文件中只有 17 个 import 了平台受限框架，模型层、GRDB 资料库、扫描/去重/CUE/流解析/元数据策略几乎全部是 Foundation 级别逻辑。
 4. 建议按"层"而不是按"平台"组织目录，核心下沉 + 各端薄壳；Windows 目录建议 `clients/primuse-win/`。
@@ -141,8 +141,8 @@ halo_music/
 
 ## 5. 分阶段执行计划（B1 路线，已确认）
 
-### M0 · macOS 真正可交付（1 周）
-- 新增 `.github/workflows/build-mac.yml`：`macos-14`（arm64）runner，`xcodegen generate` → `xcodebuild -scheme PrimuseMac -configuration Release` → `.app` → **ad-hoc 签名**（`codesign -s -`，Apple Silicon 强制要求任何可执行代码至少 ad-hoc 签名，否则直接 "killed: 9"）→ `hdiutil` 出 DMG → 上传 artifact。待有付费开发者账号后，再把 ad-hoc 换成 Developer ID + `notarytool submit --wait` + `stapler staple`。
+### M0 · macOS 真正可交付（1 周）—— **代码部分已完成，产物已出**（见 §11）
+- 新增 `.github/workflows/build-mac.yml`：实际用 **`macos-26`** runner（与本仓库既有 iOS 流水线一致，并按"带所需 platform 的最高 Xcode"自动选版本，不硬锁 Xcode），`xcodegen generate` → `xcodebuild -scheme PrimuseMac -configuration Release` → `.app` → **ad-hoc 签名**（`codesign -s -`，Apple Silicon 强制要求任何可执行代码至少 ad-hoc 签名，否则直接 "killed: 9"）→ `hdiutil` 出 DMG → 上传 artifact。待有付费开发者账号后，再把 ad-hoc 换成 Developer ID + `notarytool submit --wait` + `stapler staple`。
 - 评估把 `MACOSX_DEPLOYMENT_TARGET` 由 26.0 降至 15.0：需清点 `Views/Mac/` 与 `PrimuseApp.swift` 中 macOS 26-only 的 SwiftUI API。若降级成本过高，则文档明确"需 macOS 26 Tahoe"。
 - 核对 Mac 端聚合音源：`Primuse/` 源码共用 → `MusicSourceType.aggregated` 在 Mac 上自动可用，需验证明文 HTTP 线路（`http://103.79.184.97/...`）的可达性。
 - 交付物：可直接下载的 DMG + 《未签名包安装说明》（Gatekeeper 放行步骤）+ Mac 功能缺失清单。
@@ -151,9 +151,9 @@ halo_music/
 ### M0.5 · 后端就绪（B1 的前置，1 周，可与 M0 并行）
 B1 的本质是"Windows 客户端只是眼睛和耳朵"，能力上限等于后端提供的东西。这一步不做，M2 无从谈起。
 - 部署 HALO Music 到一个稳定域名（Cloudflare Pages + D1，`wrangler pages deploy`，迁移 `migrations/0001–0003`）。当前仓库里 D1 `database_id` 已写死，需确认是否为你自己的实例。
-- Subsonic 面补强：现有 `functions/rest/[[catchall]].js` 已覆盖 ping/search2/search3/stream/download/getCoverArt/getLyrics/歌单增删改/star 等，需补 **OpenSubsonic** 的 `getLyricsBySongId` 字级时间戳返回、`range` 请求支持（Primuse 的 Range 流播依赖）、以及 `getSimilarSongs`/`getRandomSongs`（首页推荐用）。
+- Subsonic 面补强：**已实测，Range 与 OpenSubsonic 两块都不缺**（§10：`Range: bytes=1000000-1000999` → 206 + `Content-Range`；`getLyricsBySongId` 返回 `structuredLyrics.synced` 逐行毫秒时间戳）。真正剩下的只有 `getSimilarSongs`/`getRandomSongs` 这类推荐型接口，以及 QQ 的专辑/封面/时长字段（§10 缺陷 3，属源优先级取舍，不是 Subsonic 协议缺口）。
 - **聚合平台缺口**：HALO 目前只有网易云 + QQ（QQ 失效时从 bilibili 补位），而 Primuse 侧的聚合模块已支持酷狗/酷我。**要么把 `AggregatedSourceStore` 的线路下沉进后端，要么 Windows 端一开始就只有网易+QQ。** 这是 B1 路线必须先接受的一条取舍。
-- 鉴权对齐：Primuse 的 Subsonic 源用 `salt`/`token`（MD5(salt+password)）或明文 `p:` 密码；HALO 的 `subsonic_auth.subsonic_secret` 需与之匹配，并确认 `u`/`t`/`s` 校验路径。
+- 鉴权对齐：**已实测可用**（token 分支 `u`+`t`/`s`，`t = md5(secret+salt)`，与 `Primuse/Services/Sources/SubsonicSource.swift` 的调用习惯一致；`p`/`enc:` 分支同样在同一个函数里）。前提是先补上 `migrations/0004_add_subsonic_tables.sql` —— 在此之前 `subsonic_auth` 表只存在于 `schema.sql`，用 migrations 建的库上 `/rest/*` 一律 `code 40`（§10 缺陷 1）。
 - 把解析类接口从客户端迁到服务端后，Apple 端可去掉 `NSAllowsArbitraryLoads = YES`，改为按域名的 ATS 例外。
 - 交付物：可访问的 `https://<domain>/rest/...?u=&t=&s=&v=&apiVersion=` 且能用现有 Primuse「Subsonic 源」跑通搜索→播放→歌词→加歌单。
 
@@ -223,7 +223,7 @@ B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从
 
 ## 9. 本方案未验证的部分
 
-- **`PrimuseMac` 是否真能编译** —— 已在 CI 上真跑三轮（见 §11）。结论：**目前编不过，但原因不在 Swift 代码**。第三轮跑了约 28 分钟后只报 2 个失败点，且都在 Objective-C 文件的前置头文件扫描阶段（`ScanDependencies ... FFmpegDecoderBridge.m`、`CloudInputSourceObjC.m`），根因是仓库自带的 FFmpeg macOS 切片里 20 个符号链接在 Windows 导入时被压成了普通文本文件。Swift 侧那一轮没有出现编译错误，说明 Mac target 的主体是可编的，工作量主要落在 vendored framework 与打包环节。
+- **`PrimuseMac` 是否真能编译** —— **已验证：能编，且已出包**（run 38381672057，26.1 分钟全绿，产物 `Primuse-macos-arm64-1.9.6-b68`，133.2 MB）。中间卡住的两次都不是 Swift 的问题：一次是 CI 的 destination 写法，一次是仓库自带的 FFmpeg macOS 切片被 Windows 导入压平了符号链接（详见 §11）。唯一仍然没有证据的，是这个 ad-hoc 包在真机上能不能装、能不能开、Gatekeeper 各版本的实际放行路径 —— 需要一个 M 系列 Mac 手工验证。
 - HALO 的 Subsonic 实现是否满足 Primuse 客户端的实际调用习惯 —— **已实测，见 §10**。
 - `forceCodeSigning: true` 下的 Windows 打包在无证书环境下必然失败 —— **已改为 `false`**。
 - Tauri + WASAPI 的位深/采样率协商、以及未签名 macOS 包在各版本 Gatekeeper 下的实际放行路径，需出包后实测。
@@ -309,4 +309,8 @@ Range 是 B1 路线成立的关键，Primuse 侧有 49 处 Range 相关调用依
 
 在 Windows 上 `git add -A` 会**再次**把这 20 条打回 `100644`（这就是当初坏掉的方式）。所以在 `build-mac.yml` 里加了一个构建前的结构校验步骤：逐个检查 4 个 framework 的 5 个入口是不是真符号链接、`Headers/<name>.h` 能否解析、`Versions/Current/<name>` 是否为真文件，并打印索引里 `120000` 的条数（应为 20）。它把 28 分钟的失败压缩成几秒钟的明确报错。
 
-**待办（M0 收尾）**：下一次运行仍可能暴露新的 macOS 专属问题（`iTunesLibrary.framework` 链接、WidgetKit 在 mac 上的宿主嵌入、deployment target 26.0 的 API 覆盖）。修完编过之后，还要验证 `package-mac-dmg.sh` 产出的 DMG 在真机上能装能开 —— 未签名 + ad-hoc 的 Gatekeeper 放行路径仍未实测（§9）。
+**M0 结果（同日）**：第五轮 run `38381672057` 全绿，26.1 分钟，13 个步骤无一失败，产物 artifact `Primuse-macos-arm64-1.9.6-b68`（DMG + ZIP，133.2 MB）。也就是说 Mac target 的 Swift 主体、WidgetKit 宿主页、FFmpeg 链接、ad-hoc 逐个签名与 `hdiutil` 打包一次性全部通过，M0 的代码部分到此结束。
+
+**仍未验证（必须真机）**：这个包在 M 系列 Mac 上能否双击启动、Gatekeeper 是"仍要打开"一次到位还是需要在「隐私与安全性」里点"允许"；CloudKit 同步与小组件在剥掉 entitlements 后是否只是静默不可用（脚本注释如此假设，但没有实测）。artifact 需要登录才能下载，匿名 GET 返回 401，所以本机无法自证。
+
+**下一轮构建要顺带确认的小改动**：`thin_arch` 之前是无效的（FFmpeg 的二进制在 `Versions/A/` 下，而框架顶层入口是符号链接，`find -type f` 根本走不到），现在显式点名四个框架并排在签名之前；默认仍为关闭，所以线上产物暂时还是 arm64+x86_64 通用包。
