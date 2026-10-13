@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' http: https: data: blob:; media-src 'self' http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:;"
+    />
+    <title>Primuse</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="titlebar">
+        <div class="brand">
+          <img src="icon.png" alt="" class="brand-icon" />
+          <span class="brand-name">Primuse</span>
+          <span class="brand-tag" id="version-tag"></span>
+        </div>
+        <div class="searchbox">
+          <input id="search-input" type="search" placeholder="搜索歌曲、歌手、专辑（在线聚合音源）" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="titlebar-actions">
+          <button id="btn-queue" class="ghost" title="队列 (Ctrl+Q)">队列</button>
+          <button id="btn-lyrics" class="ghost" title="歌词">歌词</button>
+        </div>
+      </header>
+
+      <div class="shell">
+        <nav class="sidebar">
+          <div class="nav-group">
+            <button class="nav-item" data-route="home">发现</button>
+            <button class="nav-item" data-route="search">搜索</button>
+          </div>
+          <div class="nav-group">
+            <div class="nav-title">音乐库</div>
+            <button class="nav-item" data-route="favorites">我喜欢的</button>
+            <button class="nav-item" data-route="history">最近播放</button>
+          </div>
+          <div class="nav-group">
+            <div class="nav-title">音源</div>
+            <button class="nav-item" data-route="online">在线聚合线路</button>
+            <div id="server-nav"></div>
+          </div>
+          <div class="nav-group grow">
+            <div class="nav-title">设备</div>
+            <button class="nav-item" data-route="settings">设置</button>
+          </div>
+        </nav>
+
+        <main class="detail" id="detail">
+          <div class="loading">正在载入…</div>
+        </main>
+
+        <aside class="drawer" id="drawer" hidden>
+          <div class="drawer-head">
+            <span id="drawer-title">队列</span>
+            <button class="ghost" id="drawer-close">×</button>
+          </div>
+          <div class="drawer-body" id="drawer-body"></div>
+        </aside>
+      </div>
+
+      <footer class="player-bar" id="player-bar">
+        <div class="pb-track">
+          <img id="pb-cover" class="pb-cover" alt="" />
+          <div class="pb-meta">
+            <div class="pb-title" id="pb-title">未播放</div>
+            <div class="pb-artist" id="pb-artist">在左侧选一首歌开始</div>
+          </div>
+          <button class="pb-like" id="pb-like" title="收藏 (Ctrl+L)">♡</button>
+        </div>
+
+        <div class="pb-center">
+          <div class="pb-buttons">
+            <button id="pb-prev" title="上一曲">⏮</button>
+            <button id="pb-play" class="primary" title="播放 / 暂停 (空格)">▶</button>
+            <button id="pb-next" title="下一曲">⏭</button>
+          </div>
+          <div class="pb-progress">
+            <span id="pb-current">0:00</span>
+            <input id="pb-seek" type="range" min="0" max="0" step="1" value="0" />
+            <span id="pb-total">0:00</span>
+          </div>
+        </div>
+
+        <div class="pb-right">
+          <button id="pb-repeat" class="ghost small" title="循环">单曲循环: 关</button>
+          <span class="vol-label">音量</span>
+          <input id="pb-volume" type="range" min="0" max="1" step="0.01" value="0.8" />
+        </div>
+      </footer>
+    </div>
+
+    <audio id="audio" preload="auto"></audio>
+    <div id="toast" class="toast" hidden></div>
+    <script src="app.js"></script>
+  </body>
+</html>

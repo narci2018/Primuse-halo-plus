@@ -1,0 +1,64 @@
+{
+  "name": "primuse-win",
+  "productName": "Primuse",
+  "version": "1.9.9",
+  "description": "Primuse 桌面版（Windows 11）— 与 iPhone/macOS 版同一套音乐源契约，App 内无账号体系",
+  "main": "src/main/main.js",
+  "author": "Welape (Primuse) · narci2018 fork",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --primuse-smoke",
+    "dist": "electron-builder --win nsis portable --publish never"
+  },
+  "devDependencies": {
+    "@electron/asar": "^3.4.1",
+    "electron": "37.10.3",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.welape.primuse.desktop",
+    "productName": "Primuse",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "artifactName": "Primuse-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Primuse-Portable-${version}-${arch}.${ext}"
+    },
+    "publish": null
+  }
+}

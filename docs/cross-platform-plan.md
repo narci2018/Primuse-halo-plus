@@ -5,6 +5,8 @@
 > 已确认：Windows 走 **B1 薄壳 + 服务端复用**；Windows 音源范围为 **在线聚合 + 服务器型源**；分发 **先出未签名包**（Apple Silicon 侧用 ad-hoc 签名，见 §5 M4）。
 > 同日追加 D4–D7（见 §7）：壳 = **复用现成 `electron/`**；后端 = **沿用已部署的 `halo-music.pages.dev`，不重新部署**，接入口从 `/rest` 改为 `/api/music`；首版音源 = **全平台（网易+QQ+酷狗+酷我）**，酷狗/酷我由客户端主进程直连 meting；QQ 搜索字段 = **维持现状**。§3、§4、§5 M0.5/M2、§6、§9 均已按此修订。
 > **§12–§13 是对上面两段的实测纠正**：HALO 现网只有 `/api/music`+`/api/version`，播放类接口要登录；9 条公开聚合线路今天只有网易能出声。**M2 的主路径已改为「道理鱼（DaoLiYu）薄壳」**（见 §13），因为 iPhone 的四平台播放来自一台地址由用户自填、带账号的服务器，而不是这些公开线路。
+>
+> **⚠️ 2026-10-13 路线作废（用户纠正，以 §16–§17 为准）**：上面两段里的 **D1（B1 薄壳 + 服务端复用）、D4（复用现成 `electron/`）、D5（接 `halo-music.pages.dev`）三处决策是错的**，错在一个前提上 —— 我把仓库根 `halo_music/` 当成了产品本体，把 `primuse/` 当成了它的 iOS 客户端。实际相反：**`C:\Tools2\halo_music\primuse` 是一个完整独立的音乐 App（Primuse），自带全部界面和自带音乐源，不依赖 HALO 后端一行代码**。用户要的是把这个 App 多做两个版本（win / macos），不是把 HALO 网页套壳。已按 `electron/` 打出的 `HALO-Music-Setup-*.exe` 属于错交付：它加载 `halo-music.pages.dev`，所以首屏是 HALO 的登录墙，而 Primuse iPhone 版**根本没有账号体系**。§3、§4、§5 M0.5/M2、§13、§15 中与这三个决策相关的部分全部保留作为过程记录，但**不再作为执行依据**；执行依据是 §16（方案）与 §17（Windows 端 W0–W4 的实际交付与实测记录）。macOS 那一端本来就是对的（`PrimuseMac` target = 同一个 App 的桌面版），已交付。
 
 ---
 
@@ -12,10 +14,11 @@
 
 1. **macOS 支持在代码层面已经存在**，不需要新建 `Primuse-mac/` 目录。`project.yml` 中 `PrimuseMac` target（第 413 行起）复用 `Primuse/` 全部源码，含 `Views/Mac/` 三栏桌面 UI、菜单栏播放器、桌面歌词浮窗、mini player、iTunesLibrary 导入、SFBAudioEngine + FFmpeg 解码、WidgetKit 组件；bundle id 与 iOS 相同（`com.welape.yuanyin`，Universal Purchase）。Mac 侧缺的是**工程化**：可编译性验证（**已完成**，见 §11）、部署门槛过高（macOS 26.0，仍未降级）、以及真机上的安装/启动验证。打包分发也已完成：DMG+ZIP 由 `v*` tag 自动挂到 Release（§14）。
 2. **Windows 不是移植而是新做客户端**。SwiftUI / AVFoundation / SFBAudioEngine / CloudKit / MusicKit / WidgetKit / CarPlay / App Intents / Translation / iTunesLibrary 在 Windows 无对应物。UI 层（191 个 SwiftUI 文件）必须重写；播放引擎必须替换。
-   **修订（D4 + §15）**：首版不重写，直接把现成的 `electron/` 壳打包成 Windows 包 —— 打包与分发这一环已经在本机与 CI 双向验证通过（Setup + Portable 两个 exe 进 Release）。剩下的全部在"数据层"：接你那台自建服务器（§13）。
+   ~~**修订（D4 + §15）**：首版不重写，直接把现成的 `electron/` 壳打包成 Windows 包。~~ **该修订已作废（D4 是错的，见顶部与 §16）**：`electron/` 是 HALO 网页壳，打开是登录墙，不是 Primuse。
+   **最终交付（§17）**：新建独立工程 `primuse-win/`，用 Electron **复刻 Primuse 本体**（自己的界面、自己的 9 条聚合线路、自己的道理鱼源），数据层按 §16.5/§16.6 的 HTTP 契约在 JS 里重实现，与 iPhone 版行为对齐。已在本机 Win11 出 `Primuse-Setup` + `Primuse-Portable` 两个 exe 并冒烟通过。
 3. **真正可复用的资产是 `PrimuseKit`**：331 个文件中只有 17 个 import 了平台受限框架，模型层、GRDB 资料库、扫描/去重/CUE/流解析/元数据策略几乎全部是 Foundation 级别逻辑。
-4. 建议按"层"而不是按"平台"组织目录，核心下沉 + 各端薄壳；Windows 目录建议 `clients/primuse-win/`。
-   **修订（D4）**：Windows 首版不新建目录，直接复用仓库根已有的 `electron/` + `package.json` 里的 `electron-builder --win` 配置；`clients/primuse-win/` 与 `core/primuse-core` 都属于 B3 阶段的形态，不是 B1 首版的前置。
+4. ~~建议按"层"而不是按"平台"组织目录，核心下沉 + 各端薄壳；Windows 目录建议 `clients/primuse-win/`。~~
+   ~~**修订（D4）**：Windows 首版不新建目录，直接复用仓库根已有的 `electron/`。~~ **两处均已作废（§16）**：Windows 首版**新建了** `primuse-win/`（不是 `clients/primuse-win/`，也不复用 `electron/`）。`core/primuse-core` 下沉属于后续 B3 形态，不是首版前置。
 
 ---
 
@@ -100,6 +103,8 @@ LyricsActivityAttributes.swift          Models/RecentAlbumsStore.swift
 
 ## 3. 架构方案：核心下沉 + 双端薄壳
 
+> **已作废（见 §16）**：本节假设"Windows 客户端只是眼睛和耳朵，数据面吃 HALO 后端"，这个前提错了。Primuse 的数据面在自己的连接器层，不在 HALO。目录形态（`clients/primuse-win/`）与"核心下沉"的方向仍然有用，但不再以 `backend/halo-music` 为接入口。
+
 ```
 halo_music/
 ├── core/
@@ -130,6 +135,8 @@ halo_music/
 ---
 
 ## 4. Windows 三条路线对比
+
+> **口径纠正（见 §16）**：这张表把"薄壳"定义成"壳 + HALO 在线接口"，因此 B1 的"能力上限由后端决定"是错的框架。按 §16 的实际做法，Windows 端的"薄壳"指的是 **Primuse 自己的壳**：UI 与数据面都在客户端，音源 = Primuse 内置的聚合线路 + 用户自配的服务器型源，与 iPhone 同一套契约，没有任何后端账号依赖。B2（Swift-on-Windows）的实测工作量评估也更新在 §16。
 
 | | **B1 薄壳 + 服务端复用（✅ 已选）** | B3 C-ABI 核心复用（后续演进方向） | B2 Swift-on-Windows 原生（不采用） |
 |---|---|---|---|
@@ -226,11 +233,11 @@ B1 不需要在 Windows 上编译 Swift，所以原先的"核心可移植化"从
 
 | 编号 | 决策 | 选定 | 直接后果 |
 |---|---|---|---|
-| D1 | Windows 技术路线 | **B1 薄壳 + 服务端复用** | Windows 端不写 Swift、不编 `PrimuseKit`；能力上限由 HALO 后端决定 |
+| D1 | Windows 技术路线 | ~~B1 薄壳 + 服务端复用~~ → **作废，改为 §16：Primuse 自有壳（UI 重写 + 数据层按 Swift 契约移植），不接 HALO 后端** | ~~Windows 端不写 Swift、不编 `PrimuseKit`；能力上限由 HALO 后端决定~~ → 能力上限由 Primuse 自己的连接器层决定，与 iPhone 一致 |
 | D2 | Windows 音源范围 | **在线 + 服务器型源** | 本地文件夹与 SMB/NFS/SFTP/WebDAV/S3 明确不在本轮范围（见 N4） |
 | D3 | 签名与分发 | **先出未签名包** | macOS 必须 ad-hoc 签名（Apple Silicon 硬要求）+ Gatekeeper 放行说明；Windows 接受 SmartScreen 警告，且现有 `forceCodeSigning: true` 需改为条件签名 |
-| D4 | Windows 壳 | **复用现成 `electron/`** | M2 在 `electron/` 里加 Windows 播放器界面，不引入 Rust/Tauri 工具链；包体 90MB+ 换取"Chromium 自带音频栈 + 已有 `--win nsis/portable` 配置"，首版最快。网络请求全部放主进程，避开 https 页面直连 http 线路的混合内容限制 |
-| D5 | 后端地址 | **沿用已部署的 `halo-music.pages.dev`，不重新部署** | 该实例的 `/api/*` 在线（QQ 搜索字段完整），但 `/rest/*` 不在线。所以 B1 的接入口从 Subsonic 改为 `/api/music`；Subsonic 面等到你愿意重新部署时再启用（Primuse iPhone 端本来就自带聚合音源，不依赖 `/rest`） |
+| D4 | Windows 壳 | ~~复用现成 `electron/`~~ → **作废：`electron/` 是 HALO 网页的壳，不是 Primuse 的壳。改为新建 `primuse-win/`（独立 Electron 工程，产品名/图标/界面都是 Primuse）** | ~~M2 在 `electron/` 里加 Windows 播放器界面~~ → 仍用 Electron（沿用已验证的 `--win nsis/portable` 出包链路和 Chromium 音频栈），但渲染层是照 `Views/Mac/` + `Views/NowPlaying/` 重写的 Primuse 界面，**默认不加载任何远程页面** |
+| D5 | 后端地址 | ~~沿用 `halo-music.pages.dev`，不重新部署~~ → **"不重新部署"仍然成立且更重要：Windows 版根本不接 HALO 后端** | Primuse 的数据面全在自己身上：聚合线路由客户端直连（`AggregatedMusicService.swift` 已是这个做法），服务器型源由用户在 App 内自填地址。HALO 现网的 `/api/music`、登录墙、`/rest` 是否部署，与 Windows 版无关 |
 | D6 | Windows 首版音源 | **全平台：网易 + QQ + 酷狗 + 酷我** | 后端只有网易/QQ/补位的 bilibili。酷狗/酷我改为**客户端直连 meting 线路**（与 iPhone 现有做法完全相同：`api.qijieya.cn/meting?...&server=kugou`、`music-api.gdstudio.xyz/api.php?...source=kuwo`），因此不需要后端改动，也不需要重新部署。日后若要把线路收敛到服务端，再单独做一次后端改造 + 部署 |
 | D7 | QQ 搜索字段 | **暂时维持现状** | 依据线上实测，`/api/music` 的 QQ 结果其实已带 `album`/`cover`/`albumMid`/`duration`，所以这条从"缺陷"降级为"配置口径要一致"；真正要修的只剩 `_subsonic.js` 里 `Number(duration) || 210` 那个假默认值 |
 
@@ -569,3 +576,166 @@ Release `v1.9.8` 现在 6 个 asset 全部 `state: uploaded`，正文里 Windows
 - 能做的：网页版本身能做的（浏览、搜索、播放已登录态允许的音源、管理后台）。
 - **还没有**：iPhone 那条道理鱼自建服务器的薄壳（§13 的 M2 主路径）、播放控件常驻、以及 `音源文件/` 那 23 个 lx 脚本 —— 这些是 M2 的工作，需要你先给服务器地址。
 - 分发限制：无代码签名证书（D3），首次运行必过 SmartScreen「更多信息 → 仍要运行」。
+
+---
+
+## 16. 正确的目标：把 `primuse/` 这个 App 做出 Windows 版和 macOS 版（2026-10-13，用户纠正后重写）
+
+用户原话：**"虽然我提交代码是用 C:\Tools2\halo_music 这个目录，但 C:\Tools2\halo_music\primuse 其实是一个独立的 iPhone 版本音乐 app，包含了完整的 UI 和自己设置好的音乐源……我只要你把 C:\Tools2\halo_music\primuse 做多两个版本，win 版和 macos 版本！"**
+
+### 16.1 macOS 端：已完成，不是待办
+
+`PrimuseMac` target 就是"macOS 版本"这件事的全部 —— 同一个 App、同一套 Swift 源码、桌面三栏 UI（`Views/Mac/` 25 个文件）。产物已进 Release 且匿名可下载：`Primuse-macos-arm64-1.9.8-b70.dmg` / `.zip`（§11 构建、§14 发布）。剩余的唯一缺口是真机验证（§5 任务 #5），这台 Windows 机器做不了。
+
+### 16.2 Windows 端：为什么不能"直接再编译一次"（逐文件实测）
+
+| 实测项 | 数字 | 证据 |
+|---|---|---|
+| 全仓 `.swift` | 745 文件 / 400,219 行 | 实际扫描 |
+| App target `primuse/Primuse/` | 325 文件 / 257,485 行 | 同上 |
+| SPM 包 `primuse/PrimuseKit/Sources/` | 151 文件 / 53,475 行 | 同上 |
+| **不含任何平台绑定框架（可移植面）** | **196 / 476 文件，52,117 / 310,960 行 = 16.8%** | `Views` 只有 2/128、`App` 0/9、`PrimuseKit` 107/151 |
+| import 命中（App / Kit） | SwiftUI **143**/0、AppKit **56**/0、UIKit **53**/0、AVFoundation 11/0、SFBAudioEngine 5/0、MusicKit 8/0、CloudKit 7/0、AppIntents 7/0、MediaPlayer 4/0、WidgetKit 4/0、CarPlay 1/0、Translation 2/0、iTunesLibrary 2/0、GRDB 2/10 | 逐文件 grep |
+| 已按平台分叉的文件 | 120 个含 `#if os(iOS)`(93) / `#if os(macOS)`(61) | 说明它天生是 iOS+macOS 双端代码，但没有第三个分支的位置 |
+
+三个硬障碍，按"能不能绕过"排序：
+
+1. **播放链不可移植，且集中在一处**：没有统一 Player 抽象，只有解码协议 `PrimuseAudioDecoder`（`Services/Audio/AudioDecoderProtocol.swift:59`），签名里就带 `AVAudioFormat`；`AudioEngine.swift` 1,228 行是 AVAudioEngine 节点图；`AudioPlayerService.swift` **12,402 行**混了 AVPlayer + AVAudioEngine + SFBAudioEngine + MediaPlayer NowPlaying + CarPlay + Widget，`AVPlayer` 还散落在 29 个文件里。Windows 对应物是 WASAPI/MediaFoundation，等于整层重写。
+2. **UI 128 个文件 110,943 行、143 处 SwiftUI**，SwiftUI 没有可用的 Windows 实现（社区移植到不了生产），AppKit/UIKit 同理。
+3. **依赖面**：GRDB 7.8.0（`LibraryDatabase.swift:566` 行，DatabasePool + 14 条迁移 + FTS5）官方只覆盖 Apple/Linux；CryptoKit 38 处需换 swift-crypto；`MusicSourceConnector`（`Services/Sources/MusicSourceProtocol.swift:633`）本身可移植，但 25 个实现里牵扯 AMSMB2 / NFSKit / Network.framework / Keychain。
+
+⇒ 把 Swift 直接搬上 Windows（原 B2）= 重写 UI 11 万行 + 重写播放 2.4 万行 + 移植网络与安全层，12–18 人·月，而且首版在这台机器上无法验证。**所以 Windows 版必须是"新做的同一个 App"，而不是"编译同一个 App"。**
+
+### 16.3 首版走法：Electron 复刻 **Primuse**，不复刻 HALO
+
+沿用 Electron 的三个理由（都不是"省写代码"，而是"少踩工具链"）：
+
+1. 出包链路在本仓库已经验证过：`nsis` + `portable` 都能出、都能挂 Release（§15），换 Tauri/Flutter 得先修一整套构建。
+2. Chromium 自带 mp3/m4a/flac/opus 解码，正好替代不可移植的 SFBAudioEngine + FFmpeg 那条链。
+3. 全部网络请求放主进程，明文 `http` 裸 IP 线路（`http://103.79.184.97`）不会被混合内容拦。
+
+**但不能复用现成的 `electron/`**：`electron/main.cjs:5-13` 默认 `loadURL("https://halo-music.pages.dev")`，`package.json` 的 `productName` 是 "HALO Music"、`appId` 是 `com.halomusic.desktop` —— 那是另一个产品的壳。因此新建 **`primuse-win/`**（独立 npm 工程，产品名/图标/界面都是 Primuse，**默认不加载任何远程页面，App 内没有账号体系**）。
+
+数据层不在 Swift 侧复用、而是照契约重写的原因：**行为一致取决于契约一致，不取决于语言一致**。聚合线路与服务器型源全是 HTTP/JSON，契约已经逐字段实测固定（§16.5 / §16.6），照抄的成本远低于把 GRDB + CryptoKit + AVFoundation 搬上 Windows。
+
+### 16.4 与 iPhone 行为对齐的硬要求（也就是验收口径）
+
+1. **首屏不是登录墙**，App 里不存在"Primuse 账号"。iPhone 上的登录只发生在添加需要鉴权的音源时（道理鱼的 `POST /api/auth/login`），或由 HALO 那种网页版自己的会话体系引入 —— 后者与本项目无关。
+2. **零配置即可搜索并播放**：`AggregatedSourceStore.swift:14-16,104-122` 在无存档时写入 9 条 `isEnabled:true` 默认线路，系统连接器 id `system-aggregated-music`（`AggregatedMusicService.swift:10`，`SourceManager.swift:2405-2411` 注册、UI 不可删）。Windows 版必须同样开箱可用。
+3. **四平台**（网易 / QQ / 酷狗 / 酷我，bilibili 补位）：能同时做到四平台的现实路径是用户那条自建服务器型源（§13），而**不是**这 9 条公开线路 —— §12 事实 4 的体检结论是今天只有网易出声。这一点 iPhone 上也一样，不是我引入的回归：Windows 版接上同一个道理鱼服务器后，四平台表现就与 iPhone 一致。
+4. 界面按 Mac 版的路由集合复刻：`MacRoute`（`Views/Mac/MacRoute.swift:6-19`）= `home / stats / search / sources / section / liked / playlist / smartPlaylist / source`，外加 `MacTool`（`:37-44`，歌词转换、重复、scrobble、缓存同步、设备传输）以弹框呈现，工具区不占主导航；骨架文件：`MacSidebar.swift`、`MacHomeView.swift`、`MacDetailContainer.swift`、`MacBottomBar.swift`、`MacNowPlayingView.swift`、`MacQueuePanel.swift`、`MacSourcesView.swift`、`MacSettingsView.swift`。
+5. 服务器型源的地址与账号只在 App 内输入并本地加密存储（iPhone 用 Keychain，Windows 用 `safeStorage`），**不经过聊天、不经过任何远端服务**。
+
+### 16.5 聚合线路契约（照抄 Swift，字段名不许改）
+
+`Services/AggregatedMusic/AggregatedMusicService.swift`：**全部 GET**（不是 POST）。协议枚举 `meting/hyw/nxinxz/openApi/customJson`（`AggregatedMusicModels.swift:57-62`）；平台 `qq/netease/kugou/kuwo/bilibili/custom`（`:4-10`），meting 侧名字 `tencent/netease/kugou/kuwo/bilibili`（`:34-42`），hyw 侧 `tx/wy/kg/kw/bili`（`:45-53`）。
+
+| 动作 | meting | hyw | nxinxz | openApi |
+|---|---|---|---|---|
+| 搜索（`:118/120/133-146/159/172`） | 含 `api.php`：`?types=search&count=20&source=<srv>&pages=1&name=<kw>`；否则 `?type=search&id=<kw>&server=<srv>&limit=20` | 搜索固定打 `api.qijieya.cn/meting`（qq/kugou）或 `music-api.gdstudio.xyz`（kuwo/netease） | 同左，硬编码 gdstudio | `<base>?msg=<kw>&type=json` |
+| 取播放地址（`:314/316/346-358/362/368-378`） | `api.php?types=url&source&id&br=320`；否则 `?server&type=url&id&br=320` | `?source=<key>&songId=<id>&quality=320k` → 取 `url` 或 `data.url` | `?id=<id>&level=320k&type=mp3` | `?msg=<id>&type=url` → 取 `url` 或 `data` |
+| 歌词（`:413/415/424/433/445`） | `types=lyric` / `type=lrc` → 取 `lyric\|lrc` | 回落 `api.qijieya.cn/meting?server&type=lrc&id` | 同左 | `?msg=<id>&type=lrc` |
+| 封面 | 搜索项里的 `pic`/`cover`（`:224`），无独立端点 | 同左 | 同左 | 同左 |
+
+响应识别三态（`:326-341`）：JSON 带 `url` / 纯文本 http 直链 / 302 跳转后的 URL。取到的地址是**平台 CDN 裸链、无自定义头**，含临时 token 有时效，所以 Swift 侧有 `streamURLCache`（`:286-305`），失败要重解析。UA 固定 `Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)`（`:126`）。
+
+9 条默认线路（`AggregatedSourceStore.swift:18-102`，均启用，括号内为 priority）：① QQ音乐(HYW) `hyw` `http://103.79.184.97/api/music/url` p20 · ② 网易云(GDStudio) `meting` `https://music-api.gdstudio.xyz/api.php` p18 · ③ 酷我(NXINXZ) `nxinxz` `http://music.nxinxz.com/kw.php` p16 · ④ 酷狗(HYW) 同 ① 地址 p15 · ⑤ 网易云(七洁雅) `meting` `https://api.qijieya.cn/meting` p14 · ⑥ 网易云(DreamMeting) `meting` `https://music.3e0.cn` p12 · ⑦ 酷我(HYW) 同 ① 地址 p10 · ⑧ QQ(七洁雅) `meting` `api.qijieya.cn/meting` p8 · ⑨ QQ(OpenAPI) `openApi` `https://tang.api.s01s.cn/music_open_api.php` p6。线路清单存 UserDefaults 键 `primuse.aggregated_sources.v2`（`:9,106,126`）。
+
+### 16.6 道理鱼（DaoLiYu）契约
+
+配置字段 `host, port:Int?, useSSL:Bool, basePath:String?, username, password, alternateTLSValidationHostname`（`Services/Sources/DaoLiYuSource.swift:15-24`）；端点 = `basePath + "/api" + path`（`PrimuseKit/Sources/PrimuseKit/Streaming/DaoLiYuAPIProtocol.swift:44-59`，scheme 由 `useSSL` 决定）。
+
+- 登录 `POST {base}/api/auth/login`，body 三键 `{"email":u,"username":u,"password":p}`（`DaoLiYuServiceClient.swift:521-539`），响应**取 `token`**（`:552`），之后 `Authorization: Bearer <token>` + `Accept: application/json`（`:509-510`），无自定义 UA/Referer。
+- 曲目列表 `GET /api/tracks?skip=&take=`（`:321-331`，`take≤500`，pageSize=100，`DaoLiYuSource.swift:8`），响应键 `items[]/total/skip/take`。单曲 `GET /api/tracks/{id}`（响应 `track` 或顶层）。
+- **没有搜索、没有歌单端点**：它是整库扫描型连接器，搜索靠本地资料库过滤（`MusicSourceConnector` + `SongScanningConnector`）。
+- 音频：iOS/macOS 的 `streamingURL` 返回 nil（`DaoLiYuSource.swift:259-262`），走 `fetchRange`（带 `Range` + `Accept-Encoding: identity`，必须 206，`:370-419`）或 `downloadTrack` 落缓存；只有 tvOS 才用带 Bearer 头的 `/download` 裸 URL（`:453-461`）。⇒ Windows 侧同样不能把 `/download` 直接丢给 `<audio>`（浏览器不会带 Authorization 头），必须由**本地 127.0.0.1 代理**转发 Range。
+- 歌词：详情 JSON 的 `lyricsSync`（逐字）与 `lyrics`（`:132-133`），`preferredLyrics` 取 `synchronizedLyrics ?? plainLyrics`（`:362-368`），值可以是字符串或字典 `content/text/lrc`（`:175-181`）。
+- 封面：`coverArtUrl/coverArtPath/album.coverArtUrl/album.coverArtPath`（`:126-131`）；绝对 URL 与 `/api/...` 原样用，否则 `GET /api/cover?path=<ref>`（`DaoLiYuAPIProtocol.swift:101-106`）。
+- 失效重登：`401 || 403` 判定鉴权失败（`:568-570`），清空 token 后**重试一次**，第二次仍失败才报 `.authenticationFailed`（`:400-403/474-480`）。
+- 其它服务器型源同层存在（`SubsonicSource.swift:17` 查询参数 `t=md5(password+salt)&s&u`、`MediaServerSource.swift:5` 的 jellyfin/emby/plex 用 `MediaBrowser Client=...,Token=` 头、`FnMusicSource`、`SongloftSource`），首版只做道理鱼，其余排在 W5。
+
+### 16.7 阶段划分（取代 §5 的 M2/M3）
+
+| 阶段 | 内容 | 完成判据 |
+|---|---|---|
+| W0 | `primuse-win/` 骨架：Electron + 三栏壳 + `MacRoute` 等价导航 + 本地 `settings.json` | 双击启动，首屏是"发现/搜索"，**没有登录框** |
+| W1 | 聚合线路数据层（§16.5 四类协议、9 条默认线路、优先级）全在主进程 | 零配置搜四平台，点击能出声、能拖进度 |
+| W2 | 播放器常驻（`MacBottomBar` 等价）+ 队列 + 歌词滚动 + 封面 + 收藏/最近播放本地库（SQLite） | 与 iPhone 交互语义一致，重启记住队列与音量 |
+| W3 | 道理鱼源（§16.6，含 127.0.0.1 Range 代理与 401 重登一次） | 在"来源"页填地址+账号后，能浏览自己的库并播放 |
+| W4 | CI：`primuse-win` 独立流水线出 `nsis`+`portable`，挂到版本 Release（`append_body: true`） | tag 一推，Release 上出现 Windows 的 Primuse 安装包 |
+| W5 | 其余服务器型源（subsonic/navidrome/jellyfin/emby/plex/fnMusic/songloft） | 逐源验收 |
+
+**明确不做**：本地文件与 SMB/NAS/SFTP/WebDAV/S3 扫描、CUE 分段、iTunesLibrary、CloudKit 同步、Widget/实时活动、CarPlay、歌词翻译、scrobble（排在 W5 后另议）、无损独占输出（Chromium 做不到 WASAPI 独占，承诺了就是坑）。
+
+### 16.8 已知取舍
+
+- meting 类线路通常给 128/320 kbps mp3，**不承诺 Hi-Res**。
+- 公开线路随时失效且只能靠发版补救 —— 这是 iPhone 版同样的固有代价，Windows 版把线路清单存本地可自加，至少不用等发版。
+- 自动更新：新工程的 `build.publish` 必须指本仓库 `narci2018/Primuse-halo-plus`，不要继承 `electron/` 那份指向上游 `zhoujungis/halo_music` 的旧值（§15 已修过一次，新工程再犯一次就是新 bug）。
+  **W4 落地时的修订**：`primuse-win/package.json` 的 `build.publish` 定为 `null`，即**首版不做应用内自动更新**。理由不是忘了配，而是未签名包装不了自己的更新 —— electron-updater 在 Windows 上会替换 exe，而新 exe 没有签名证书（D3），SmartScreen 会在"自动更新"这条用户没同意的路径上再拦一次，失败形态比手动下载更差。更新方式：来 Release 页面下新的 `Primuse-Setup-*.exe` 覆盖安装。将来买了证书再开 `publish`。
+
+## 17. W0–W4 已交付：`primuse-win/` 是 Primuse 本体的 Windows 版（2026-10-13）
+
+§16 的 Windows 端已经按 W0→W4 做完并在这台 Win11（build 26200）上实测过。记录的是"实际验证到什么程度"，不是"写了什么代码"。
+
+### 17.1 工程形态
+
+新目录 `primuse-win/`，与仓库根的 `electron/`（HALO 壳）**没有任何继承关系**：自己的 `package.json`、`package-lock.json`、`src/`、`build/icon.png`（图标取自 `primuse/Primuse/Resources/Assets.xcassets/AppIcon-Mac.appiconset/icon_512x512@2x.png`）。
+
+| 键 | 值 | 为什么 |
+|---|---|---|
+| `productName` / `appId` | `Primuse` / `com.welape.primuse.desktop` | 与 HALO 壳的 `HALO Music` / `com.halomusic.desktop` 区分开，两台机器上并存不冲突 |
+| `version` | 与 `primuse/project.yml` 同步（1.9.9） | 三个平台一条 Release 一个版本号 |
+| `devDependencies` | `electron 37.10.3`、`electron-builder 26.15.3`、`@electron/asar 3.4.1`，**全部精确版本** | electron-builder 拒绝范围版本（`^37.2.6` 会报 "Cannot compute electron version"）；钉死才保证 CI 与本机打包的是同一条 Electron |
+| `build.publish` | `null` | 见 §16.8 的修订 |
+| `win.forceCodeSigning` | `false` | D3：没有证书 |
+| 窗口 | `titleBarStyle: 'hiddenInset'` + 自绘标题栏 | 与 iPhone/macOS 版同一视觉，不出现系统菜单式网页壳 |
+
+主进程 `src/main/`：`main.js`（IPC + 生命周期 + 冒烟）、`httpx.js`（唯一发网络请求的出口，手动跟随重定向、gzip/br 解压）、`aggregated.js`（§16.5 契约）、`daoliyu.js`（§16.6 契约）、`proxy.js`（`127.0.0.1:0` 随机端口，把带鉴权/跨域限制的音频与封面转成 `<audio>`/`<img>` 可用的本地 URL，并透传 `Range`）、`store.js`（`userData/primuse.json` + `credentials.json`，密码走 `safeStorage`/DPAPI）。
+渲染层 `src/renderer/`：`index.html` + `app.js` + `styles.css`，通过 `preload.js` 暴露的 `window.primuse` 与主进程通信；`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，CSP 只允许 `media-src 'self' http://127.0.0.1:*`。
+**所有网络 I/O 都在主进程**：第三方线路大量是明文 http，放在渲染层会被 mixed-content 与 CORS 直接拦掉。
+
+### 17.2 与 Swift 的契约对齐（可执行、可回归的三处）
+
+1. `scripts/daoliyu-contract-test.js` —— 起一个 localhost 假服务器（登录、分页、详情、`/download` 校验 Bearer 并返回 206、token 轮换、密码错误），断言 §16.6 的 7 条规则。**当前 7/7 PASS**（登录 3 次、下载 1 次）。这是"道理鱼移植对不对"的唯一离线证据；真机那台服务器仍未验证过（见 17.5）。
+2. `scripts/verify-asar.js` —— 用 `@electron/asar` 列包内条目（按字节搜 `app.asar` 会假阴性），断言 12 个必需文件在包内，且 `/major.js`、`/admin/` 等 HALO 网页资产**没有**混进来。当前 15 条目、泄漏 0。
+3. CI 里的线路契约断言 —— `DEFAULT_SOURCES` 必须是 9 条、priority 序列必须是 `20,18,16,15,14,12,10,8,6`、四个平台都要有默认线路。改错一行就会在 preflight 红掉，而不是等用户发现"搜不到歌"。
+
+一处**有意偏离**：Swift 的 meting 搜索把 `duration` 写死 210（`AggregatedMusicService.swift` 内），JS 侧改成解析真实时长。偏离点写在代码注释里，不要当成 bug 改回去。
+
+### 17.3 真机冒烟（`npm run smoke` / 打包后的 `Primuse.exe --primuse-smoke`）
+
+同一份断言在 **dev、`dist/win-unpacked`、以及 NSIS 安装到 `%LOCALAPPDATA%\Programs\Primuse` 之后**三种形态下都跑过，1.9.9 全部 10 项 PASS（退出码 0）：
+
+```
+PASS 默认线路数量 — 实际 9 条（Swift 侧应为 9）
+PASS 聚合搜索有结果 — 共 64 条，平台分布 {"kugou":20,"netease":24,"qq":20}
+PASS 至少一条线路真能出声 — 可播平台 netease；明细 ["netease:65536B","qq:失败","kugou:失败","kuwo:失败"]
+PASS 本地代理 Range 透传 — 206 audio/mpeg 4096B via 127.0.0.1:58707
+PASS 网易歌词 — LRC 969 字符
+PASS 本地库持久化 — {"收藏":true,"历史":true,"队列":true,"播放器":true}
+PASS 道理鱼凭据只进 DPAPI（safeStorage） — 源已存 true；密码可解密回读 true；主 JSON 无明文 true；凭据文件为密文 true；safeStorage 可用 true
+PASS 冒烟探针已清理 — 收藏 0 服务器源 0
+PASS 渲染层自检 — {"ready":true,"rows":64,"hasPlayerBar":true,"hasLoginWall":false,...}
+PASS 界面截图
+```
+
+- `hasLoginWall: false` 是这一节存在的理由：上一版交付物（`HALO-Music-Setup-*.exe`）就是在这一条上不合格的。
+- 持久化那两项是**写盘后重新 `readFileSync` 校验**，不是读内存缓存：收藏/历史/队列/音量真的落到了 `primuse.json`；道理鱼密码只进 `credentials.json` 的 safeStorage 密文，主 JSON 与凭据文件里都搜不到明文（冒烟用假密码 `smoke-secret-1` 做反向断言）。探针数据在同一个 smoke 里清掉，不许留在用户库里。
+- 截图与报告落在 `%TEMP%/primuse-smoke/`（不能写 `dist/`：打包后 `__dirname` 在 `app.asar` 里，只读）。
+- 安装器静默安装的可复现坑：Git Bash 会把 `/S` 改写成 `S:/`，于是安装器以为没有静默参数、弹出资质向导并挂住（进程还在、目录不出现）。要么在真 cmd/PowerShell 里跑 `Primuse-Setup-1.9.9-x64.exe /S`，要么在 Git Bash 里写 `//S`。
+
+### 17.4 产物与 CI
+
+- 本机 `npx electron-builder --win nsis portable --publish never --config.extraMetadata.version=1.9.9` → `Primuse-Setup-1.9.9-x64.exe`（89 MB）、`Primuse-Portable-1.9.9-x64.exe`（88 MB）；`latest.yml` 不生成（`publish: null`）。
+- `.github/workflows/build-primuse-win.yml` 取代并**删除**了 `build-win.yml`（后者打的是 HALO 壳；两条 `v*` 流水线并存会让每个 Release 都多一个错包）。新流水线两个 job：`preflight`（语法检查 + §17.2 的三项离线断言 + 线路契约断言，几分钟）与 `build`（仅 tag / 手动触发，跑与本机同一条 electron-builder 命令 + 产物校验 + "不许变回 HALO 壳"的身份守卫 + 发到版本 Release，`append_body: true`）。preflight 是 build 的硬前置：契约断言红了就不出包。
+- **CI 里故意不跑**需要联网的冒烟（`--primuse-smoke`、`scripts/data-check.js`）：它们依赖别人家的公开线路，几天内就会变（§12 已证），把绿转红的原因落在陌生服务器上，不如在本机跑。
+- 触发条件**没有** `paths:` 过滤：tag 推送的 paths 过滤按该 commit 的改动文件算，一旦发版 commit 没碰 `primuse-win/`，Windows 包就会静默缺席。
+
+### 17.5 现在能播什么、还差什么
+
+- **能播**：网易云（经 gdstudio/qijieya/3e0 任一 meting 线路）。QQ/酷狗/酷我 的**公开线路当前全部取不到流** —— 与 §12 探测结论一致（HYW 线路要卡密、`music.nxinxz.com` 与 s01s openApi 已空、qijieya 的 tencent/kugou url 坏）。这不是移植缺陷：同一时刻 iPhone 版用这 9 条线路也是同样结果。
+- **四平台靠道理鱼**：§13 的结论没变 —— 用户那台自建服务器才是四平台出声的来源。App 内"设置 → 音乐源 → 添加服务器源"可填地址与账号（凭据只进本机 DPAPI，不进日志、不进聊天）。**这一条只经过假服务器验证，没经过真服务器**。
+- 未做（W2 后半与 W5）：SQLite 曲库（收藏/最近播放/队列现在是 `primuse.json` 持久化，够用但不是 GRDB）、歌词翻译、其余服务器型源（subsonic/navidrome/jellyfin/emby/plex/fnMusic/songloft）、本地文件与 NAS 扫描（D1 明确不做）。
+- macOS 真机安装验证（任务 #5）与 Windows 安装器的 GUI 交互（拖拽进度条、托盘、媒体键）仍需人手；前者在这台机器上无法完成。
+

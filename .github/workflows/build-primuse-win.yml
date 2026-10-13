@@ -1,0 +1,266 @@
+name: Build Primuse Windows (primuse-win)
+
+# The Windows 11 client of *Primuse itself* -- the same app as the iPhone build
+# and PrimuseMac, not a shell around the HALO web player. It lives in its own
+# project directory, `primuse-win/`, with its own package.json, its own
+# electron-builder config, and its own productName/appId.
+#
+# Why it replaces build-win.yml: that workflow packed the HALO Electron shell
+# (`electron/` loading the web player), whose first screen is a login wall with
+# registration closed. Primuse has no account system at all, so that artifact
+# was the wrong deliverable. See docs/cross-platform-plan.md §16 -- the old
+# workflow is deleted rather than kept, because if both were triggered by `v*`
+# every release page would carry a HALO-Music exe next to the Primuse one and
+# the mistake would keep shipping.
+#
+# Two jobs, mirroring build-mac.yml:
+#   preflight -- every push that touches primuse-win/. Offline and fast: syntax
+#               checks plus the DaoLiYu contract test against a fake local
+#               server. Answers "is the tree still packable" in under a minute.
+#   build     -- only on a version tag (v*) or manual dispatch. Packs the NSIS
+#               installer + portable exe and publishes both onto that tag's
+#               GitHub Release, next to the iOS .ipa and the macOS .dmg/.zip.
+#
+# Deliberately *not* in CI: the networked smoke (`npm run smoke`) and
+# scripts/data-check.js. They hit third-party meting/HYW/nxinxz/openApi lines
+# that go down within days -- a green build must not depend on strangers'
+# servers. Those checks run on this machine before a tag is pushed.
+
+on:
+  # No `paths:` filter, on purpose. A tag push filtered by paths only fires when
+  # the tag's commit happens to touch primuse-win/**, which is exactly the kind
+  # of silent miss that leaves a Release with an .ipa and a .dmg but no .exe.
+  # The cheap gate instead lives in the jobs: preflight is minutes, build is
+  # the only expensive step and it is limited to tags/dispatch.
+  push:
+    tags:
+      - "v*"
+    branches:
+      - "main"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish the EXEs to this existing GitHub Release tag (empty = build only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-primuse-win-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Preflight (syntax + DaoLiYu contract)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: primuse-win
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: primuse-win/package-lock.json
+
+      - name: Install dependencies
+        # package-lock.json is committed, so ci (not install): lock drift fails
+        # here in seconds instead of silently packing a different electron.
+        # @electron/asar is a transitive dep of electron-builder; the asar
+        # verifier in the build job needs it, so pin the expectation here.
+        run: |
+          npm ci
+          node -e "for (const p of ['electron','electron-builder','@electron/asar']) console.log(p, require(p + '/package.json').version)"
+
+      - name: Syntax check every source file
+        run: |
+          status=0
+          for f in $(find src scripts -name '*.js'); do
+            if ! node --check "$f"; then
+              echo "::error file=$f::$f does not parse"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: DaoLiYu contract test (fake server, no network)
+        # The Windows port re-implements the Swift source's HTTP contract in JS.
+        # This is the only thing that keeps the two from drifting apart silently,
+        # and it runs against a localhost stub so it is deterministic.
+        run: node scripts/daoliyu-contract-test.js
+
+      - name: Aggregated line contract is intact
+        # No live requests: assert the 9 default lines, their priorities and the
+        # URL-building rules still match AggregatedSourceStore.swift /
+        # AggregatedMusicService.swift. A typo here means "search returns nothing"
+        # on the user's machine with no compile error anywhere.
+        run: |
+          node -e '
+            const a = require("./src/main/aggregated.js");
+            const src = a.DEFAULT_SOURCES || (a.defaultSources && a.defaultSources());
+            if (!Array.isArray(src)) throw new Error("DEFAULT_SOURCES not exported");
+            if (src.length !== 9) throw new Error("expected 9 default lines, got " + src.length);
+            const ids = src.map((s) => s.id).join(",");
+            for (const need of ["default-qq-hyw", "default-netease-gdstudio", "default-kuwo-nxinxz", "default-qq-openapi-1"]) {
+              if (!ids.includes(need)) throw new Error("missing line " + need);
+            }
+            const prio = src.map((s) => s.priority).join(",");
+            if (prio !== "20,18,16,15,14,12,10,8,6") throw new Error("priority order drifted: " + prio);
+            const platform = new Set(src.map((s) => s.platform));
+            for (const need of ["qq", "netease", "kugou", "kuwo"]) {
+              if (!platform.has(need)) throw new Error("no default line covers platform " + need);
+            }
+            console.log("OK 9 lines / 4 platforms / priorities " + prio);
+          '
+
+  build:
+    name: Build Win11 x64 (nsis + portable)
+    # A failing preflight blocks the release: it is four offline assertions, so
+    # the only way it goes red is the code genuinely diverging from the Swift
+    # contract it is supposed to mirror.
+    needs: preflight
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: primuse-win
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: primuse-win/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          node -e "for (const p of ['electron','electron-builder']) console.log(p, require(p + '/package.json').version)"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          # A tag is authoritative (v1.9.9 -> 1.9.9). On a manual dispatch the
+          # operator names the release; with nothing given, fall back to the
+          # repo-wide version source so all three platforms stamp one number.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            T="${{ github.event.inputs.release_tag }}"
+            if [ -n "$T" ]; then
+              V="${T#v}"
+            else
+              V=$(grep -m1 'MARKETING_VERSION:' ../primuse/project.yml | sed -E 's/.*"([^"]+)".*/\1/')
+            fi
+          fi
+          [ -n "$V" ] || { echo "::error::could not resolve a version"; exit 1; }
+          echo "resolved version: $V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Guard against re-introducing the HALO shell
+        # The retracted route loaded https://halo-music.pages.dev from the shell.
+        # Cheap grep, and it is the only automated defence against a future edit
+        # quietly pointing Primuse at a remote web app again.
+        run: |
+          if grep -rn "halo-music.pages.dev\|halomusic.desktop" src package.json; then
+            echo "::error::primuse-win must not reference the HALO web player or its appId"
+            exit 1
+          fi
+          grep -q '"productName": "Primuse"' package.json || { echo "::error::productName drifted from Primuse"; exit 1; }
+          grep -q '"appId": "com.welape.primuse.desktop"' package.json || { echo "::error::appId drifted"; exit 1; }
+          echo "OK: product identity is Primuse, no HALO web-player references"
+
+      - name: Build nsis installer and portable exe
+        run: |
+          set -o pipefail
+          # --publish never: build.publish is null in package.json, and the job
+          # must not push latest.yml/artifacts anywhere with a token it lacks.
+          # extraMetadata.version stamps the release number into the packaged
+          # app's metadata and the artifact file names.
+          npx electron-builder --win nsis portable \
+            --publish never \
+            --config.extraMetadata.version="${{ steps.ver.outputs.version }}" \
+            2>&1 | tee win-build.log
+
+      - name: Verify what got packed
+        run: |
+          # A green job that packed the wrong files is the failure mode here: the
+          # asar list is the proof the artifact contains Primuse's own renderer
+          # and none of the HALO web player.
+          V="${{ steps.ver.outputs.version }}"
+          status=0
+          for f in "Primuse-Setup-$V-x64.exe" "Primuse-Portable-$V-x64.exe"; do
+            if [ ! -s "dist/$f" ]; then
+              echo "::error::dist/$f is missing or empty"
+              status=1
+            fi
+          done
+          # A remote-update descriptor must not exist: publish is null and an
+          # unsigned self-distribution has no update channel.
+          if [ -f dist/latest.yml ]; then
+            echo "::error::dist/latest.yml appeared although build.publish is null -- auto-update was silently enabled"
+            status=1
+          fi
+          node scripts/verify-asar.js || status=1
+          ls -lh dist/*.exe
+          exit "$status"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Primuse-win-x64-${{ steps.ver.outputs.version }}
+          path: |
+            primuse-win/dist/Primuse-Setup-${{ steps.ver.outputs.version }}-x64.exe
+            primuse-win/dist/Primuse-Portable-${{ steps.ver.outputs.version }}-x64.exe
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload build log when the build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: primuse-win-build-log
+          path: primuse-win/win-build.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # A dispatch without release_tag only builds -- otherwise github.ref_name is
+      # the branch and the action would create a tag and Release named "main".
+      - name: Publish EXEs to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          # append, not replace: iOS and macOS publish onto the same Release, and
+          # whichever job lands last must not erase the others' notes.
+          append_body: true
+          files: |
+            primuse-win/dist/Primuse-Setup-${{ steps.ver.outputs.version }}-x64.exe
+            primuse-win/dist/Primuse-Portable-${{ steps.ver.outputs.version }}-x64.exe
+          body: |
+            ## Windows 11 x64 — Primuse 桌面版（未签名）
+
+            这是 **Primuse App 本体**的 Windows 版（与 iPhone 版、macOS 版同一套音源契约），不是网页壳：
+            打开就是 Primuse 界面，**没有账号、不需要登录、不需要部署任何后端**，装完即用内置的 9 条聚合线路搜索播放。
+
+            - `Primuse-Setup-${{ steps.ver.outputs.version }}-x64.exe`：安装版（NSIS，可选安装目录，建桌面/开始菜单快捷方式）
+            - `Primuse-Portable-${{ steps.ver.outputs.version }}-x64.exe`：免安装单文件，双击即用，不需要管理员权限 —— 自分发推荐这个
+
+            两个 exe 都没有代码签名证书（`forceCodeSigning: false`，见决策 D3）。首次运行 SmartScreen 会拦：点「更多信息」→「仍要运行」；
+            Defender 提示「未知发布者」属正常，不是捆绑了别的东西。
+            要在 Win11 上用自己那台服务器型音源（道理鱼），在 App 内「设置 → 音乐源」里填地址和账号；凭据只存在本机（DPAPI 加密），不会上传。

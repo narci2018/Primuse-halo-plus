@@ -11,3 +11,8 @@ test-results/
 .DS_Store
 .user-favorites.json
 .claude/
+
+# primuse-win（Windows 版 Primuse）：构建产物与本地日志不入库
+primuse-win/dist/
+primuse-win/*.log
+primuse-win/win-build.log
