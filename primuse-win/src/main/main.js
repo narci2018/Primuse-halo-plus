@@ -16,6 +16,7 @@ const path = require('path');
 const { app, BrowserWindow, Menu, Tray, ipcMain, shell, nativeImage, globalShortcut, dialog } = require('electron');
 
 const aggregated = require('./aggregated');
+const cloudSources = require('./cloud-sources');
 const { DaoLiYuClient, originOf } = require('./daoliyu');
 const store = require('./store');
 const sync = require('./sync');
@@ -67,8 +68,47 @@ async function resolveStreamURL(track, force = false) {
       client,
     };
   }
-  const url = await aggregated.resolveStreamURL(store.aggregated.list(), track.platform, track.rawID, force);
+  const url = await aggregated.resolveStreamURL(store.aggregated.list(), track.platform, track.rawID, force, hooksFor(track));
   return { kind: 'aggregated', url, proxied: `${proxy.baseUrl}/stream/agg/${track.platform}/${encodeURIComponent(track.rawID)}${force ? '?force=1' : ''}` };
+}
+
+/**
+ * 云端清单里的洛雪 js 源（protocolType==='lxjs'）本机跑不了脚本，搜索/取流/歌词都得经
+ * /api/music-gateway；hooksFor 就是这个开关 —— 没有云端 lxjs 源时返回空对象，
+ * 行为和以前一字不差（内置 9 条线路全部本机直连）。
+ * prefer：这首歌是哪条线搜到的就先问哪条线要直链。
+ */
+function hooksFor(track) {
+  const hooks = cloudSources.hooks();
+  if (track && track.sourceId) hooks.prefer = track.sourceId;
+  return hooks;
+}
+
+/**
+ * 给渲染层的云端音源快照：清单状态 + 服务端设置（首页文案，需求 5）+ 可用源。
+ * 渲染层拿不到清单正文，也不该拿 —— 它只要这几样就能把界面画对。
+ */
+function cloudPayload() {
+  const man = cloudSources.manifest() || {};
+  return {
+    config: cloudSources.config(),
+    settings: man.settings || null,
+    usable: man.usable || [],
+    contract: man.contract || null,
+  };
+}
+
+/* 需求 4「支持实时更新音乐源」：开机拉一次，之后每 15 分钟拿 ETag 问一次 ——
+   没变化服务端回 304，几百字节，不打扰第三方站点；有变化就把新清单推给渲染层。
+   拉不到（断网 / CF 抖）不动本机那份：上一次检到能出声的线路照样能播。 */
+const CLOUD_POLL_MS = 15 * 60 * 1000;
+function startCloudSourceSync() {
+  const tick = async () => {
+    const out = await cloudSources.refresh({ force: false }).catch(() => null);
+    if (out && out.ok && out.changed) send('cloud:updated', cloudPayload());
+  };
+  tick();
+  setInterval(tick, CLOUD_POLL_MS);
 }
 
 async function trackLyrics(track) {
@@ -79,7 +119,7 @@ async function trackLyrics(track) {
     // preferredLyrics：逐字优先（DaoLiYuSource.swift:362-368）
     return detail.syncedLyrics || detail.plainLyrics || null;
   }
-  return aggregated.resolveLyrics(store.aggregated.list(), track.platform, track.rawID);
+  return aggregated.resolveLyrics(store.aggregated.list(), track.platform, track.rawID, hooksFor(track));
 }
 
 // MARK: - IPC
@@ -94,20 +134,38 @@ function registerIpc() {
     smoke: SMOKE,
   }));
 
-  // 在线聚合线路
+  // 在线聚合线路。增删改在 cf-sync-server 后台（清单里没下发编辑接口），本机只读 + 刷新。
   ipcMain.handle('sources:list', () => store.aggregated.list());
   ipcMain.handle('sources:toggle', (_e, id) => store.aggregated.toggle(id));
   ipcMain.handle('sources:upsert', (_e, source) => store.aggregated.upsert(source));
   ipcMain.handle('sources:remove', (_e, id) => store.aggregated.remove(id));
   ipcMain.handle('sources:reset', () => store.aggregated.reset());
-  ipcMain.handle('sources:pingAll', async () => {
-    const list = store.aggregated.list();
-    for (const source of list) {
-      const latency = await aggregated.pingSource(source);
-      store.aggregated.setLatency(source.id, latency);
-      send('sources:latency', { id: source.id, latencyMs: latency });
+
+  // 「检测全部可用」（需求 2）。以前这条叫"检测全部延迟"，HEAD 通了就绿灯 ——
+  // 能访问不等于能播放，一定要能播放的源才有价值。现在的判据和服务端一致：
+  // 搜索 → 解析直链 → Range 真取 64KB 字节看魔数；洛雪 js 源本机跑不了脚本，
+  // 就用服务端体检下发的结论，并如实标 origin:'server'。
+  ipcMain.handle('sources:checkAll', async () => {
+    await cloudSources.refresh({ force: true }).catch(() => null); // 先把服务端的最新结论拉下来
+    const verdicts = await cloudSources.checkAll(store.aggregated.list(), (v) => send('sources:verdict', v));
+    return { verdicts, sources: store.aggregated.list(), ...cloudPayload() };
+  });
+
+  // 云端音乐源：客户端只需要保存这一个 URL（需求 4）。
+  // 载荷带上 settings（首页文案，需求 5）与 usable（可用源），渲染层不用再去解清单正文。
+  ipcMain.handle('cloud:config', () => cloudPayload());
+  ipcMain.handle('cloud:refresh', async (_e, { force } = {}) => {
+    const out = await cloudSources.refresh({ force: Boolean(force) });
+    if (out.ok && out.changed) send('cloud:updated', cloudPayload());
+    return { ...out, ...cloudPayload() };
+  });
+  ipcMain.handle('cloud:setURL', (_e, url) => {
+    try {
+      const config = cloudSources.setManifestURL(url);
+      return { ok: true, config };
+    } catch (error) {
+      return { ok: false, error: error.message };
     }
-    return store.aggregated.list();
   });
 
   // 搜索：主进程并发打线路，渐进推给渲染层（对应 Swift 的流式上屏）
@@ -115,7 +173,7 @@ function registerIpc() {
     try {
       const items = await aggregated.searchAll(store.aggregated.list(), keyword, (partial, progress) => {
         send('search:partial', { requestId, items: partial, progress });
-      });
+      }, cloudSources.hooks());
       return { ok: true, requestId, items };
     } catch (error) {
       return { ok: false, requestId, error: error.message, items: [] };
@@ -770,7 +828,7 @@ async function runSmoke() {
       (h.sections || []).length >= 4 && (h.sections || []).includes('我的歌单') && (h.sections || []).includes('快捷收藏')
     );
     const pagesOk = Boolean(
-      h.title === '首页' &&
+      h.title === (h.titleExpected || '首页') &&
         (h.aggregatedCTA || homeHasContent) &&
         l.title === '资料库' &&
         JSON.stringify(l.rows) === JSON.stringify(['歌曲', '专辑', '艺术家', '歌单', '我喜欢', '最近播放', '听歌统计']) &&
@@ -809,13 +867,84 @@ async function runSmoke() {
     const hv = (await waitUI(15000)) || { note: '渲染层未回报首页状态' };
     step(
       '放回首页（首页 tab 栈复位、无浮层残留）',
-      Boolean(hv.title === '首页' && Array.isArray(hv.overlayLeaks) && hv.overlayLeaks.length === 0),
+      Boolean(hv.title && hv.title === (hv.expectedTitle || '首页') && Array.isArray(hv.overlayLeaks) && hv.overlayLeaks.length === 0),
       JSON.stringify(hv)
     );
 
     const homeShot = path.join(OUT_DIR, 'smoke-ui-home.png');
     require('fs').writeFileSync(homeShot, (await mainWindow.webContents.capturePage()).toPNG());
     step('首页截图', true, homeShot);
+
+    // 「聚合音乐源」这一屏（需求 2/4/5 的界面侧证据）。断言只看渲染结果：
+    // 清单 URL 真的写在屏幕上、按钮真的画出来了、三种体检结论真的分了三组、
+    // "未检出"那一组确实没挂「建议删除」。合成的结论只活在渲染层 state 里，
+    // 一条都不许落进 store —— 停线与删除是 CF 后台的权力。
+    send('smoke:run', { keyword: '', phase: 'cloud-sources' });
+    let cs = (await waitUI(20000)) || {};
+    // 等画面真的换成云源页再截图。上一张图里还写着「首页」时，DOM 那边已经断言通过了 ——
+    // 组合器提交一帧比 IPC 回一句慢，"截了张旧图"这种证据不如不留。
+    for (let i = 0; i < 20; i += 1) {
+      const shot = (await mainWindow.webContents.capturePage()).toPNG();
+      const png = `data:image/png;base64,${shot.toString('base64')}`;
+      const data = await mainWindow.webContents.executeJavaScript(
+        `new Promise((r)=>{const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=im.width;c.height=im.height;const x=c.getContext('2d');x.drawImage(im,0,0);r(c.toDataURL('image/png'))};im.onerror=()=>r('');im.src=${JSON.stringify(png)}})`
+      );
+      const text = await mainWindow.webContents.executeJavaScript(`document.querySelector('#screen') ? document.querySelector('#screen').innerText.slice(0,2000) : ''`);
+      cs = { ...cs, _shot: data, _text: text };
+      if (String(data).length > 1000 && /聚合音乐源/.test(text) && /〔冒烟〕/.test(text)) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const csShotPng = String(cs._shot || '');
+    const csShotPage = /聚合音乐源/.test(String(cs._text || ''));
+    delete cs._shot;
+    delete cs._text;
+    const csPage = cs.page || {};
+    const csVer = cs.verdicts || {};
+    const csHome = cs.homeHeader || {};
+    const csOk = Boolean(
+      csHome.painted &&
+        csHome.shown === csHome.expected &&
+        csPage.title === '聚合音乐源' &&
+        /^https?:\/\/\S+\/api\/music-sources/.test(csPage.manifestURL || '') &&
+        JSON.stringify(csPage.buttons) === JSON.stringify(['检测全部可用', '刷新云端清单']) &&
+        csPage.allButtonsPainted === true &&
+        csPage.refreshInNav === true &&
+        csPage.editControls === 0 && // 需求 3：增删改只在 CF 后台，本机一个编辑控件都不许长出来
+        csPage.hintMentionsCF === true &&
+        csVer.rowCount === 3 &&
+        csVer.iconsPainted === true &&
+        JSON.stringify((csVer.ok || {}).capsules) === JSON.stringify(['可播']) &&
+        (csVer.ok || {}).painted === true &&
+        JSON.stringify((csVer.blind || {}).capsules) === JSON.stringify(['未检出']) && // 盲区不许挂「建议删除」
+        (csVer.blind || {}).painted === true &&
+        JSON.stringify((csVer.bad || {}).capsules) === JSON.stringify(['建议删除', '不可播']) &&
+        (csVer.bad || {}).painted === true &&
+        csVer.ok.tone !== csVer.bad.tone &&
+        csVer.blind.tone !== csVer.ok.tone &&
+        Array.isArray(cs.overlayLeaks) &&
+        cs.overlayLeaks.length === 0
+    );
+    step(
+      '聚合音乐源屏渲染：清单 URL / 两个按钮 / 三种结论分组（App 侧只读）',
+      csOk,
+      JSON.stringify(cs)
+    );
+
+    const cloudShot = path.join(OUT_DIR, 'smoke-ui-cloud.png');
+    require('fs').writeFileSync(cloudShot, Buffer.from(csShotPng.split(',')[1] || '', 'base64'));
+    step(
+      '聚合音乐源页截图（画面真的停在云源页，可播 / 未检出 / 建议删除 三种样子都在图上）',
+      csShotPage && csShotPng.length > 1000,
+      `${cloudShot} · 画面文本命中云源页 ${csShotPage} · PNG ${(csShotPng.length / 1024).toFixed(0)}KB`
+    );
+
+    send('smoke:run', { keyword: '', phase: 'cloud-sources-cleanup' });
+    const csc = (await waitUI(15000)) || { note: '渲染层未回报云源页清理结果' };
+    step(
+      '冒烟注入的合成线路收干净（屏幕上一条〔冒烟〕都不留，且无浮层残留）',
+      Boolean(csc.leakedSynthetic === false && Array.isArray(csc.overlayLeaks) && csc.overlayLeaks.length === 0),
+      JSON.stringify(csc)
+    );
 
     // 第三段：歌单页 / 详情 / ⋯菜单 / 加入弹层 / 同步页的真实 DOM。
     // 前面两张截图是搜索页和首页，证明不了这次新加的主体功能"看得见、点得到"。
@@ -910,7 +1039,9 @@ if (!gotLock && !SMOKE) {
     proxy = await startProxy({
       resolveAggregated: async (platform, rawID, force) => {
         if (force) aggregated.streamCache.delete(`${platform}:${rawID}`);
-        return aggregated.resolveStreamURL(store.aggregated.list(), platform, rawID, force);
+        // 这里必须带上云端钩子：本地代理只给得出 platform+rawID，若这首歌来自云端清单里的
+        // 洛雪 js 源，不带钩子就解析不了（那条线本机没有脚本），音频代理会直接 404。
+        return aggregated.resolveStreamURL(store.aggregated.list(), platform, rawID, force, cloudSources.hooks());
       },
       daoliyuStream: (sourceID, rawID, range) => clientFor(sourceID).openDownload(rawID, range),
       coverFetch: async (url) => {
@@ -931,6 +1062,8 @@ if (!gotLock && !SMOKE) {
     createWindow();
     if (!SMOKE) createTray();
     registerMediaKeys();
+    // 冒烟模式不去碰网络：结果要可复现，而且现网清单随时在变。
+    if (!SMOKE) startCloudSourceSync();
 
     if (SMOKE) setTimeout(runSmoke, 1500);
 

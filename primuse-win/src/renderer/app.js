@@ -136,6 +136,11 @@ const state = {
   syncError: null,
   syncResult: null,
   syncDevices: [],
+
+  // 云端音乐源（需求 1/4/5）。config 是主进程那份「只存一个 URL」的状态；
+  // settings 是清单里下发的服务端设置（目前就是首页文案，按本机唯一标识关联）；
+  // verdicts 是「检测全部可用」逐条落下来的结论，用来在页面上边跑边显示。
+  cloud: { config: null, settings: null, busy: false, error: null, result: null, verdicts: {}, checking: false },
 };
 
 /* ── 小工具 ───────────────────────────── */
@@ -653,11 +658,19 @@ function menuItem(attr, label, opts = {}) {
 
 /* ── 首页（HomeView.swift 的分区顺序）────────────────── */
 
+/* 需求 5：首页 header 的文案由服务端设置，按"本机唯一标识"关联。
+   清单里 settings.homeTitleFrom 会说明这个词是哪一层来的（device / global / default），
+   拿不到清单时回落到"首页"，界面不能因为云端不可达而少一个标题。 */
+function homeTitle() {
+  const s = (state.cloud && state.cloud.settings) || {};
+  return String(s.homeTitle || '').trim() || '首页';
+}
+
 function pageHome() {
   const library = libraryTracks();
   if (!library.length) {
     return (
-      navBar({ title: '首页', large: true }) +
+      navBar({ title: homeTitle(), large: true }) +
       `<div class="page-body">${emptyState({
         icon: 'music.note',
         title: '欢迎使用猿音',
@@ -768,7 +781,7 @@ function pageHome() {
     </div>`;
 
   return (
-    navBar({ title: '首页', large: true, trailing: `<button class="bar-btn ghost" data-page="stats">${icon('chart.bar')}</button>` }) +
+    navBar({ title: homeTitle(), large: true, trailing: `<button class="bar-btn ghost" data-page="stats">${icon('chart.bar')}</button>` }) +
     `<div class="page-body">
       <div class="hero">
         <div class="hero-top">
@@ -1326,11 +1339,13 @@ function pageSources() {
     })
     .join('<div class="sdiv"></div>');
 
+  const cloudCfg = (state.cloud && state.cloud.config) || {};
+  const usableCount = state.sources.filter((s) => verdictMark(s).tone === 'ok').length;
   const agg = `<div class="srow" data-page="lines" style="align-items:flex-start">
       <span class="sico" style="background:linear-gradient(135deg,var(--accent),#af52de);width:38px;height:38px;border-radius:9px">${icon('sparkles')}</span>
-      <span class="slabel">聚合音乐源<div class="ssub">全网在线流媒体 · 无需账号</div>
-        <div class="route-bar">${icon('globe')}<span>当前使用</span><code>${state.sources.filter((s) => s.isEnabled).length} 条线路</code></div></span>
-      <span class="capsule">${state.sources.length} 条</span><span class="chev">${icon('chevron.right')}</span>
+      <span class="slabel">聚合音乐源<div class="ssub">云端清单下发 · 无需账号</div>
+        <div class="route-bar">${icon('cloud')}<span>清单</span><code>${esc(cloudCfg.manifestURL || '未设置')}</code></div></span>
+      <span class="capsule">${usableCount}/${state.sources.length} 可播</span><span class="chev">${icon('chevron.right')}</span>
     </div>`;
 
   return (
@@ -1347,63 +1362,104 @@ function pageSources() {
   );
 }
 
-function pageLines() {
-  const rows = state.sources
-    .map(
-      (s, i) => `<div class="srow" style="align-items:flex-start">
-        <span class="sico" style="background:${s.isEnabled ? 'var(--accent)' : 'var(--bg-3)'}">${icon(s.isEnabled ? 'network.browser' : 'moon.zzz')}</span>
-        <span class="slabel">${esc(s.name)}
-          <div class="ssub">${esc(PLATFORM_LABEL[s.platform] || s.platform)} · ${esc(s.protocolType)} · 优先级 ${s.priority}${
-          s.latencyMs ? ` · ${s.latencyMs}ms` : ''
+/* 「检测全部可用」的结论怎么上色（需求 2）。
+   三类必须分开画，否则"我们没测出来"看起来像"它坏了"：
+     ok → 可播；盲区（检不出结果）→ 未检出；其余 → 不可播 + 建议删除。 */
+const VERDICT_BLIND = ['no_sample', 'runner_missing', 'unsupported', 'unchecked', 'error'];
+function verdictOf(s) {
+  const local = state.cloud.verdicts[s.id];
+  if (local && local.status) return local;
+  // 洛雪 js 音源本机跑不了脚本，它的结论只能是服务端体检下发的这一份（origin 如实标 server）。
+  const c = s.check || {};
+  return {
+    status: c.status || 'unchecked',
+    detail: c.detail || '服务端还没体检过这条',
+    bytes: Number(c.bytes) || 0,
+    origin: 'server',
+  };
+}
+function verdictMark(s) {
+  const v = verdictOf(s);
+  if (v.status === 'ok') return { tone: 'ok', text: '可播' };
+  if (VERDICT_BLIND.indexOf(v.status) >= 0) return { tone: 'blind', text: '未检出' };
+  return { tone: 'bad', text: '不可播' };
+}
+
+function lineRow(s) {
+  const mark = verdictMark(s);
+  const v = verdictOf(s);
+  const toneColor = mark.tone === 'ok' ? '#1f8a5b' : mark.tone === 'bad' ? '#c0392b' : '#5e6b87';
+  const viaGateway = s.protocolType === 'lxjs';
+  const suggest = mark.tone === 'bad' || Boolean(s.suggestDelete);
+  return `<div class="srow" style="align-items:flex-start">
+      <span class="sico" style="background:${toneColor}">${icon(mark.tone === 'ok' ? 'play.circle' : mark.tone === 'bad' ? 'exclamationmark.triangle' : 'questionmark.circle')}</span>
+      <span class="slabel">${esc(s.name)}
+        <div class="ssub">${esc(PLATFORM_LABEL[s.platform] || s.platform)} · ${esc(s.protocolType)} · 优先级 ${s.priority}${
+          viaGateway ? ' · 服务端 runner 执行' : ''
         }</div>
-          <div class="route-bar"><code>${esc(s.baseURL)}</code></div>
-        </span>
-        <div class="menu" style="margin-left:auto"><button class="song-more" data-menu="line:${esc(s.id)}">${icon('ellipsis')}</button>
-          ${menuPop(
-            state.menu === `line:${s.id}`,
-            [
-              menuItem(`data-toggle-source="${esc(s.id)}"`, s.isEnabled ? '停用' : '启用'),
-              menuItem(`data-ping-one="${esc(s.id)}"`, '测延迟'),
-              s.custom ? menuItem(`data-remove-source="${esc(s.id)}"`, '删除', { danger: true }) : null,
-            ].filter(Boolean),
-            'right'
-          )}</div>
-      </div>`
-    )
-    .join('<div class="sdiv"></div>');
+        <div class="route-bar">${icon(viaGateway ? 'cloud' : 'globe')}<code>${esc(viaGateway ? '音乐网关 /api/music-gateway' : s.baseURL)}</code></div>
+        <div class="ssub" style="margin-top:4px">${esc(String(v.detail || '').slice(0, 160))}${
+          v.bytes ? ` · ${num(v.bytes)}B` : ''
+        } · ${v.origin === 'local' ? '本机实测' : '服务端结论'}</div>
+      </span>
+      ${suggest ? '<span class="capsule" style="background:rgba(192,57,43,.16);color:#e07b6f">建议删除</span>' : ''}
+      <span class="capsule">${mark.text}</span>
+    </div>`;
+}
+
+function pageLines() {
+  const cfg = (state.cloud && state.cloud.config) || {};
+  const st = state.cloud;
+  const counts = state.sources.reduce(
+    (acc, s) => {
+      acc[verdictMark(s).tone] += 1;
+      return acc;
+    },
+    { ok: 0, bad: 0, blind: 0 }
+  );
+  const byTone = (tone) => state.sources.filter((s) => verdictMark(s).tone === tone);
+  const sections = [
+    ['可播', byTone('ok')],
+    ['未检出（不停用，也不判死）', byTone('blind')],
+    ['不可播 · 建议删除', byTone('bad')],
+  ]
+    .filter(([, list]) => list.length)
+    .map(([title, list]) => group(title, list.map(lineRow).join('<div class="sdiv"></div>')))
+    .join('');
 
   return (
     navBar({
-      title: '聚合音乐源设置',
-      trailing: `<button class="bar-btn" data-menu="addLine">${icon('plus')}</button>`,
+      title: '聚合音乐源',
+      trailing: `<button class="bar-btn" data-cloud-refresh="1" title="刷新云端清单">${icon('arrow.clockwise')}</button>`,
     }) +
     `<div class="page-body">
+      ${st.checking ? '<div class="hint">正在逐条真取音频字节…（搜索 → 解析直链 → Range 取 64KB 看魔数）</div>' : ''}
+      ${st.error ? `<div class="err">${esc(st.error)}</div>` : ''}
+      ${st.result ? `<div class="ok">${esc(st.result)}</div>` : ''}
       <div class="actions-row">
-        <button class="pill" data-ping-all="1">${icon('speedometer')}<span>检测全部延迟</span></button>
-        <button class="pill" data-toggle-form="addSource">${icon('plus')}<span>添加线路</span></button>
-        <button class="pill" data-reset-sources="1">${icon('arrow.clockwise')}<span>恢复默认 9 条</span></button>
+        <button class="pill prominent" data-sources-check-all="1">${icon('checkmark.circle')}<span>检测全部可用</span></button>
+        <button class="pill" data-cloud-refresh="1">${icon('arrow.clockwise')}<span>刷新云端清单</span></button>
       </div>
-      ${state.form === 'addSource' ? sourceForm() : ''}
-      ${group('线路', rows)}
-      <p class="hint">与 iPhone 版 <code>AggregatedSourceStore.defaultSources</code> 同一份清单（9 条）。线路挂了可以自己加，不用等发版。</p>
+      ${group(
+        '云端清单',
+        `<div class="srow"><span class="sico" style="background:var(--bg-3)">${icon('link')}</span>
+            <span class="slabel">音乐源清单 URL<div class="route-bar"><code>${esc(cfg.manifestURL || '未设置')}</code></div>
+              <div class="ssub">${
+                cfg.revision >= 0 ? `revision ${cfg.revision} · ` : '尚未拉取 · '
+              }${cfg.fetchedAt ? `更新于 ${esc(fmtRelative(cfg.fetchedAt))}` : '从未更新'}</div></span>
+            <span class="capsule">${state.sources.length} 条</span></div>
+          <div class="sdiv"></div>
+          ${srow({ icon: 'checkmark.circle', color: '#1f8a5b', label: '可播', value: `${counts.ok} 条`, chev: false })}
+          <div class="sdiv"></div>
+          ${srow({ icon: 'questionmark.circle', color: '#5e6b87', label: '未检出', value: `${counts.blind} 条`, chev: false })}
+          <div class="sdiv"></div>
+          ${srow({ icon: 'exclamationmark.triangle', color: '#c0392b', label: '建议删除', value: `${counts.bad} 条`, chev: false })}`
+      )}
+      ${sections || '<p class="hint">清单里还没有线路。点"刷新云端清单"从服务端拉一次。</p>'}
+      <p class="hint">音乐源的增删改在 CF 后台（<code>cf-sync-server</code>）完成，本机只读 + 刷新 —— 这就是"客户端只保存这个 URL"的意思。
+        洛雪 js 音源的脚本跑在服务端的 runner Worker 里，搜索 / 取流 / 歌词都经音乐网关，本机不落地脚本。</p>
     </div>`
   );
-}
-
-function sourceForm() {
-  return `<form class="form" id="source-form">
-      <label class="field"><span>名称</span><input name="name" placeholder="例：网易云 (我的备用线路)" required></label>
-      <label class="field"><span>地址</span><input name="baseURL" placeholder="https://xxx/api.php 或 http://ip/path" required></label>
-      <label class="field"><span>平台</span><select name="platform">${['netease', 'qq', 'kugou', 'kuwo', 'bilibili']
-        .map((p) => `<option value="${p}">${PLATFORM_LABEL[p]}</option>`)
-        .join('')}</select></label>
-      <label class="field"><span>协议</span><select name="protocolType">${['meting', 'hyw', 'nxinxz', 'openApi']
-        .map((p) => `<option value="${p}">${p}</option>`)
-        .join('')}</select></label>
-      <label class="field"><span>优先级</span><input name="priority" type="number" value="5" min="0" max="99"></label>
-      <div class="actions-row"><button class="pill prominent" type="submit">保存</button>
-        <button class="pill" type="button" data-cancel-form="1">取消</button></div>
-    </form>`;
 }
 
 function pageServerForm() {
@@ -1498,6 +1554,30 @@ function pageSync() {
             <span class="svalue" style="font-family:'Cascadia Mono',Consolas,monospace">${esc(cfg.deviceId || '尚未生成')}</span>
             <button class="bar-btn" data-copy-id="1" title="复制">${copied ? icon('checkmark') : icon('square.and.arrow.up')}</button></div>`,
         ].join('')
+      )}
+      ${group(
+        '音乐源清单（云端管理）',
+        (() => {
+          const c = state.cloud || {};
+          const cfg = c.config || {};
+          const s = c.settings || {};
+          const fromLabel = { device: '按本机标识', global: '全局默认', default: '内置默认' }[s.homeTitleFrom] || '内置默认';
+          return `<div class="srow"><span class="sico" style="background:#7a4fd0">${icon('cloud')}</span>
+              <span class="slabel">音乐源清单 URL<div class="route-bar"><code>${esc(cfg.manifestURL || '未设置')}</code></div>
+                <div class="ssub">${
+                  cfg.revision >= 0 ? `revision ${cfg.revision} · ` : '尚未拉取 · '
+                }${cfg.fetchedAt ? `更新于 ${esc(fmtRelative(cfg.fetchedAt))}` : '从未更新'}${
+                  cfg.error ? ` · ${esc(cfg.error)}` : ''
+                }</div></span>
+              <button class="bar-btn" data-edit-cloud-url="1" title="修改清单地址">${icon('pencil.circle')}</button></div>
+            <div class="sdiv"></div>
+            <div class="srow"><span class="sico" style="background:var(--bg-3)">${icon('textformat')}</span>
+              <span class="slabel">首页标题（服务端设置）<div class="ssub">${esc(fromLabel)} · 本机唯一标识 ${esc(String(cfg.deviceId || '').slice(0, 12))}…</div></span>
+              <span class="svalue">${esc(homeTitle())}</span></div>
+            <div class="sdiv"></div>
+            <div class="srow" data-cloud-refresh="1"><span class="sico" style="background:#1f8a5b">${icon('arrow.clockwise')}</span>
+              <span class="slabel">立即刷新音乐源</span><span class="chev">${icon('chevron.right')}</span></div>`;
+        })()
       )}
       ${group(
         '歌单数据备份与恢复',
@@ -2041,6 +2121,26 @@ function renderSheet() {
     return;
   }
 
+  if (s.kind === 'cloudURL') {
+    $('sheet-title').textContent = '音乐源清单 URL';
+    $('sheet-body').innerHTML = `<form id="sheet-form">
+        <label class="field"><span>云端音乐源清单 (API URL)</span>
+          <input id="sheet-name" type="url" placeholder="https://xxx.pages.dev/api/music-sources" value="${esc(
+            (state.cloud.config || {}).manifestURL || ''
+          )}" autocomplete="off" spellcheck="false"></label>
+        ${s.error ? `<p class="err" style="margin:8px 0 0">${esc(s.error)}</p>` : ''}
+        <p class="hint">CF 同步服务暴露的音乐源管理端点（<code>/api/music-sources</code>），与歌单同步同一个服务。
+          换地址会清空本机缓存的清单与云端线路，改从新地址重拉。</p>
+        <div class="actions-row" style="justify-content:flex-end">
+          <button class="ghost" type="button" data-sheet-cancel="1">取消</button>
+          <button class="pill prominent" type="submit">保存</button>
+        </div>
+      </form>`;
+    const input = $('sheet-name');
+    if (input) input.focus();
+    return;
+  }
+
   if (s.kind === 'reorder') {
     const songs = s.songs || [];
     $('sheet-title').textContent = '调整播放顺序';
@@ -2384,6 +2484,71 @@ function insertTracks(tracks, { next }) {
 
 /* ── 云端同步 ─────────────────────────── */
 
+/* ── 云端音乐源（需求 1/2/4/5）─────────────
+   本机只保存一个清单 URL；线路、可用性结论、首页文案都从那份清单解释出来。 */
+
+async function loadCloudConfig() {
+  const payload = await api.cloud.config();
+  state.cloud.config = payload.config || null;
+  state.cloud.settings = payload.settings || null;
+  state.sources = await api.sources.list();
+  return payload;
+}
+
+/** 拉清单（force=true 跳过 ETag）。拉回来要顺带刷新三样：线路表、首页文案、可用源计数。 */
+async function refreshCloudSources({ force = false } = {}) {
+  if (state.cloud.busy) return;
+  state.cloud.busy = true;
+  state.cloud.error = null;
+  state.cloud.result = null;
+  render();
+  const res = await api.cloud.refresh(force);
+  state.cloud.busy = false;
+  state.cloud.config = res.config || state.cloud.config;
+  if (!res.ok) {
+    // 拉不到绝不清空本机线路（主进程那边也是这个口径）：这里只把原因写出来。
+    state.cloud.error = res.error || '云端清单拉取失败，本机继续使用缓存';
+  } else {
+    if (res.settings) state.cloud.settings = res.settings;
+    if (res.changed) {
+      state.cloud.result = `清单已更新（revision ${res.revision}）· 可用 ${(res.usable || []).length} 条`;
+    } else {
+      state.cloud.result = `清单没有变化（revision ${res.revision}，服务端回了 304）`;
+    }
+  }
+  state.sources = await api.sources.list();
+  render();
+}
+
+/**
+ * 「检测全部可用」（需求 2）。
+ * 进度靠 onVerdict 事件一条条推上来，界面能看着结论往下走 ——
+ * 这比"转圈三分钟后给一个总数"有用，因为用户要知道**是哪一条**不出声。
+ */
+async function checkAllSources() {
+  if (state.cloud.checking) return;
+  state.cloud.checking = true;
+  state.cloud.verdicts = {};
+  state.cloud.error = null;
+  state.cloud.result = null;
+  render();
+  const res = await api.sources.checkAll();
+  state.cloud.checking = false;
+  state.cloud.verdicts = {};
+  (res.verdicts || []).forEach((v) => {
+    state.cloud.verdicts[v.id] = v;
+  });
+  if (res.cloud) state.cloud.config = res.cloud;
+  state.sources = res.sources || (await api.sources.list());
+  const dead = (res.verdicts || []).filter((v) => v.status !== 'ok' && VERDICT_BLIND.indexOf(v.status) < 0);
+  state.cloud.result = `检完 ${
+    (res.verdicts || []).length
+  } 条：可播 ${(res.verdicts || []).filter((v) => v.status === 'ok').length} 条 · 不可播 ${
+    dead.length
+  } 条（已标建议删除）`;
+  render();
+}
+
 async function loadSyncConfig() {
   state.sync = await api.sync.config();
 }
@@ -2606,9 +2771,9 @@ document.addEventListener('click', async (event) => {
       '[data-filter]', '[data-clear-search]', '[data-clear-search-history]', '[data-history-search]',
       '[data-del-search-history]', '[data-cycle-repeat]', '[data-switch-shuffle]', '[data-switch-lyrics-follow]',
       '[data-cycle-appearance]', '[data-switch-cover]', '[data-switch-tray]', '[data-appearance]',
-      '[data-set-accent]', '[data-reset-accent]', '[data-lyric-scale]', '[data-toggle-source]',
-      '[data-remove-source]', '[data-ping-one]', '[data-ping-all]', '[data-toggle-form]', '[data-cancel-form]',
-      '[data-reset-sources]', '[data-edit-server]', '[data-test-server-row]', '[data-server-health]',
+      '[data-set-accent]', '[data-reset-accent]', '[data-lyric-scale]',
+      '[data-sources-check-all]', '[data-cloud-refresh]', '[data-edit-cloud-url]', '[data-toggle-form]', '[data-cancel-form]',
+      '[data-edit-server]', '[data-test-server-row]', '[data-server-health]',
       '[data-remove-server]', '[data-load-more]', '[data-play-all]', '[data-clear-server-filter]',
       '[data-test-server]', '[data-sync-backup]', '[data-sync-restore]', '[data-sync-devices]',
       '[data-sync-import]', '[data-edit-server-url]', '[data-edit-device-name]', '[data-copy-id]',
@@ -2977,31 +3142,17 @@ document.addEventListener('click', async (event) => {
   }
 
   /* 线路与源 */
-  if (d.toggleSource) {
-    await api.sources.toggle(d.toggleSource);
-    state.sources = await api.sources.list();
-    render();
+  /* 云端音乐源（需求 1/2/4）：增删改在 CF 后台，本机只有"刷新"和"检测全部可用"。 */
+  if (d.sourcesCheckAll) {
+    await checkAllSources();
     return;
   }
-  if (d.removeSource) {
-    await api.sources.remove(d.removeSource);
-    state.sources = await api.sources.list();
-    state.menu = null;
-    toast('已删除线路');
-    render();
+  if (d.cloudRefresh) {
+    await refreshCloudSources({ force: true });
     return;
   }
-  if (d.pingOne) {
-    state.menu = null;
-    toast('正在探测该线路…');
-    state.sources = await api.sources.pingAll();
-    render();
-    return;
-  }
-  if (d.pingAll) {
-    toast('正在逐条探测线路延迟…');
-    state.sources = await api.sources.pingAll();
-    render();
+  if (d.editCloudURL) {
+    openSheet({ kind: 'cloudURL' });
     return;
   }
   if (d.toggleForm) {
@@ -3011,12 +3162,6 @@ document.addEventListener('click', async (event) => {
   }
   if (d.cancelForm) {
     state.form = null;
-    render();
-    return;
-  }
-  if (d.resetSources) {
-    state.sources = await api.sources.reset();
-    toast('已恢复默认线路');
     render();
     return;
   }
@@ -3266,23 +3411,6 @@ document.addEventListener('submit', async (event) => {
     return;
   }
 
-  if (form.id === 'source-form') {
-    const raw = formValues(form);
-    await api.sources.upsert({
-      name: raw.name,
-      baseURL: raw.baseURL,
-      platform: raw.platform,
-      protocolType: raw.protocolType,
-      priority: Number(raw.priority) || 0,
-      isEnabled: true,
-    });
-    state.sources = await api.sources.list();
-    state.form = null;
-    toast('线路已添加');
-    render();
-    return;
-  }
-
   if (form.id === 'sheet-form') {
     const s = state.sheet || {};
     const input = $('sheet-name');
@@ -3334,6 +3462,20 @@ document.addEventListener('submit', async (event) => {
       closeSheet();
       state.syncResult = value ? '服务器地址已保存' : '已清除服务器地址';
       render();
+      return;
+    }
+    if (s.kind === 'cloudURL') {
+      const res = await api.cloud.setURL(value);
+      if (!res.ok) {
+        state.sheet = { ...s, error: res.error };
+        renderSheet();
+        return;
+      }
+      closeSheet();
+      state.cloud.config = res.config;
+      state.cloud.result = '清单地址已保存，正在拉取…';
+      render();
+      await refreshCloudSources({ force: true });
       return;
     }
     if (s.kind === 'syncName') {
@@ -3688,6 +3830,7 @@ function shellEvidence() {
 
 let smokePlaylistProbe = null; // { id, snap } —— 主进程截图后用 phase:'playlist-cleanup' 收走
 let smokeQueueRestore = null; // 冒烟跑前用户的真实队列；截图用的内存探针队列必须由 cleanup 换回来
+let smokeCloudSnapshot = null; // 注入三种体检结论前的线路列表 —— 截图后由 phase:'cloud-sources-cleanup' 换回来
 
 function snapshotNav() {
   return { tab: state.tab, stacks: JSON.parse(JSON.stringify(state.stacks)) };
@@ -3837,6 +3980,8 @@ async function smokeShellPages() {
   await settle(260);
   out.home = {
     title: (document.querySelector('#screen .navbar-large .ttl') || {}).textContent,
+    // 服务端可设首页文案（需求 5），所以这里不能再拿写死的「首页」比 —— 把期望值一起报回去。
+    titleExpected: homeTitle(),
     sections: titles('#screen .section-head h3'),
     quickActions: titles('#screen .qa-item .nm'),
     heroOrEmpty: Boolean(document.querySelector('#screen .hero-art, #screen .empty-state')),
@@ -3899,8 +4044,130 @@ async function smokeHomeView() {
   await settle(320);
   return {
     title: (document.querySelector('#screen .navbar-large .ttl') || {}).textContent,
+    expectedTitle: homeTitle(),
     overlayLeaks: overlayLeaks(),
   };
+}
+
+/**
+ * 「聚合音乐源」这一屏的真实渲染（需求 2 + 需求 4 的界面侧证据）。
+ *
+ * 只看 DOM，不读属性：清单 URL 真的写在屏幕上、两个按钮真的画出来了、
+ * 三种结论真的分成三组长出来、"未检出"那一组确实没挂「建议删除」。
+ *
+ * 结论数据这里是**注入的合成值**（渲染层的 state，一次都不碰 store）——
+ * 冒烟不该靠第三方站点的脸色，更不能真的把用户的线路停掉。
+ * 要证的是"服务端那套口径能在界面上长对形状"，所以三种 tone 各造一条。
+ */
+async function smokeCloudSources() {
+  const out = {};
+  const texts = (sel) => [...document.querySelectorAll(sel)].map((n) => n.textContent.trim());
+  const painted = (node, minW = 20, minH = 6) => {
+    if (!node || !node.getBoundingClientRect) return false;
+    const r = node.getBoundingClientRect();
+    const cs = getComputedStyle(node);
+    return r.width > minW && r.height > minH && cs.display !== 'none' && cs.visibility !== 'hidden';
+  };
+
+  // 1) 首页大标题（需求 5）：屏幕上写的必须等于服务端下发的那个词，没下发才是「首页」。
+  const fromServer = String((state.cloud.settings || {}).homeTitle || '').trim();
+  state.tab = 'home';
+  state.stacks.home = ['root'];
+  render();
+  await settle(260);
+  out.homeHeader = {
+    shown: texts('#screen .navbar-large .ttl')[0] || '',
+    fromServer: fromServer || '(未下发)',
+    expected: fromServer || '首页',
+    painted: painted(document.querySelector('#screen .navbar-large .ttl')),
+  };
+
+  // 2) 云源页本来的样子（清单 URL 一定要有字，那是"客户端只保存这个 URL"的唯一入口）。
+  smokeCloudSnapshot = state.sources;
+  open('lines');
+  await settle(520);
+  const pills = [...document.querySelectorAll('#screen .actions-row .pill')];
+  const rects = pills.map((n) => {
+    const r = n.getBoundingClientRect();
+    return `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.left)}`;
+  });
+  out.page = {
+    title: texts('#screen .navbar .ttl')[0] || '',
+    manifestURL: texts('#screen .route-bar code')[0] || '',
+    buttons: pills.map((n) => n.textContent.trim()),
+    buttonRects: rects,
+    allButtonsPainted: pills.length === 2 && pills.every((n) => painted(n)),
+    refreshInNav: Boolean(painted(document.querySelector('#screen [data-cloud-refresh]'))),
+    editControls: document.querySelectorAll('#screen input, #screen select, #screen [data-remove-server]').length,
+    hintMentionsCF: /CF 后台/.test(document.querySelector('#screen').innerText),
+  };
+
+  // 3) 注入三种结论：可播 / 未检出（盲区）/ 不可播 + 建议删除。
+  const mk = (id, name, extra) => ({
+    id,
+    name,
+    platform: 'netease',
+    protocolType: 'meting',
+    baseURL: `https://example.invalid/${id}`,
+    priority: 10,
+    isEnabled: true,
+    check: {},
+    ...extra,
+  });
+  state.sources = [
+    mk('smoke-ok', '〔冒烟〕能出声的线路'),
+    mk('smoke-blind', '〔冒烟〕我们没测成的线路'),
+    mk('smoke-bad', '〔冒烟〕真不能播的线路', { suggestDelete: true }),
+  ];
+  state.cloud.verdicts = {
+    'smoke-ok': { id: 'smoke-ok', status: 'ok', detail: '晴天 / 周杰伦 · HTTP 206 audio/mpeg 65536B 命中音频魔数', bytes: 65536, origin: 'local', enabled: true },
+    'smoke-blind': { id: 'smoke-blind', status: 'error', detail: 'The operation was aborted', bytes: 0, origin: 'local', enabled: true },
+    'smoke-bad': { id: 'smoke-bad', status: 'audio_fail', detail: '直链不可播 200 text/html 0B 实为文本', bytes: 0, origin: 'local', enabled: false },
+  };
+  render();
+  await settle(300);
+  const rows = [...document.querySelectorAll('#screen .settings-group .srow')].filter((n) => /〔冒烟〕/.test(n.textContent));
+  const rowOf = (needle) => rows.find((n) => n.textContent.includes(needle)) || null;
+  const capsulesOf = (node) => (node ? [...node.querySelectorAll('.capsule')].map((c) => c.textContent.trim()) : []);
+  const toneOf = (node) => {
+    const ico = node && node.querySelector('.sico');
+    return ico ? getComputedStyle(ico).backgroundColor : '';
+  };
+  const okRow = rowOf('〔冒烟〕能出声的线路');
+  const blindRow = rowOf('〔冒烟〕我们没测成的线路');
+  const badRow = rowOf('〔冒烟〕真不能播的线路');
+  out.verdicts = {
+    groups: texts('#screen .group-title'),
+    rowCount: rows.length,
+    ok: { capsules: capsulesOf(okRow), painted: painted(okRow), tone: toneOf(okRow), detail: (okRow || {}).innerText ? okRow.innerText.replace(/\s+/g, ' ').slice(0, 120) : '' },
+    blind: { capsules: capsulesOf(blindRow), painted: painted(blindRow), tone: toneOf(blindRow) },
+    bad: { capsules: capsulesOf(badRow), painted: painted(badRow), tone: toneOf(badRow) },
+    iconsPainted: rows.every((n) => painted(n.querySelector('.sico svg'), 8, 8)),
+  };
+
+  // 故意停在注入后的画面上：主进程紧接着要截 smoke-ui-cloud.png。
+  // 断言"三种结论各自长什么样"这种事，光有 DOM 计数不够，得留一张人眼看得懂的图。
+  out.overlayLeaks = overlayLeaks();
+  return out;
+}
+
+/** 把冒烟注入的合成线路/结论收走，界面无残留（合成的东西一条都不许留在屏幕上）。 */
+async function smokeCloudSourcesCleanup() {
+  const out = {};
+  if (smokeCloudSnapshot) {
+    state.cloud.verdicts = {};
+    state.sources = smokeCloudSnapshot;
+    smokeCloudSnapshot = null;
+  }
+  state.stacks.settings = ['root'];
+  state.tab = 'settings';
+  render();
+  await settle(240);
+  const screenText = document.querySelector('#screen').innerText;
+  out.leakedSynthetic = /〔冒烟〕/.test(screenText);
+  out.cloudPageReachable = Boolean(document.querySelector('#screen .srow'));
+  out.overlayLeaks = overlayLeaks();
+  return out;
 }
 
 async function smokePlaylistUI() {
@@ -4268,10 +4535,20 @@ async function smokePlaylistClicks() {
 
 /* ── 启动 ─────────────────────────────── */
 
-api.sources.onLatency(({ id, latencyMs }) => {
-  const hit = state.sources.find((s) => s.id === id);
-  if (hit) hit.latencyMs = latencyMs;
+api.sources.onVerdict((v) => {
+  if (!v || !v.id) return;
+  state.cloud.verdicts[v.id] = v;
   if (parsePage(pageRef()).name === 'lines') render();
+});
+
+// 服务端改了音源（revision 变）会推这一条：清单、线路表、首页文案一起跟着换。
+api.cloud.onUpdated((payload) => {
+  state.cloud.config = (payload && payload.config) || state.cloud.config;
+  if (payload && payload.settings) state.cloud.settings = payload.settings;
+  api.sources.list().then((list) => {
+    state.sources = list;
+    render();
+  });
 });
 
 (async function boot() {
@@ -4298,6 +4575,10 @@ api.sources.onLatency(({ id, latencyMs }) => {
   state.settings = settings || {};
   state.theme = { mode: 'automatic', accent: '', coverDriven: true, lyricScale: 1, resolvedAccent: '', ...(settings.theme || {}) };
   state.searchHistory = settings.searchHistory || [];
+
+  // 云端音源：先用本机缓存那份把界面画出来（首页文案要用它），再去问服务端有没有新版。
+  await loadCloudConfig();
+  if (!meta.smoke) refreshCloudSources().catch(() => null);
   state.queue = (queue && queue.items) || [];
   state.index = queue && queue.items && queue.items.length ? Math.min(queue.index || 0, queue.items.length - 1) : -1;
   state.order = buildOrder(state.queue.length, Math.max(0, state.index), Boolean(player.shuffle));
@@ -4317,6 +4598,8 @@ api.sources.onLatency(({ id, latencyMs }) => {
       try {
         if (phase === 'shell-pages') return api.smokeReport(await smokeShellPages());
         if (phase === 'home-view') return api.smokeReport(await smokeHomeView());
+        if (phase === 'cloud-sources') return api.smokeReport(await smokeCloudSources());
+        if (phase === 'cloud-sources-cleanup') return api.smokeReport(await smokeCloudSourcesCleanup());
         if (phase === 'playlist-ui') return api.smokeReport(await smokePlaylistUI());
         if (phase === 'player-shot') return api.smokeReport(await smokePlayerShot());
         if (phase === 'playlist-cleanup') return api.smokeReport(await smokePlaylistCleanup());

@@ -107,6 +107,14 @@ jobs:
         # iPhone 行 —— 所以它必须在 CI 里跑，而真网络路径只能在离线断言里覆盖。
         run: node scripts/playlist-sync-contract-test.js
 
+      - name: Cloud music-source contract test (fake server, no network)
+        # 音乐源管理搬到了 cf-sync-server，客户端只剩"解释清单"这一份职责：
+        # 契约不认识就整份拒收、拉不到清单绝不清空本机线路、可播判据必须和服务端一字不差、
+        # "我们没测成"必须落 error 而不是判源死刑。这四条只要飘一条，用户那边就是
+        # "线路凭空没了"或"能播的源被建议删除"，而且一声不吭。
+        # 测试自带假 electron + 临时 userData，绝不碰 %APPDATA%\Primuse。
+        run: node scripts/cloud-sources-contract-test.js
+
       - name: Preload API surface check (offline)
         # 渲染层调了 preload 没暴露的方法 = 运行时一句被 async 回调吞掉的 TypeError，
         # 界面只表现为"点了没反应"。v1.9.10 的"在加入歌单弹层里新建歌单"就是这么坏的

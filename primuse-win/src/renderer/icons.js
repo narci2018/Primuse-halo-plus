@@ -119,6 +119,18 @@ const ICONS = {
     '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.6 3.6 21 10l-2.6 2.6-1.8-1.8-6.4 6.4 1.8 1.8L7.6 22 3 17.4l3.4-3.4 1.8 1.8 6.4-6.4-1.8-1.8z"/><path d="m11.4 8.2 4.4 4.4"/></g>',
   'exclamationmark.triangle':
     '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.2 21 19.4H3Z"/><path d="M12 9.6v4.2M12 16.6h.02"/></g>',
+  // 下面几个是"云端音乐源"这几屏新用的：清单/首页文案/可用性三态都要有各自的形状，
+  // 少了任何一个，icon() 会静默回落到 music.note —— 音符图标表示"未检出"是看不懂的。
+  cloud:
+    '<path d="M7.2 18.6a4.1 4.1 0 0 1-.35-8.18 5.5 5.5 0 0 1 10.6-1.2 3.9 3.9 0 0 1 .55 7.76l-.28.06Z"/>',
+  link:
+    '<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.2 13.8a4.3 4.3 0 0 1 0-6.1l2.1-2.1a4.3 4.3 0 0 1 6.1 6.1l-1.2 1.2"/><path d="M13.8 10.2a4.3 4.3 0 0 1 0 6.1l-2.1 2.1a4.3 4.3 0 0 1-6.1-6.1l1.2-1.2"/></g>',
+  'play.circle':
+    '<g fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="8.4"/><path d="M10.2 8.6 15.9 12l-5.7 3.4Z" fill="currentColor" stroke="none"/></g>',
+  'questionmark.circle':
+    '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8.4"/><path d="M9.9 9.6a2.2 2.2 0 1 1 3.5 1.9c-.9.7-1.4 1.2-1.4 2.3"/><path d="M12 16.6h.02"/></g>',
+  textformat:
+    '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4.6 6.4h10.2M9.7 6.4v11.2"/><path d="M17.4 11.2h4.2M19.5 11.2v6.4"/></g>',
 };
 
 function icon(name, cls) {

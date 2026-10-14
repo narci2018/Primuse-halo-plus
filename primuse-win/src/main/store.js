@@ -32,6 +32,10 @@ const { normalizeSources, DEFAULT_SOURCES } = require('./aggregated');
 const LIKED_PLAYLIST_ID = 'primuse.system.liked'; // MusicLibrary.swift:5138
 const LIKED_PLAYLIST_NAME = '我喜欢'; // playlist_liked_name（Localizable.strings:1315）
 const DEFAULT_SYNC_URL = 'https://primuse-sync-server.pages.dev/api/sync-playlists'; // PlaylistSyncService.swift:9
+// 音乐源清单：cf-sync-server 的 GET /api/music-sources。
+// 需求原文是"客户端只保存这个 URL 即可，通过解释这个 URL 即可获得可用的源"，
+// 所以线路的增删改与「检测全部可用」的权威结论都在这头服务端，App 侧只读 + 刷新。
+const DEFAULT_CLOUD_SOURCES_URL = 'https://primuse-sync-server.pages.dev/api/music-sources';
 
 let cache = null;
 let flushTimer = null;
@@ -55,6 +59,9 @@ function defaults() {
     // deviceId 由本机生成并持有（ownedByThisDevice），永不与 iPhone 那台设备共用，
     // 否则备份会覆盖掉他手机上的 232 首真实数据。
     sync: { serverURL: DEFAULT_SYNC_URL, deviceId: '', deviceName: '', platform: 'Windows', ownedByThisDevice: false, lastBackupAt: 0 },
+    // 云端音乐源（cf-sync-server）。manifest 是整个缓存下来的一份清单：
+    // 断网/CF 挂了的时候照样能播（用上一次检到能出声的线路），这是"实时更新"的反面保障。
+    cloud: { manifestURL: DEFAULT_CLOUD_SOURCES_URL, etag: '', revision: -1, fetchedAt: 0, manifest: null, error: '' },
   };
 }
 
@@ -85,6 +92,8 @@ function load() {
   cache.sync = { ...defaults().sync, ...(stored && stored.sync ? stored.sync : {}) };
   if (!cache.sync.serverURL) cache.sync.serverURL = DEFAULT_SYNC_URL;
   if (!cache.sync.deviceName) cache.sync.deviceName = hostname();
+  cache.cloud = { ...defaults().cloud, ...(stored && stored.cloud ? stored.cloud : {}) };
+  if (!cache.cloud.manifestURL) cache.cloud.manifestURL = DEFAULT_CLOUD_SOURCES_URL;
   return cache;
 }
 
@@ -501,6 +510,76 @@ const sync = {
   },
 };
 
+// MARK: - 云端音乐源（清单缓存 + 它管下来的线路列表）
+
+/**
+ * 把清单正文落到线路表里。
+ *
+ * 只替换"云端来的"那些条目（`cloud: true`），保留本机手工加的 `user-*`：
+ * 万一有人在这台机器上加过自己的备用线路，刷新清单不该把它抹掉。
+ * 内置的 `default-*` 九条则由服务端说了算 —— 那边把某条判死/删掉，
+ * 这边就必须跟着消失，否则"能播放的源才有价值"这条口径在客户端不成立。
+ */
+function applyCloudSources(list) {
+  const state = load();
+  const kept = state.aggregatedSources.filter((s) => s.cloud !== true && String(s.id).startsWith('user-'));
+  state.aggregatedSources = normalizeSources([...list, ...kept]);
+  save(true);
+  return state.aggregatedSources;
+}
+
+const cloud = {
+  config() {
+    const state = load();
+    const c = state.cloud;
+    return {
+      manifestURL: c.manifestURL,
+      defaultManifestURL: DEFAULT_CLOUD_SOURCES_URL,
+      etag: c.etag || '',
+      revision: Number(c.revision ?? -1),
+      fetchedAt: Number(c.fetchedAt) || 0,
+      hasManifest: Boolean(c.manifest),
+      error: c.error || '',
+      deviceId: state.sync.deviceId || '',
+    };
+  },
+  manifest: () => load().cloud.manifest || null,
+  setManifestURL(url) {
+    const state = load();
+    const clean = String(url || '').trim();
+    if (!/^https?:\/\//i.test(clean)) throw new Error('音乐源清单地址必须以 http:// 或 https:// 开头');
+    state.cloud.manifestURL = clean;
+    // 换地址就是换了一份真相，旧的 ETag/正文/线路一律作废，否则会拿 A 站的清单配 B 站的网关。
+    state.cloud.etag = '';
+    state.cloud.revision = -1;
+    state.cloud.manifest = null;
+    state.cloud.fetchedAt = 0;
+    state.aggregatedSources = normalizeSources(state.aggregatedSources.filter((s) => s.cloud !== true));
+    save(true);
+    return cloud.config();
+  },
+  /** 304（没变）只刷新时间戳；200 存正文 + ETag + revision，并落到线路表。 */
+  setFetched({ etag, revision, manifest, applied }) {
+    const state = load();
+    if (manifest) state.cloud.manifest = manifest;
+    if (etag) state.cloud.etag = etag;
+    if (revision !== undefined && revision !== null) state.cloud.revision = Number(revision);
+    state.cloud.fetchedAt = Date.now();
+    state.cloud.error = '';
+    save(true);
+    return applied || cloud.config();
+  },
+  /** 拉取失败：留下原因给 UI 显示，但缓存的清单和线路一个都不动（离线可用）。 */
+  setError(message) {
+    const state = load();
+    state.cloud.error = String(message || '').slice(0, 300);
+    save(true);
+    return cloud.config();
+  },
+  applySources: applyCloudSources,
+  sources: () => load().aggregatedSources.filter((s) => s.cloud === true),
+};
+
 module.exports = {
   load,
   save,
@@ -509,8 +588,10 @@ module.exports = {
   library,
   playlists,
   sync,
+  cloud,
   credentialsAvailable,
   trackKey,
   LIKED_PLAYLIST_ID,
   DEFAULT_SYNC_URL,
+  DEFAULT_CLOUD_SOURCES_URL,
 };

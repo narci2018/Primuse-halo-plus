@@ -26,6 +26,10 @@ const PROTOCOLS = {
   nxinxz: 'NXINXZ 线路',
   openApi: 'Music Open API',
   customJson: '自定义 JSON',
+  // 洛雪 js 音源：脚本跑在 cf-sync-server 的 runner Worker 里（Workers 请求期不许生成代码），
+  // 本机不装任何 lx 运行时 —— 清单的 runtime.lxjs = "server-runner" 说的就是这件事。
+  // 所以它的搜索/取流/歌词一律经 /api/music-gateway，见 cloud-sources.js。
+  lxjs: '洛雪 js 音源（服务端执行）',
 };
 
 /** 与 Swift `defaultSources`（AggregatedSourceStore.swift:18-102）完全一致的 9 条线路。 */
@@ -45,8 +49,13 @@ const DEFAULT_SOURCES = [
 function normalizeSources(stored) {
   const list = Array.isArray(stored) ? stored.slice() : [];
   const known = new Set(list.map((s) => s.id));
-  for (const def of DEFAULT_SOURCES) {
-    if (!known.has(def.id)) list.push({ ...def });
+  // 清单由 cf-sync-server 管着时**不要再塞内置 9 条**：那边把某条判死/删掉，这边又自动复活，
+  // "能播放的源才有价值"这条口径就在客户端漏掉了。内置清单只在没有云端源时兜底（向下兼容）。
+  const cloudManaged = list.some((s) => s && s.cloud === true);
+  if (!cloudManaged) {
+    for (const def of DEFAULT_SOURCES) {
+      if (!known.has(def.id)) list.push({ ...def });
+    }
   }
   for (let i = 0; i < list.length; i += 1) {
     list[i] = {
@@ -73,6 +82,19 @@ function enabledSources(sources, platform = null) {
 
 function trimBase(baseURL) {
   return String(baseURL || '').replace(/\/+$/g, '');
+}
+
+/**
+ * 拼查询串的分隔符。
+ *
+ * 为什么要有这个：清单里的 baseURL 本身就带查询串的情况是真实存在的
+ * （`https://x.example/api.php?key=abc`），这时再用固定的 `?` 去拼第二个查询串，
+ * 得到的是 `...api.php?key=abc?types=search...` —— 服务端只把第一个 `?` 当分隔符，
+ * `?types=search` 整段落进值里，于是**搜索/解析永远返回空**，一条好线路就被判成死的。
+ * meting / hyw / nxinxz / openApi 四类协议的所有拼接点都走这里。
+ */
+function sep(base) {
+  return String(base).includes('?') ? '&' : '?';
 }
 
 function qs(base, params) {
@@ -199,8 +221,8 @@ function searchURLFor(source, keyword) {
   switch (source.protocolType) {
     case 'meting':
       return base.includes('api.php')
-        ? `${base}?types=search&count=20&source=${server}&pages=1&name=${kw}`
-        : `${base}?type=search&id=${kw}&server=${server}&limit=20`;
+        ? `${base}${sep(base)}types=search&count=20&source=${server}&pages=1&name=${kw}`
+        : `${base}${sep(base)}type=search&id=${kw}&server=${server}&limit=20`;
 
     // hyw 的搜索不走用户配的 baseURL，而是按平台打固定的 meting 站点（Swift:133-146）
     case 'hyw': {
@@ -215,7 +237,7 @@ function searchURLFor(source, keyword) {
       return `https://music-api.gdstudio.xyz/api.php?types=search&count=20&source=kuwo&name=${kw}`;
 
     case 'openApi':
-      return `${base}?msg=${kw}&type=json`;
+      return `${base}${sep(base)}msg=${kw}&type=json`;
 
     default:
       return null; // customJson：Swift 侧同样返回空数组（:183-184）
@@ -238,35 +260,56 @@ async function searchSingleSource(source, keyword) {
 /**
  * 对应 Swift `search(query:)`（:29-97）：并发所有启用线路，按 `platform:rawID` 去重，
  * 并且**渐进上屏** —— 一条线路回来就立刻推给 UI，不等慢线路。
+ *
+ * 云端清单里的洛雪 js 源（protocolType === 'lxjs'）本机搜不动：脚本在 runner Worker 里，
+ * 搜索能力还是各家自己加的（官方协议只保证 musicUrl）。所以它算"一个作业"，
+ * 由 hooks.gatewaySearch 经 /api/music-gateway 拿结果，跟本地线路并行、同样渐进上屏。
  */
-async function searchAll(sources, keyword, onPartial) {
+async function searchAll(sources, keyword, onPartial, hooks = {}) {
   const trimmed = String(keyword || '').trim();
   if (!trimmed) return [];
   const list = enabledSources(sources);
   if (!list.length) throw new Error('未启用任何聚合音乐源，请在设置中配置并启用音源。');
 
+  const local = list.filter((s) => s.protocolType !== 'lxjs');
+  const lx = list.filter((s) => s.protocolType === 'lxjs');
+  const useGateway = lx.length > 0 && typeof hooks.gatewaySearch === 'function';
+  const total = local.length + (useGateway ? 1 : 0);
+
   const seen = new Set();
   const aggregated = [];
   let done = 0;
 
-  await Promise.all(
-    list.map(async (source) => {
-      const items = await searchSingleSource(source, trimmed);
-      done += 1;
-      let hasNew = false;
-      for (const item of items) {
-        const key = `${item.platform}:${item.rawID}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        aggregated.push(item);
-        hasNew = true;
-      }
-      if (typeof onPartial === 'function' && (hasNew || done === list.length)) {
-        onPartial(aggregated.slice(), { done, total: list.length });
-      }
-    })
-  );
+  const absorb = (items) => {
+    let hasNew = false;
+    for (const item of items || []) {
+      const key = `${item.platform}:${item.rawID}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      aggregated.push(item);
+      hasNew = true;
+    }
+    return hasNew;
+  };
+  const report = (hasNew) => {
+    done += 1;
+    if (typeof onPartial === 'function' && (hasNew || done === total)) onPartial(aggregated.slice(), { done, total });
+  };
 
+  const jobs = local.map(async (source) => report(absorb(await searchSingleSource(source, trimmed))));
+  if (useGateway) {
+    jobs.push(
+      (async () => {
+        try {
+          report(absorb(await hooks.gatewaySearch(trimmed)));
+        } catch {
+          report(false); // 网关挂了不算搜索失败：本地线路的结果照样上屏
+        }
+      })()
+    );
+  }
+
+  await Promise.all(jobs);
   return aggregated;
 }
 
@@ -275,16 +318,21 @@ const streamCache = new Map();
 const lyricCache = new Map();
 
 /** 对应 Swift `resolveStreamURLFromSource`（:307-386） */
-async function resolveFromSource(source, rawID) {
+async function resolveFromSource(source, rawID, hooks = {}) {
   const base = trimBase(source.baseURL);
   const server = (PLATFORMS[source.platform] || PLATFORMS.custom).meting;
 
   try {
     switch (source.protocolType) {
+      case 'lxjs':
+        // 脚本跑在 CF 的 runner Worker 里，本机没有也不该有 lx 运行时 → 经 /api/music-gateway 要直链。
+        // 拿不到 hooks（离线/没配清单地址）就返回 null，让下一条线路顶上，不抛异常。
+        return typeof hooks.gatewayResolve === 'function' ? await hooks.gatewayResolve(source, rawID) : null;
+
       case 'meting': {
         const urlString = base.includes('api.php')
-          ? `${base}?types=url&source=${server}&id=${encodeURIComponent(rawID)}&br=320`
-          : `${base}?server=${server}&type=url&id=${encodeURIComponent(rawID)}&br=320`;
+          ? `${base}${sep(base)}types=url&source=${server}&id=${encodeURIComponent(rawID)}&br=320`
+          : `${base}${sep(base)}server=${server}&type=url&id=${encodeURIComponent(rawID)}&br=320`;
         const endpoint = new URL(urlString);
         const res = await request(urlString, { headers: withUA(), timeoutMs: 8000 });
         // 三种答案形态与 Swift 一致：302 落地页 / JSON.url / 纯文本 http 直链
@@ -303,7 +351,7 @@ async function resolveFromSource(source, rawID) {
 
       case 'hyw': {
         const key = (PLATFORMS[source.platform] || PLATFORMS.custom).hyw;
-        const urlString = `${base}?source=${key}&songId=${encodeURIComponent(rawID)}&quality=320k`;
+        const urlString = `${base}${sep(base)}source=${key}&songId=${encodeURIComponent(rawID)}&quality=320k`;
         const res = await request(urlString, { headers: withUA(), timeoutMs: 8000 });
         if (res.json && typeof res.json.url === 'string' && res.json.url) return res.json.url;
         if (res.json && res.json.data && typeof res.json.data.url === 'string' && res.json.data.url) return res.json.data.url;
@@ -312,10 +360,10 @@ async function resolveFromSource(source, rawID) {
 
       case 'nxinxz':
         // Swift 直接把这条 URL 当播放地址（:361-365），由 302 跳到真 mp3，所以本地代理要透传 Range + 跟随跳转
-        return `${base}?id=${encodeURIComponent(rawID)}&level=320k&type=mp3`;
+        return `${base}${sep(base)}id=${encodeURIComponent(rawID)}&level=320k&type=mp3`;
 
       case 'openApi': {
-        const urlString = `${base}?msg=${encodeURIComponent(rawID)}&type=url`;
+        const urlString = `${base}${sep(base)}msg=${encodeURIComponent(rawID)}&type=url`;
         const res = await request(urlString, { timeoutMs: 8000 });
         if (res.json && typeof res.json.url === 'string' && res.json.url) return res.json.url;
         if (res.json && typeof res.json.data === 'string' && res.json.data.startsWith('http')) return res.json.data;
@@ -331,7 +379,7 @@ async function resolveFromSource(source, rawID) {
 }
 
 /** 对应 Swift `resolveStreamURL`（:286-305）：按优先级逐条试，命中即缓存。 */
-async function resolveStreamURL(sources, platform, rawID, force = false) {
+async function resolveStreamURL(sources, platform, rawID, force = false, hooks = {}) {
   const cacheKey = `${platform}:${rawID}`;
   if (!force) {
     const hit = streamCache.get(cacheKey);
@@ -341,9 +389,14 @@ async function resolveStreamURL(sources, platform, rawID, force = false) {
 
   const candidates = enabledSources(sources, platform);
   if (!candidates.length) throw new Error('未配置可用音源线路');
+  // hooks.prefer：这首歌是哪条线搜到的（网关结果的 sourceId），就先问哪条线要直链。
+  // 洛雪源尤其需要 —— 脚本内部的解析站和搜索站是配套的，换一条不一定取到同首歌。
+  if (hooks.prefer) {
+    candidates.sort((a, b) => (b.id === hooks.prefer ? 1 : 0) - (a.id === hooks.prefer ? 1 : 0));
+  }
 
   for (const source of candidates) {
-    const url = await resolveFromSource(source, rawID);
+    const url = await resolveFromSource(source, rawID, hooks);
     if (url) {
       streamCache.set(cacheKey, { url, at: Date.now() });
       return url;
@@ -353,7 +406,7 @@ async function resolveStreamURL(sources, platform, rawID, force = false) {
 }
 
 /** 对应 Swift `resolveLyricsFromSource`（:406-457）+ `resolveLyrics`（:390-404） */
-async function resolveLyrics(sources, platform, rawID) {
+async function resolveLyrics(sources, platform, rawID, hooks = {}) {
   const cacheKey = `${platform}:${rawID}`;
   if (lyricCache.has(cacheKey)) return lyricCache.get(cacheKey);
 
@@ -364,10 +417,24 @@ async function resolveLyrics(sources, platform, rawID) {
     let expectJson = false;
 
     switch (source.protocolType) {
+      case 'lxjs': {
+        if (typeof hooks.gatewayLyric !== 'function') continue;
+        try {
+          const lrc = await hooks.gatewayLyric(source, rawID);
+          if (lrc) {
+            lyricCache.set(cacheKey, lrc);
+            return lrc;
+          }
+        } catch {
+          /* 换下一条线路 */
+        }
+        continue;
+      }
+
       case 'meting':
         urlString = base.includes('api.php')
-          ? `${base}?types=lyric&source=${server}&id=${encodeURIComponent(rawID)}`
-          : `${base}?server=${server}&type=lrc&id=${encodeURIComponent(rawID)}`;
+          ? `${base}${sep(base)}types=lyric&source=${server}&id=${encodeURIComponent(rawID)}`
+          : `${base}${sep(base)}server=${server}&type=lrc&id=${encodeURIComponent(rawID)}`;
         expectJson = true;
         break;
       case 'hyw':
@@ -375,7 +442,7 @@ async function resolveLyrics(sources, platform, rawID) {
         urlString = `https://api.qijieya.cn/meting?server=${server}&type=lrc&id=${encodeURIComponent(rawID)}`;
         break;
       case 'openApi':
-        urlString = `${base}?msg=${encodeURIComponent(rawID)}&type=lrc`;
+        urlString = `${base}${sep(base)}msg=${encodeURIComponent(rawID)}&type=lrc`;
         break;
       default:
         continue;
@@ -425,6 +492,7 @@ module.exports = {
   enabledSources,
   // 下面三个本来只在模块内用，为了让 scripts/probe-lines-live.js 逐条体检
   // 而走与 App 完全相同的代码路径才导出；行为一字未改。
+  sep,
   searchURLFor,
   searchSingleSource,
   resolveFromSource,

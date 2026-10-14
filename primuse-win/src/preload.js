@@ -21,8 +21,17 @@ contextBridge.exposeInMainWorld('primuse', {
     upsert: (source) => ipcRenderer.invoke('sources:upsert', source),
     remove: (id) => ipcRenderer.invoke('sources:remove', id),
     reset: () => ipcRenderer.invoke('sources:reset'),
-    pingAll: () => ipcRenderer.invoke('sources:pingAll'),
-    onLatency: on('sources:latency'),
+    // 「检测全部可用」：不是测延迟，是真的取一段音频字节看魔数（需求 2）。
+    checkAll: () => ipcRenderer.invoke('sources:checkAll'),
+    onVerdict: on('sources:verdict'),
+  },
+
+  // 云端音乐源清单（需求 1/4）：客户端只保存这一个 URL，增删改都在 CF 后台。
+  cloud: {
+    config: () => ipcRenderer.invoke('cloud:config'),
+    refresh: (force) => ipcRenderer.invoke('cloud:refresh', { force: Boolean(force) }),
+    setURL: (url) => ipcRenderer.invoke('cloud:setURL', url),
+    onUpdated: on('cloud:updated'),
   },
 
   search: {
