@@ -1539,11 +1539,16 @@ function pageAbout() {
   return (
     navBar({ title: '关于' }) +
     `<div class="page-body">
+      <div class="brand-head">
+        <img class="brand-logo" src="icon.png" alt="Free-Narci" width="72" height="72" />
+        <div class="brand-name">Primuse</div>
+        <div class="brand-sub">桌面版 · 标识 Free-Narci</div>
+      </div>
       ${group(
         '版本',
         [
           srow({ icon: 'info.circle', color: '#5e6b87', label: '版本', value: m.version || '' , chev: false }),
-          srow({ icon: 'hammer' || 'info.circle', color: '#5e6b87', label: '构建', value: m.build ? `#${m.build}` : '', chev: false }),
+          srow({ icon: 'info.circle', color: '#5e6b87', label: '构建', value: m.build ? `#${m.build}` : '', chev: false }),
           srow({ icon: 'arrow.clockwise', color: '#1f8a5b', label: '检查更新', attr: 'data-open-releases="1"', chev: false, html: '<span class="svalue">GitHub Releases ›</span>' }),
           srow({ icon: 'globe', color: '#0a84ff', label: 'GitHub 仓库', attr: 'data-open-repo="1"', chev: false, html: '<span class="svalue">›</span>' }),
           srow({ icon: 'exclamationmark.triangle', color: '#e8453c', label: '功能建议与问题反馈', attr: 'data-open-issues="1"', chev: false, html: '<span class="svalue">›</span>' }),
@@ -3867,11 +3872,35 @@ async function smokeShellPages() {
 
   out.overlayLeaks = overlayLeaks();
 
-  state.tab = 'home';
-  state.stacks.home = ['root'];
-  render();
-  await settle(260);
+  // 关于页的品牌块。断言的是"图真的解码出来了、真的画在屏幕上"，不是 img 标签在不在：
+  // 素材在打包后要能从 asar 里读出来（§20.3 那条 build/ 不进包、托盘拿到空图的断链，
+  // 就是靠"看渲染结果"这一条抓回来的）。
+  open('about');
+  await settle(460);
+  const logo = document.querySelector('.brand-logo');
+  const logoBox = logo ? logo.getBoundingClientRect() : { width: 0 };
+  out.about = {
+    title: (document.querySelector('#screen .navbar .ttl') || {}).textContent,
+    logoSrc: logo ? logo.getAttribute('src') : null,
+    logoDecoded: Boolean(logo && logo.complete && logo.naturalWidth >= 64),
+    logoPainted: Boolean(logo && logoBox.width >= 40),
+    buildShown: (screenText().match(/#\s?(\d{2,3})/) || [])[1] || '',
+  };
+  // 故意停在关于页收尾：主进程接着要截这张图（新加的视觉元素必须有人看过的证据）。
+  out.overlayLeaksAfterAbout = overlayLeaks();
   return out;
+}
+
+/** 极短的一个 phase：把界面放回首页，好让主进程截首页图。 */
+async function smokeHomeView() {
+  state.tab = 'home';
+  state.stacks.settings = ['root'];
+  render();
+  await settle(320);
+  return {
+    title: (document.querySelector('#screen .navbar-large .ttl') || {}).textContent,
+    overlayLeaks: overlayLeaks(),
+  };
 }
 
 async function smokePlaylistUI() {
@@ -4287,6 +4316,7 @@ api.sources.onLatency(({ id, latencyMs }) => {
     api.onSmokeRun(async ({ keyword, phase }) => {
       try {
         if (phase === 'shell-pages') return api.smokeReport(await smokeShellPages());
+        if (phase === 'home-view') return api.smokeReport(await smokeHomeView());
         if (phase === 'playlist-ui') return api.smokeReport(await smokePlaylistUI());
         if (phase === 'player-shot') return api.smokeReport(await smokePlayerShot());
         if (phase === 'playlist-cleanup') return api.smokeReport(await smokePlaylistCleanup());

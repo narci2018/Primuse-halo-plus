@@ -785,9 +785,33 @@ async function runSmoke() {
         s.volumeSlider &&
         s.loginWall === false &&
         Array.isArray(pages.overlayLeaks) &&
-        pages.overlayLeaks.length === 0
+        pages.overlayLeaks.length === 0 &&
+        // 关于页的品牌标识：图必须真的解码 + 真的画出来（素材要能从 asar 里读到）
+        Boolean(pages.about) &&
+        pages.about.logoDecoded === true &&
+        pages.about.logoPainted === true &&
+        pages.about.title === '关于' &&
+        /^\d+$/.test(String(pages.about.buildShown))
     );
-    step('首页 / 资料库 / 设置三屏渲染（分节、入口、计数、开关、音量）', pagesOk, JSON.stringify(pages));
+    step(
+      '首页 / 资料库 / 设置 / 关于四屏渲染（分节、入口、计数、开关、音量、品牌标识）',
+      pagesOk,
+      JSON.stringify(pages)
+    );
+
+    // 关于页此刻就在屏幕上（那个 phase 故意停在关于页收尾）：新加的品牌标识必须
+    // 有"人眼看过"的证据，光有 naturalWidth 断言不算数。
+    const aboutShot = path.join(OUT_DIR, 'smoke-ui-about.png');
+    require('fs').writeFileSync(aboutShot, (await mainWindow.webContents.capturePage()).toPNG());
+    step('关于页截图（Free-Narci 标识）', true, aboutShot);
+
+    send('smoke:run', { keyword: '', phase: 'home-view' });
+    const hv = (await waitUI(15000)) || { note: '渲染层未回报首页状态' };
+    step(
+      '放回首页（首页 tab 栈复位、无浮层残留）',
+      Boolean(hv.title === '首页' && Array.isArray(hv.overlayLeaks) && hv.overlayLeaks.length === 0),
+      JSON.stringify(hv)
+    );
 
     const homeShot = path.join(OUT_DIR, 'smoke-ui-home.png');
     require('fs').writeFileSync(homeShot, (await mainWindow.webContents.capturePage()).toPNG());

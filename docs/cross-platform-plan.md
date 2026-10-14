@@ -861,7 +861,7 @@ PASS 界面截图
 
 拖拽排序（现在是手动 ▲▼）、歌词的逐行时间轴同步（现在只有整段文本槽位）、播放设备选择的真实实现（iPhone 那套依赖 AirPlay/输出设备枚举，Windows 侧目前只有面板占位），以及 §18.7 剩下的：真封面图、把 Windows 歌单结构回灌 iPhone 的实测。W5 的自建协议（subsonic/navidrome、jellyfin/emby/plex、fnMusic、songloft）与线路列表导入导出，按用户"优选忠于 UI、忠于功能"的排序继续往后放。
 
-## 20. 桌面图标（Free-Narci）与中文输入法（2026-10-14，v1.9.13 / build 75）
+## 20. 桌面图标（Free-Narci）与中文输入法（2026-10-14，v1.9.13 / build 75 起，v1.9.14 / build 76 收口）
 
 用户提了两条：① "最小化任务栏后，视觉效果是白色图片，看不到任何东西，我想重新设计 logo，叫 Free-Narci"；② "搜索框切换中文输入法，无法输入中文，一闪而过"。追问后确认口径：**只换图标，App 名字保持 Primuse**（不改名就不动 `%APPDATA%\Primuse` 数据目录与同步机器码），logo 方向选"深色圆角方块 + 声波 F"。
 
@@ -889,20 +889,30 @@ PASS 界面截图
 2. **组合期不启动搜索**：半个拼音既查不到东西，又会把上面那条链踩响。
 3. **组合期按键一个都不许接**：`if (event.isComposing || event.keyCode === 229) return`。最要命的是 Enter —— 中文输入法按 Enter 是"上屏候选词"，而原来的全局 keydown 会把它当成"提交搜索"，拿半个拼音去查、再 `render()`。
 
-### 20.5 验证（本机全绿，源码与打包两种形态）
+### 20.5 关于页的品牌块，以及为什么版本号一口气走到 1.9.14
 
-冒烟从 24 项变 **26 项**，两条新断言都是"看渲染结果"而不是看属性：
+标识换完了，App 内部却没有任何地方看得到它 —— 所以在关于页顶部加了品牌块（`.brand-head`：72px 圆角标识 + `Primuse` + "桌面版 · 标识 Free-Narci"），素材就是 `src/renderer/icon.png` 那一份，和 exe / 任务栏 / 托盘同源。顺手修掉一处哑弹：`pageAbout` 里写着 `icon: 'hammer' || 'info.circle'` —— `'hammer'` 是真值，所以永远取 `'hammer'`，而图标表里没有这个键，那一行的图标是空的。
+
+版本号：`v1.9.13` 的 tag 推出去时三条流水线已经在跑，而移动已推送的 tag 属于破坏性操作（不做）。品牌块和它的断言是之后才绿的，按"每次 +1"的规则补一版 **1.9.14 / build 76**。两个 Release 都可用，1.9.14 是完整的那一个。
+
+### 20.6 验证（本机全绿，源码与打包两种形态）
+
+冒烟从 24 项变 **28 项**，四条新断言都是"看渲染结果"而不是看属性：
 
 - `桌面图标：深色底 + 四角透明 + ICO 含 256 帧` —— 读真正加载进内存的位图：四角 `alpha` 必须是 `0/0/0/0`，不透明像素平均亮度 **54**（旧白底图这一步是 250 左右，一眼可分），ICO 帧序列 `16/20/24/32/40/48/64/128/256`。打包形态里 `build/` 不在包内属预期，那一步会明说"exe 图标由打包阶段写入"。
 - `中文输入法组合期不销毁搜索框` —— 探针派发真的 `compositionstart` + `isComposing=true` 的 `input`，然后**主动调用 `render()`**（就是原来踩雷的那一步），断言 `document.getElementById('search-input')` **还是同一个 DOM 节点**、组合串还在、`compositionend` 后封锁解除。写这条时探针自己先红了一次（`restored:false`）：解锁那次重绘已经把节点换掉了，拿旧引用写 `value` 是写给孤儿节点 —— 复位必须重新取节点。
+- `首页 / 资料库 / 设置 / 关于四屏渲染` —— 原来叫"三屏"，现在多一段关于页：`logo.naturalWidth >= 64`（图**真的解码出来了**，也就是打包后能从 asar 里读到）+ `getBoundingClientRect().width >= 40`（**真的画在屏幕上**）+ 构建号 `#76` 可见。
+- `放回首页` —— 新增一个极短 phase `home-view`：关于页那个 phase 故意停在关于页好截图，截完必须能把界面放回首页再截首页图，顺带断言 tab 栈复位、`overlayLeaks: []`。
 
-另外：`electron-builder` 吃自制 ICO 出包成功（`EXIT=0`，两个 1.9.13 产物）；`scripts/verify-asar.js` 13 项必需文件全 OK、无 HALO 资产泄漏；包内 `src/renderer/icon.png` 与源码 sha1 一致（`e24b026fd92c`）；用 PowerShell `ExtractAssociatedIcon` 从 `dist/win-unpacked/Primuse.exe` 里把 32×32 图标抠出来肉眼看过了，就是深色圆角 + 亮 F。四套离线契约（道理鱼 7/7、歌单同步 11/11、preload 50 链、线路 9 条）与 `npm run smoke` 打包形态 26 项同样全绿。
+截图从四张变 **五张**：`smoke-ui.png`（搜索）、`smoke-ui-about.png`（关于页品牌块，新增）、`smoke-ui-home.png`、`smoke-ui-playlist.png`、`smoke-ui-player.png`。
 
-### 20.6 还没做 / 已知代价
+另外：`electron-builder` 吃自制 ICO 出包成功（`EXIT=0`，两个 1.9.14 产物）；`scripts/verify-asar.js` 13 项必需文件全 OK、无 HALO 资产泄漏；包内 `src/renderer/icon.png` 与源码 sha1 一致（`e24b026fd92c`）；用 PowerShell `ExtractAssociatedIcon` 从 `dist/win-unpacked/Primuse.exe` 里把 32×32 图标抠出来肉眼看过了，就是深色圆角 + 亮 F。四套离线契约（道理鱼 7/7、歌单同步 11/11、preload 50 链、线路 9 条）不变；打包形态 `Primuse.exe --primuse-smoke` 同样 28/28、退出码 0。
+
+### 20.7 还没做 / 已知代价
 
 - **Windows 图标缓存**：NSIS 装到同一个路径，他机器上任务栏可能仍显示旧的白板图标。让他看 `Primuse.exe` 文件图标即可判断是不是缓存问题；必要时 `ie4uinit.exe -show` 或注销一次。
 - Apple 侧没动：iOS/macOS 仍是原图标，换过去要跑 `scripts/generate_app_icon_assets.py` 重生成整套 iconset，且用户明确"只换图标、名字保持 Primuse"，没要求动 iPhone。
-- 关于页/安装向导里还没有出现 "Free-Narci" 字样（本次只换图形标识）。
+- "Free-Narci" 目前只是**标识名**（关于页那行小字 + 图形），产品名、exe 名、`%APPDATA%\Primuse` 数据目录都没改 —— 这是用户选的口径，不是遗漏。要真改名得连带写数据迁移，并且会让云端多出一台新设备（机器码存在 `primuse.json` 的 `sync.deviceId` 里）。
 
 
 

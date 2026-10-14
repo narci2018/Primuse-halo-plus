@@ -254,6 +254,34 @@ button {
   padding: 4px 0 24px;
 }
 
+/* 关于页顶部的品牌块：桌面标识 Free-Narci（深色圆角 + 声波 F）。
+ * 图标素材由 scripts/make-icon.js 生成到 src/renderer/icon.png，
+ * 与 BrowserWindow / 托盘 / exe 用的是同一张画，只是尺寸不同。 */
+.brand-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 22px 0 18px;
+}
+
+.brand-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 17px; /* 素材自带圆角，这里只是保险 */
+}
+
+.brand-name {
+  font-size: var(--fs-title3, 20px);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.brand-sub {
+  font-size: var(--fs-footnote, 13px);
+  color: var(--text-3);
+}
+
 /* ── 底部 tab bar（ContentView.swift:579-617：首页/资料库/搜索/设置）── */
 
 .tabbar {
