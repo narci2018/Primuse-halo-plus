@@ -202,9 +202,15 @@ public final class CloudMusicSources {
     public var hasManifest: Bool { manifest != nil }
 
     /// 需求 5：首页 header 的文案由服务端按「本机唯一标识」下发。
-    /// 空串按"没设置"处理，回落到本地的 `home_title`，不能让首页变成一个空白标题。
+    ///
+    /// 只认 `homeTitleFrom` 是 `device` / `global` 的那份：现网实测默认下发是
+    /// `{homeTitle:"首页", homeTitleFrom:"default"}` —— 那是"没人设置过"，不是"设置成了首页"。
+    /// 照单全收会把本机的 `home_title` 本地化（de/es/fr/hi/ar…）压成中文。
+    /// 空串同样按"没设置"处理，回落到本地的 `home_title`，不能让首页变成空白标题。
     public var homeTitle: String? {
-        guard let raw = manifest?.settings?.homeTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let settings = manifest?.settings,
+              settings.homeTitleFrom != "default",
+              let raw = settings.homeTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return nil }
         return raw
     }

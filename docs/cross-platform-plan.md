@@ -1199,6 +1199,117 @@ userData 指到 `fs.mkdtempSync(os.tmpdir())` —— 所以它既不需要 Elect
 - `cf-sync-server`：`npm test` **109 项 0 失败**（workerd + 本机假服务器）→ 部署 → `npm run verify:live` **18 项 0 失败**（全只读）→ `check:live --all=1`。
 - `primuse-win`：`node scripts/cloud-sources-contract-test.js` **82 项 0 失败**（离线，临时 userData）→ `npm run smoke` **RESULT ok**（新增云源页 3 步：渲染断言 / 画面自证截图 / 合成数据收干净）。
 
+## 24. 同一份契约搬进 iPhone/macOS：判据的第五遍落笔（2026-10-14 → 10-15，v1.9.16 / build 78）
+
+§23 结束时三端里还差 iPhone 与 macOS。这一节把它补上 —— 需求 1/2/3/4/5 在 Swift 侧各有一份落点，
+外加 Swift 6 的 actor 隔离把"读一个单例"变成编译错误时逼出来的那个键。
+
+### 24.1 判据第五遍落地：`AudioSniff.swift`
+
+`functions/lib/protocols.js`、`src/main/cloud-sources.js`、现在再加 `Primuse/Services/AggregatedMusic/AudioSniff.swift`，
+同一条口径写到第五遍（§21 立规、§22 补 content-type、§23 修 `ftyp`/`sep`，这是客户端第三份抄本）：
+
+```
+bytes > 8192 && 不像文本 && (命中音频魔数 || content-type 声称是音频)
+```
+
+两处专门对齐了 JS，因为不对齐就是"同一线路两边结论相反"：
+
+- `ftyp` 比的是**偏移 4**（mp4 前四字节是 box 长度，`0x18/0x20/0x1c` 都会出现），§23.1 那两个错就出在这里；
+- `looksLikeText` 用 `String(decoding: head, as: UTF8.self)`，**不是** `String(data:encoding:.utf8)` —— 后者在二进制字节上直接回 `nil`，
+  于是"是不是文本"这个一票否决项在 Swift 侧恒为 false，与 JS 的 `TextDecoder(..., {fatal:false})`（非法序列替换成 U+FFFD 后照判）分叉。
+
+还有 UA：`AudioSniff.userAgent` 与服务端那一串逐字相同。有的站按 UA 放不同编码，给错就直接回 m3u8 或反爬页 ——
+两边用不同 UA，结论对不上时无从谈起。
+
+**取字节这一跳不放进 try**：`for try await byte in byteStream` 半路断（`网络链接已中断`）是"我们这次没测成"，
+不是"这条源给的东西不能播"。所以 `probe` 一律往外抛，调用方把抛出的东西落成 `error`；
+`AggregatedSourceVerdict.blindStatuses` 与 §22 的 `ERROR_GRACE` 同一份名单（`no_sample / runner_missing / unsupported / unchecked / error`）——
+**瞎掉不许判死刑**。这一条是第四类误杀的客户端版本。
+
+### 24.2 需求 4 落成本机只有一个 URL：`CloudMusicSources.swift`
+
+- 拉 `/api/music-sources?deviceId=…`，带 `If-None-Match`；304 只更新时间戳，但**仍然重新 apply 一遍缓存**
+  （上次进程崩在"拉到新清单"和"落线"之间时，这一笔把它补上）。
+- 契约不是 `primuse.music-sources.v1` 就**整份拒收**，本机继续用缓存；够不到服务端同样不清空线路。
+- 落线时按 `isUsableLocally` 过滤：`lxjs` 但没有 `scriptHash` 的不进线路表（走网关也解析不了，留着只是把播放变成一次注定失败的请求）；
+  HTTP 类但没有合法 `baseURL` 的也不留。`no_sample / unchecked` 这些照样落 —— 服务端把它们停在 `enabled=1` 是有意的。
+- 启动即刷一次，之后每 15 分钟带 ETag 刷一次（`startPeriodicRefresh`）—— 这就是需求 4 那句"实时更新音乐源"，
+  不需要推送通道。
+- **内置线路的补齐加了闸门**：`AggregatedSourceStore.loadSources()` 原先每次冷启动都把 `defaultSources` 里缺的补回去。
+  云端接管之后这条是错的 —— 后台判死并删掉的源会在用户下次开机时原地复活。现在只在"本机还没有任何云端线路"时才补齐。
+
+### 24.3 需求 2：`ping`/`pingAll` 删了，换成「检测全部可用」
+
+「检测全部延迟」的本质是 HEAD 回 200 就算健康。现网的报错页、反爬页、"需要卡密"的站**全都回 200**，
+旧界面把这三家标成绿色，用户照着绿色去点，什么都听不见。删掉的代码留了一段注释说明为什么不能留。
+
+新的 `checkAllAvailable()`：搜索 → 解析直链 → `Range: bytes=0-65535` 真取字节 → `AudioSniff` 判定，并发压到 4。
+搜索没结果时退回**本机样本 id 池**（`primuse.aggregated.sample_ids.v1`，每平台 12 个真实歌曲 id，
+由任何一次成功的搜索喂进来）—— 这是服务端 `ensureSamples` 的本机对应物；池子也空才报 `no_sample`，
+而 `no_sample` 不停用、不建议删除。
+
+与 Windows 侧同一条边界：**本机结论只上报显示，不改 `isEnabled`** —— 决策③，停线与删除是服务端的权力。
+界面上那份结论的取法是"本机实测优先，其次服务端体检下发的那份，最后未检出"。
+
+### 24.4 需求 3：云端线路只读，本机备用线路保留原样
+
+`AggregatedSourcesSettingsView` 现在分三段：云端管理（清单地址、清单版本 rev/时间、「检测全部可用」、「刷新清单」）、
+线路列表（`音源线路（云端 N · 本机 M）`）、本机添加。云端行没有铅笔、左滑删除跳过、`Toggle` 也不给 ——
+只有本机自己加的线路保留启停与删除，行为与 iPhone 旧版一致。`localAddSection` 的协议选项里
+**没有 `lxjs`**：脚本只能在服务端 runner Worker 里跑（Workers 请求期不许生成代码，本机那个 JavaScriptCore 只处理响应文本），
+所以本机加不了这类源。`lxjs` 的搜索/取流/歌词三条路都经 `/api/music-gateway`，`sourceId` 原样带上，
+`platform` 用清单里的原文（`cloudPlatform`），本机不认得的咪咕也能被正确转发。
+
+### 24.5 需求 5：首页文案，以及 Swift 6 隔离逼出来的一个键
+
+第一版把 `HomeTitle` 写成 `@MainActor enum` 去读 `CloudMusicSources.shared.homeTitle`，编译不过 ——
+不是 `body` 里的成员在 Swift 6 下**不是** MainActor：`SidebarItem.displayTitle` 这种枚举计算属性、
+以及视图里 `body` 之外的 helper，都是非隔离上下文。所以它改成只读 `UserDefaults` 的非隔离枚举，
+由 `CloudMusicSources.publishHomeTitle()` 在四个时机写这份键：`init`（冷启动不等网络）、刷新 200 落地后、304 重新 apply 后、
+`setManifestURL` 换地址时（上一家的文案不该还挂着，`manifest` 已是 nil → 删键 → 回本地 `home_title`）。
+
+视图侧用 `@AppStorage(HomeTitle.defaultsKey)` 读（`HomeView` 的 `.navigationTitle`、`ContentView` 的 `Tab` 与 iPad 侧栏、`MacSidebar` 首页行），
+这样服务端一改文案屏幕就自己重绘，而不是等下一次无关的刷新。空串按"没设置"处理 —— 首页标题不能变成空白。
+
+还有一条只读现网才看得见的坑：`GET /api/music-sources` 在**没人设置过**的时候照样回
+`{homeTitle:"首页", homeTitleFrom:"default"}`（服务端 `functions/api/music-sources.js:92` 那个三态：
+`device` / `global` / `default`），照单全收就等于用服务端的默认中文，把本机 `home_title` 的
+de/es/fr/hi/ar 本地化全部压平。所以 Swift 侧只认 `homeTitleFrom != "default"` 的那份，`default` 与空串一样按"没设置"回落本地。
+Windows 侧不受影响（`app.js` 那行本来就把空值兜成 `'首页'`，而它的界面本来就只有中文），
+这处差异是**故意**的，不是两边不一致 —— 判据要一致的是"能不能出声"，文案走的是各平台的本地化。
+
+顺带记一条踩过的坑：这个页面一度被加了 `@MainActor` 注解，理由是"`@State` 的默认值取了 MainActor 单例"。
+其实不用 —— 本仓库已有十九处一模一样的写法（`ScrobbleSettingsView` 的 `ScrobbleService.shared`、
+`MacContentView` 的 `MacUIPreferences.shared`），SwiftUI 的 `View` 协议自带 `@MainActor`，
+隔离会传到整个 struct。而显式标注会把 `public init()` 变成 MainActor 隔离，反倒给它的两个构造点找麻烦。
+
+### 24.6 顺带修：`sep()` 与咪咕
+
+线路地址自己带查询串时（`https://x/api.php?key=abc`），Swift 侧原来一律 `\(base)?...` 拼，
+于是得到 `...?key=abc?types=search...` —— 第二个 `?` 落进上一个参数的值里，搜索/解析/歌词全拿不到东西，
+**一条好线路就被判成死的**。这是 §23.3 那次的第三次出现，现在 `sep(base)` 与 `protocols.js` / `aggregated.js` 同规则，
+每个拼查询串的位置都过它。`AggregatedPlatform` 补上 `migu`（现网名册里那 3 条 `no_sample` 就是咪咕，
+meting 词是 `mguo`、hyw 词是 `mg`），`AggregatedMusicService` 与网关都用它。
+
+### 24.7 这台 Windows 机没有 Swift 编译器 —— 验证是怎么做的
+
+本机没有 Xcode/swiftc，所以这份移植的正确性建立在两处：**逐行 review**（§24.1–24.6 那些对齐就是 review 的产出），
+以及把 CI 当编译器。CI 的门禁形状顺带记一笔，因为它决定"什么时候才算真验过"：
+
+- `build-mac.yml`：`push` 只跑 preflight（xcframework 符号链接 + XcodeGen scheme），compile job 要 `v*` 标签或手动 dispatch。
+- `build-ipa.yml`：`on.push` 同时写了 `paths` 和 `tags` —— 分支推送因此**根本不触发**，只有 tag 与 dispatch 会跑；
+  它的 build job 没有 `if:`，所以 `gh workflow run build-ipa.yml --ref main` 能编包而不发 Release（发布那一步才按 tag 门住）。
+- 两个 workflow 用 dispatch 各编一次，是不改任何 CI 配置就能拿到编译结论的办法。
+- 本机 `gh` 的坑：环境里那个失效的 `GITHUB_TOKEN` 会压掉 keyring 账号，得 `env -u GITHUB_TOKEN -u GH_TOKEN gh …`。
+
+- 现网只读核对（不 POST）：`GET /api/music-sources` rev 322 / 50 条 / 启用 17 / 可用 14 / 建议删除 33，
+  Swift 侧 DTO 逐字段对着它写，包括 `protocol` 这个关键字撞名（CodingKeys 必须映射回 `protocol`，否则整份清单解出来全是 nil）。
+
+**还没验的**：真机上「检测全部可用」跑出来的名单是否与服务端那 14 条对得上（iOS 需要签名、macOS 那份未签名 DMG 本机装不了，
+这是 §5 一直挂着的那件事）。Swift 侧也没有等价于 `cloud-sources-contract-test.js` 的离线契约测试 ——
+这是下一节该补的位置：判据已经写了五遍，第五遍没有测试撑着就一定会飘。
+
 
 
 
