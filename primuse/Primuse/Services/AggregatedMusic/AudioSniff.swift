@@ -105,9 +105,11 @@ public enum AudioSniff {
         request.setValue("bytes=0-\(probeBytes - 1)", forHTTPHeaderField: "Range")
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        // `bytes(for:)` 回的是 `URLResponse`，状态码与响应头只长在 `HTTPURLResponse` 上 ——
-        // 不转这一层，下面 `statusCode` / `value(forHTTPHeaderField:)` 直接编不过。
-        let (rawResponse, byteStream) = try await probeSession.bytes(for: request)
+        // 这个 SDK 上 `bytes(for:)` 的回元组是 **(字节流, 响应)** —— 顺序写反了编译不过
+        // （`for-in loop requires 'URLResponse' to conform to 'AsyncSequence'`），
+        // 本仓库其它下载点（`TrustedHTTPTransport`、`CloudDriveBase`）都是这个顺序。
+        // 另外响应是 `URLResponse`，状态码与响应头只长在 `HTTPURLResponse` 上，要转这一层。
+        let (byteStream, rawResponse) = try await probeSession.bytes(for: request)
         guard let response = rawResponse as? HTTPURLResponse else {
             throw NSError(domain: "AudioSniff", code: 502, userInfo: [NSLocalizedDescriptionKey: "响应不是 HTTP，无法判定"])
         }

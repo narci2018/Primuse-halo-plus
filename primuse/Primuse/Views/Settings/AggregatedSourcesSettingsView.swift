@@ -3,7 +3,7 @@ import Observation
 import PrimuseKit
 
 // 这里没有写 `@MainActor`：SwiftUI 的 `View` 协议本身就带 `@MainActor`，
-//  conformity 会把这份隔离传到整个 struct 上（`body` 之外的 helper 也在主 actor 上），
+// conformity 会把这份隔离传到整个 struct 上（`body` 之外的 helper 也在主 actor 上），
 // 所以从 `@State` 的默认值里取 `CloudMusicSources.shared` 这个 MainActor 单例是合法的
 // —— 本仓库另外十九个页面（`ScrobbleSettingsView` 的 `ScrobbleService.shared`、
 // `MacContentView` 的 `MacUIPreferences.shared`）就是这么写的，CI 一直是绿的。
@@ -266,7 +266,8 @@ public struct AggregatedSourcesSettingsView: View {
         return "\(verdict.detail)\(bytes) · \(who)".trimmingCharacters(in: .whitespaces)
     }
 
-    @ViewBuilder
+    /// 不是 `@ViewBuilder`：`ViewBuilder` 会把函数体里的 `switch` 当成"条件视图"去 buildExpression，
+    /// 而这里是给变量赋值（`()` 不是 View，CI 就这么报的）。builder 对这个函数本来也不需要。
     private func verdictIcon(_ verdict: AggregatedSourceVerdict) -> some View {
         let symbol: String
         switch verdict.tone {

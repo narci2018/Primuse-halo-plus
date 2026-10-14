@@ -234,7 +234,11 @@ public final class CloudMusicSources {
     }
 
     /// `^https?://` 的大小写不敏感判断（不引 NSRegularExpression，就为这两个前缀）。
-    static func looksLikeHTTP(_ raw: String) -> Bool {
+    ///
+    /// `nonisolated`：`CloudSourceDTO.isHTTPBaseURL` 是顶层 struct 的计算属性（非隔离），
+    /// 它也要用这条判断；挂在 MainActor 类上而不忘 `nonisolated` 就是 CI 报的
+    /// "call to main actor-isolated static method in a synchronous nonisolated context"。
+    nonisolated static func looksLikeHTTP(_ raw: String) -> Bool {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return value.hasPrefix("http://") || value.hasPrefix("https://")
     }
