@@ -27,6 +27,37 @@ const ADMIN = "local-dev-admin-token";
 const CHECK = "local-dev-check-token";
 const USE_NET = !process.argv.includes("--no-net");
 
+/**
+ * 一个"声明了 search 能力"的假洛雪源（用例，不是真音源）。
+ *
+ * 为什么必须是假的：现网那 23 个脚本里会搜的都不稳定（今天能搜明天卡密），
+ * 而"网关把会搜的洛雪源并进搜索结果"和"样本池靠源自己喂"这两件事需要一条确定性用例。
+ *
+ * 注意它返回的是**真实存在的网易云歌曲 id**（晴天的 3440441479）：搜索结果会被喂进样本池，
+ * 返回一个编造的 id 就等于往池子里投毒 —— 后面别的源体检时会先拿到这个假 id，
+ * 解析不到直链，被误判成坏源。用例可以假，进池子的数据不能假。
+ */
+const FAKE_SEARCH_SCRIPT = [
+  "/*",
+  " * @name 用例音源（会搜索）",
+  " * @version 1.0.0",
+  " * @author cf-contract",
+  " * @description 测试用例：声明 search 能力并返回固定结果，不真的联网",
+  " */",
+  "globalThis.lx.send(globalThis.lx.EVENT_NAMES.inited, {",
+  "  type: 'music',",
+  "  sources: { wy: { name: '用例音源', type: 'music', actions: ['musicUrl', 'search'], qualitys: ['128k', '320k'] } },",
+  "});",
+  "globalThis.lx.on(globalThis.lx.EVENT_NAMES.request, function (req) {",
+  "  if (req.action === 'search') {",
+  "    var kw = (req.info && req.info.keyword) || req.keyword || '';",
+  "    return [{ id: '3440441479', name: '晴天（用例）', singer: '周杰伦', album: { name: '叶惠美' }, interval: 269, source: 'wy' }];",
+  "  }",
+  "  if (req.action === 'musicUrl') return Promise.reject(new Error('用例：不解析直链'));",
+  "  return null;",
+  "});",
+].join("\n");
+
 const results = [];
 let failed = 0;
 
@@ -134,7 +165,13 @@ async function main() {
   // 洛雪 js 音源的执行体：后台将来是用 Cloudflare API 把这份 bundle 部署成 Worker，
   // 本地契约测试里直接用同一份生成代码起一个真 workerd，对端不 mock。
   const RUNNER_TOKEN = "contract-runner-token";
-  const runnerFiles = ["忆音音源_v1.js", "gdstudio音乐源 v1.0.1（仅支持网易）.js"];
+  const runnerFiles = [
+    "忆音音源_v1.js",
+    "gdstudio音乐源 v1.0.1（仅支持网易）.js",
+    // 用例源也要真进 bundle：网关的洛雪搜索走的是"真问 runner 要 capabilities"，
+    // 拿一个只存在于 D1、不在 bundle 里的源测不出这条链。
+    { name: "〔用例〕会搜索的假源.js", scriptText: FAKE_SEARCH_SCRIPT },
+  ];
   let runner = null;
   try {
     runner = await startLxRunner({ files: runnerFiles, port: PORT + 1, token: RUNNER_TOKEN });
@@ -203,6 +240,10 @@ async function main() {
     const prio = (d?.sources || []).slice().sort((a, b) => b.priority - a.priority).map((s) => s.priority);
     record("优先级序列保持 20/18/16/15/14/12/10/8/6", JSON.stringify(prio) === JSON.stringify([20, 18, 16, 15, 14, 12, 10, 8, 6]), prio.join("/"));
     record("manifest 暴露网关地址与协议枚举", d?.gateway?.base === "/api/music-gateway" && Array.isArray(d.protocols) && d.protocols.includes("lxjs"), JSON.stringify(d?.gateway));
+    // 客户端只看这张表决定"这条协议的活儿在哪儿干"：lxjs 必须写清是服务端 runner 算的，
+    // 否则将来某个客户端会去本地装一个 js 运行时，把"客户端只保存一个 URL"这条要求破掉。
+    record("manifest 用 runtime 说清每类协议在哪儿算（lxjs=服务端）", d?.runtime?.lxjs === "server-runner" && d?.runtime?.meting === "client-or-gateway" && d?.runtime?.customJson === "none", JSON.stringify(d?.runtime));
+    record("manifest 的网关条目带给人读的说明（客户端排错时直接显示）", typeof d?.gateway?.note === "string" && /runner/i.test(d.gateway.note), String(d?.gateway?.note || "").slice(0, 60));
     record("首页文案默认值 = 首页（未设置时不空）", d?.settings?.homeTitle === "首页" && d?.settings?.homeTitleFrom === "default", JSON.stringify(d?.settings));
 
     const etag = man.etag;
@@ -243,6 +284,12 @@ async function main() {
     const rejected = await ADMIN_POST("music-sources", { action: "import-js", script: "console.log('我不是音源')" });
     record("不像音源的 js 被拒（不污染清单）", rejected.status === 400 && /洛雪/.test(String(rejected.json?.error)), JSON.stringify(rejected.json?.error));
 
+    // 用例源（会搜索）：后面两条断言都靠它 —— 网关把洛雪搜索结果并进来看，
+    // 以及"某条 HTTP 线路的搜索站挂了，但样本池里有别的源喂的真实 id"时体检该怎么判。
+    const fakeIn = await ADMIN_POST("music-sources", { action: "import-js", script: FAKE_SEARCH_SCRIPT, filename: "〔用例〕会搜索的假源.js", priority: 25 });
+    const fakeSrc = (fakeIn.json?.data?.sources || []).find((s) => s.platform === "netease");
+    record("导入会搜索的用例音源（它同时是 runner bundle 里的一个模块）", fakeIn.json?.code === 0 && !!fakeSrc && fakeSrc.protocol === "lxjs" && fakeSrc.enabled === true, JSON.stringify({ n: (fakeIn.json?.data?.sources || []).length, id: fakeSrc?.id, err: fakeIn.json?.error }));
+
     // gzip 往返：存进去的正文必须能原样解出来
     const scriptBack = await req(`/api/music-sources?script=${impData.sources[0].id}`, { token: ADMIN });
     const sameText = scriptBack.json?.data?.script?.text === sample;
@@ -258,12 +305,39 @@ async function main() {
 
     // ── 7. 检测全部可用（需求 2）：不可用 → 停用 + 建议删除 ────────────────
     if (USE_NET) {
-      // 3e0 那条实测恒回 {"error":"unknown type"}：搜索阶段就该判不可用。
-      const dead = await ADMIN_POST("music-sources", { action: "check-one", id: "default-netease-meting-3e0" }, CHECK);
+      // "判死 + 停用 + 建议删除"这条断言用一条**合成**的死线路来测：example.com 永远返回 HTML，
+      // 搜索拿不到条目、解析拿不到直链。不用现网线路，因为第三方站点的状态隔天就变，
+      // 拿它做断言第二天就变成随机红绿灯 —— 那是被测对象选错了，不是代码的问题。
+      const mkDead = await ADMIN_POST("music-sources", {
+        action: "upsert", id: "contract-dead-line", name: "〔用例〕永远播不出的线路",
+        platform: "netease", protocol: "meting", baseURL: "https://example.com/api.php", priority: 1,
+      });
+      record("建好用例死线路（后台写接口）", mkDead.json?.code === 0, JSON.stringify(mkDead.json?.error || mkDead.json?.data?.source?.id));
+
+      const dead = await ADMIN_POST("music-sources", { action: "check-one", id: "contract-dead-line" }, CHECK);
       const deadSrc = dead.json?.data?.source;
       record("已知死线路体检判非 ok（不再是延迟绿灯）", dead.json?.code === 0 && deadSrc && deadSrc.check.status !== "ok", JSON.stringify({ status: deadSrc?.check?.status, detail: deadSrc?.check?.detail }));
       record("不可用的源被自动停用", deadSrc && deadSrc.enabled === false, `enabled=${deadSrc?.enabled}`);
       record("不可用的源带上删除建议", deadSrc && deadSrc.suggestDelete === true, `suggestDelete=${deadSrc?.suggestDelete}`);
+      // 判死的理由必须是"播放层面的失败"。第三方解析站的 /search 路径会单独挂（520、unknown type、要卡密），
+      // 而 /url 那条可能还是好的 —— 只看搜索就把源判死，会杀掉还能用的解析线路。
+      // 所以搜索没结果时要退回样本池里的真实歌曲 id 继续验播放（池子由会搜的源自己喂）。
+      record(
+        "死线路的理由是播不出，不是「搜索没结果/没有样本」",
+        ["search_empty", "no_sample", "unchecked"].indexOf(deadSrc?.check?.status) < 0,
+        JSON.stringify({ status: deadSrc?.check?.status, detail: String(deadSrc?.check?.detail || "").slice(0, 120) })
+      );
+
+      // 现网实测：3e0 那条的 /search 恒回 {"error":"unknown type"}，但 /url 是能出声的。
+      // 旧实现给它判过 search_empty 并停用 —— 那正是这次要消灭的误杀。这里钉住"结论必须是播放层面的"，
+      // 而不断言 ok/不 ok：它到底能不能播由它的站点今天的心情决定，不由我们的判据决定。
+      const searchBroken = await ADMIN_POST("music-sources", { action: "check-one", id: "default-netease-meting-3e0" }, CHECK);
+      const brokenSrc = searchBroken.json?.data?.source;
+      record(
+        "搜索接口坏的线路也会被喂真实歌曲 id 验播放（结论落在播放层）",
+        ["ok", "resolve_fail", "audio_fail", "script_error", "error", "timeout"].indexOf(brokenSrc?.check?.status) >= 0,
+        JSON.stringify({ status: brokenSrc?.check?.status, detail: String(brokenSrc?.check?.detail || "").slice(0, 140) })
+      );
 
       const alive = await ADMIN_POST("music-sources", { action: "check-one", id: "default-netease-gdstudio" }, CHECK);
       const aliveSrc = alive.json?.data?.source;
@@ -283,10 +357,15 @@ async function main() {
       const rstat = await ADMIN_POST("music-sources", { action: "runner-status", }, ADMIN);
       const rd = rstat.json?.data;
       record("runner-status 打得通对端并报告模块数", rstat.json?.code === 0 && rd?.reachable === true && rd.modules >= 2, JSON.stringify({ reachable: rd?.reachable, modules: rd?.modules, err: rd?.error }));
+      // "该部署的集合"必须正好等于清单里启用的 lxjs 源，一条不多一条不少。
+      // 这里刻意从清单现算而不是写死数字：用例里导入的源会变（本轮就多了一条会搜的假源），
+      // 写死长度的断言只会逼人去改断言，而不是暴露真正的偏差。
+      const nowMan = await req("/api/music-sources");
+      const wantLx = Array.from(new Set((nowMan.json?.data?.sources || []).filter((s) => s.protocol === "lxjs" && s.enabled).map((s) => s.scriptHash))).sort();
       record(
         "runner-status 里「想部署的集合」= 启用的 lxjs 源（不是 runner 里现成的）",
-        Array.isArray(rd?.desiredHashes) && rd.desiredHashes.includes(impData.hash) && rd.desiredHashes.length === 2,
-        JSON.stringify({ desired: rd?.desiredHashes?.map((h) => h.slice(0, 8)), live: rd?.liveHashes?.map((h) => h.slice(0, 8)) })
+        Array.isArray(rd?.desiredHashes) && JSON.stringify(rd.desiredHashes.slice().sort()) === JSON.stringify(wantLx) && wantLx.includes(impData.hash) && wantLx.includes(fakeSrc?.scriptHash),
+        JSON.stringify({ desired: rd?.desiredHashes?.map((h) => String(h).slice(0, 8)), want: wantLx.map((h) => String(h).slice(0, 8)), live: rd?.liveHashes?.map((h) => String(h).slice(0, 8)) })
       );
       record("脚本集合和 runner 现装不一致时如实报 stale", rd?.stale === true, `stale=${rd?.stale}（本地没有 CF 凭据，装不了长青那条）`);
       record("没配 CF 凭据时 canDeploy=false（不把缺凭据伪装成已部署）", rd?.canDeploy === false, `canDeploy=${rd?.canDeploy}`);
@@ -339,6 +418,22 @@ async function main() {
       const gwUrl = await req(`/api/music-gateway?action=url&platform=netease&rawID=${first ? first.rawID : ""}&deviceId=CF-TEST`);
       record("网关解析出可播直链", gwUrl.json?.code === 0 && /^https?:\/\//.test(String(gwUrl.json.data.url)), JSON.stringify({ source: gwUrl.json?.data?.sourceName, url: String(gwUrl.json?.data?.url || gwUrl.json?.error).slice(0, 70) }));
 
+      // 洛雪源能不能参与搜索，取决于它自己有没有实现 search（官方协议只保证 musicUrl）。
+      // 用一个只有用例源答得出的关键词来测：HTTP 线路必然搜不到，结果里若出现 lxjs，
+      // 就证明"问 capabilities → 只搜会搜的源 → 归一成标准曲型"这一整条链在真 runner 上成立。
+      const gwLxSearch = await req(`/api/music-gateway?action=search&keyword=${encodeURIComponent("用例独有词zzz")}&platform=netease&deviceId=CF-TEST`);
+      const lxHit = (gwLxSearch.json?.data?.results || []).find((r) => r.protocol === "lxjs");
+      record(
+        "网关搜索把会搜的洛雪源并进结果（客户端只用一个入口就能拿到它的歌）",
+        gwLxSearch.json?.code === 0 && !!lxHit,
+        JSON.stringify({ count: gwLxSearch.json?.data?.count, notes: (gwLxSearch.json?.data?.notes || []).length, err: gwLxSearch.json?.error })
+      );
+      record(
+        "洛雪搜索结果归一成标准曲型（agg_ id / 标题 / 歌手 / 时长 / 来源都带上）",
+        !!lxHit && lxHit.id === `agg_netease_${lxHit.rawID}` && !!lxHit.title && !!lxHit.artist && lxHit.sourceId === (fakeSrc && fakeSrc.id) && Number(lxHit.duration) > 0,
+        JSON.stringify(lxHit && { id: lxHit.id, title: lxHit.title, artist: lxHit.artist, album: lxHit.album, duration: lxHit.duration, sourceId: String(lxHit.sourceId).slice(0, 20) })
+      );
+
       const gwLx = await req(`/api/music-gateway?action=url&platform=netease&rawID=${first ? first.rawID : ""}&sourceId=${impData.sources.find((s) => s.platform === "netease")?.id}&deviceId=CF-TEST`);
       const lxUrl = String(gwLx.json?.data?.url || "");
       const lxProbe = gwLx.json?.code === 0 && /^https?:\/\//.test(lxUrl) ? await probeAudio(lxUrl) : null;
@@ -351,15 +446,18 @@ async function main() {
         );
       }
 
-      const blocked = await req(`/api/music-gateway?action=url&platform=netease&rawID=x&sourceId=default-netease-meting-3e0&deviceId=CF-TEST`);
+      const blocked = await req(`/api/music-gateway?action=url&platform=netease&rawID=x&sourceId=contract-dead-line&deviceId=CF-TEST`);
       record("已停用/体检不可用的源指名点姓时返回 409", blocked.status === 409 || blocked.json?.code === 409, JSON.stringify({ status: blocked.status, error: String(blocked.json?.error || "").slice(0, 80) }));
 
       // ── 9. 体检结论必须改变清单本身（客户端只看 usable / suggestions）────
       const finalMan = await req("/api/music-sources");
       const finSrcs = finalMan.json?.data?.sources || [];
-      const deadRow = finSrcs.find((s) => s.id === "default-netease-meting-3e0");
+      const deadRow = finSrcs.find((s) => s.id === "contract-dead-line");
       record("不可用源不出现在 usable 列表里", Array.isArray(finalMan.json?.data?.usable) && deadRow && !finalMan.json.data.usable.includes(deadRow.id), JSON.stringify({ usable: finalMan.json?.data?.usable, deadEnabled: deadRow?.enabled }));
-      record("删除建议随清单下发（客户端能显示「建议删除该源」）", (finalMan.json?.data?.suggestions || []).some((s) => s.id === "default-netease-meting-3e0"), JSON.stringify((finalMan.json?.data?.suggestions || []).slice(0, 2)));
+      record("删除建议随清单下发（客户端能显示「建议删除该源」）", (finalMan.json?.data?.suggestions || []).some((s) => s.id === "contract-dead-line"), JSON.stringify((finalMan.json?.data?.suggestions || []).slice(0, 2)));
+      // 用例源不该出现在客户端视野里（它没有真实歌曲，且 example.com 永远播不出）——
+      // 判死之后它必须被停用，清单的 usable 也就不会带上它；这条断言防的是"死源漏进可用清单"。
+      record("判死的用例线路被下发停用位（客户端不该拿它去解析）", deadRow && deadRow.enabled === false && deadRow.suggestDelete === true, JSON.stringify({ enabled: deadRow?.enabled, suggestDelete: deadRow?.suggestDelete }));
 
       // 客户端只看 usable：体检判可行的 lxjs 源必须下发到清单里。
       const lxUsableId = impData.sources.find((s) => s.platform === "netease")?.id;
@@ -384,6 +482,15 @@ async function main() {
       const got = normalizeLxSearch(input).map((i) => i.rawID);
       record(`搜索结果归一：${label}`, JSON.stringify(got) === JSON.stringify(expect), `得到 ${JSON.stringify(got)}`);
     }
+    // 只有 id 的结果在 UI 上是一行空白，所以专辑/封面/时长/歌手数组这些上屏字段也要归一。
+    const rich = normalizeLxSearch([
+      { id: "3440441479", name: "晴天", singer: [{ name: "周杰伦", hash: "x" }], album: { name: "叶惠美" }, picUrl: "https://p1.music.126.net/x/3440441479.jpg", interval: 269 },
+    ])[0] || {};
+    record(
+      "搜索结果归一：歌手数组、专辑对象、封面 URL、时长都落到曲型上",
+      rich.artist === "周杰伦" && rich.album === "叶惠美" && /^https:\/\//.test(String(rich.coverURL || "")) && Number(rich.duration) === 269,
+      JSON.stringify({ artist: rich.artist, album: rich.album, duration: rich.duration, cover: String(rich.coverURL || "").slice(0, 24) })
+    );
 
   } catch (e) {
     record("测试执行未抛异常", false, String(e && e.message ? e.message : e));

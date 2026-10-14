@@ -19,7 +19,7 @@ import { ok, fail, rateLimit, deviceIdOf, corsHeaders } from "../lib/common.js";
 import { ensureSchema, seedDefaults, listSources, getSource, publicSource } from "../lib/store.js";
 import { search, resolveURL, lyric } from "../lib/protocols.js";
 import { rememberSamples, getSamples } from "../lib/check.js";
-import { lxMusicUrl } from "../lib/runner.js";
+import { lxMusicUrl, lxSearch, lxCapabilities, lxSupportsSearch } from "../lib/runner.js";
 import { loadScript } from "../lib/store.js";
 
 export function onRequestOptions() {
@@ -101,13 +101,36 @@ export async function handleGateway(ctx) {
 
   if (p.action === "search") {
     if (!p.keyword) return fail(400, "缺少 keyword", 400);
-    // 并行搜（并发数刻意压小：每个第三方站点都可能慢）。lxjs 不会搜索，自动跳过。
-    const httpSources = list.filter((s) => s.protocol !== "lxjs" && (!p.platform || s.platform === p.platform));
+    // 并行搜（并发数刻意压小：每个第三方站点都可能慢）。
+    //
+    // lxjs 要不要进来：官方洛雪协议只保证 musicUrl，搜索是各家脚本自己加的，所以这里
+    // **先问 runner 的 capabilities**（脚本在 inited 负载里声明 actions），声明了 search 才发搜索。
+    // 不声明的就不浪费一次 25s 超时。问不到（runner 挂了）就当不会搜，绝不为"猜"付钱。
+    const wanted = p.platform ? (s) => s.platform === p.platform : () => true;
+    const httpSources = list.filter((s) => s.protocol !== "lxjs" && wanted(s));
+    const lxSources = list.filter((s) => s.protocol === "lxjs" && s.scriptHash && wanted(s))
+      // 排序：体检真出过声的排前面，其余（含"检不出"的 kuwo/migu 那批）排在后面 ——
+      // 上限 4 条只是给一次用户搜索封顶，不是把"没体检过"的源排除掉；
+      // 恰恰是它们需要在搜索里被用到，才能喂样本池、从"无法验证"里出来。
+      .sort((a, b) => (b.check && b.check.status === "ok" ? 1 : 0) - (a.check && a.check.status === "ok" ? 1 : 0) || b.priority - a.priority)
+      .slice(0, 4);
+
     const seen = new Set();
     const results = [];
     const notes = [];
     const chunks = [];
-    for (let i = 0; i < httpSources.length; i += 4) chunks.push(httpSources.slice(i, i + 4));
+    for (let i = 0; i < httpSources.length; i += 4) chunks.push(httpSources.slice(i, 4 + i));
+    // 洛雪搜索先发出去，不排在 HTTP 那几批后面：一次 runner 冷启动就要好几秒。
+    const lxBallot = Promise.all(lxSources.map(async (s) => {
+      try {
+        const caps = await lxCapabilities(env, s.scriptHash);
+        if (!lxSupportsSearch(caps)) return { s, items: [], skipped: "该音源未声明 search 能力" };
+        const items = await lxSearch(env, { hash: s.scriptHash, platform: s.platform, keyword: p.keyword, limit: Math.min(20, p.limit), timeoutMs: 12000 });
+        return { s, items };
+      } catch (e) {
+        return { s, items: [], skipped: String(e && e.message ? e.message : e) };
+      }
+    }));
     for (const chunk of chunks) {
       const settled = await Promise.all(
         chunk.map(async (s) => {
@@ -130,6 +153,20 @@ export async function handleGateway(ctx) {
           seen.add(key);
           results.push(item);
         }
+      }
+    }
+    for (const { s, items, skipped } of await lxBallot) {
+      if (!items.length) {
+        notes.push({ id: s.id, name: s.name, note: skipped || "无结果" });
+        continue;
+      }
+      // 喂样本池：这是 kuwo / migu 这类"只有洛雪源会搜"的平台唯一能拿到可考 id 的途径。
+      await rememberSamples(env, s.platform, items);
+      for (const item of items) {
+        const key = `${s.platform}:${item.rawID}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push({ ...item, id: `agg_${s.platform}_${item.rawID}`, platform: s.platform, sourceId: s.id, sourceName: s.name, kind: "aggregated", protocol: "lxjs" });
       }
     }
     return ok({ action: "search", keyword: p.keyword, count: results.length, results: results.slice(0, p.limit), notes }, "搜索完成");

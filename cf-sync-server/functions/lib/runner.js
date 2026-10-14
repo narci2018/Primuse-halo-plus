@@ -483,6 +483,38 @@ export async function lxDetectPlatforms(env, hash) {
 }
 
 /**
+ * 同上，但**按 hash 缓存在 isolate 里**（默认 10 分钟）。
+ *
+ * 为什么要缓存：capabilities 这次问话在 runner 里也要等 `__waitInited`（最多 6.5s），
+ * 而"这条源会不会搜"是个几乎不变的事实 —— 每次用户搜索都重新问一遍，等于给搜索白加一跳。
+ * 缓存失败（null）也记，否则坏源会把每次搜索都拖慢。
+ */
+const capCache = new Map();
+export async function lxCapabilities(env, hash, { ttlMs = 600000 } = {}) {
+  const hit = capCache.get(hash);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.v;
+  const v = await lxDetectPlatforms(env, hash);
+  capCache.set(hash, { at: Date.now(), v });
+  if (capCache.size > 200) {
+    // 别让缓存无限长：按写入时间淘汰最早的一半（isolate 内存也是资源）。
+    const keys = Array.from(capCache.keys()).slice(0, 100);
+    for (const k of keys) if (k !== hash) capCache.delete(k);
+  }
+  return v;
+}
+
+/** 脚本在 inited 负载里声明的 actions 有没有 search。认不到就 false（宁可不搜，也不为"猜"付一次超时）。 */
+export function lxSupportsSearch(caps) {
+  if (!caps || typeof caps !== "object") return false;
+  const sources = caps.sources || {};
+  for (const key of Object.keys(sources)) {
+    const actions = sources[key] && sources[key].actions;
+    if (Array.isArray(actions) && actions.some((a) => String(a).toLowerCase() === "search")) return true;
+  }
+  return false;
+}
+
+/**
  * 让脚本自己搜一次歌。
  *
  * 官方洛雪协议里音源只保证 musicUrl，搜索是各家自己加的（本机的 22 个脚本里就有一部分实现了），
@@ -490,18 +522,24 @@ export async function lxDetectPlatforms(env, hash) {
  * 变成可用信息：搜到了就喂样本池，让那条源能被体检；搜不到就照旧回答"检不出结果"（绝不停用）。
  * 参数字段各家读的不一样（keyword / query / prompt / text），全部填满，免得源明明能搜却被判"不支持"。
  */
-export async function lxSearch(env, { hash, platform, keyword = "晴天", limit = 8 }) {
+export async function lxSearch(env, { hash, platform, keyword = "晴天", limit = 8, timeoutMs = 12000 }) {
   const source = lxSourceKey(platform);
   const info = { keyword, query: keyword, prompt: keyword, text: keyword, page: 1, limit, type: "music", rctype: "music" };
   const out = await runnerInvoke(env, {
     hash,
     action: "search",
     params: { source, type: "music", rctype: "music", page: 1, limit, ...info, info },
-  });
+  }, { timeoutMs });
   return normalizeLxSearch(out.result);
 }
 
-/** 搜索结果归一成 [{ rawID, title, artist }]；返回形状各家不同（裸数组 / {list} / {data:{list}}）。 */
+/**
+ * 搜索结果归一成 [{ rawID, title, artist, album, coverURL, duration }]。
+ *
+ * 返回形状各家不同（裸数组 / {list} / {data:{list}} / 嵌 musicInfo），字段名也各家不同，
+ * 所以这里全部按"多填几个候选键"处理 —— 少一个字段只是 UI 上少一行，少一个 id 就是整条结果作废。
+ * 除了 rawID，其余字段是给客户端直接上屏用的（专辑、封面、时长），别让客户端再去查详情。
+ */
 export function normalizeLxSearch(v) {
   const raw = Array.isArray(v)
     ? v
@@ -513,8 +551,28 @@ export function normalizeLxSearch(v) {
     const m = it.musicInfo || it.rawData?.musicInfo || it;
     const id = String(m.id ?? m.rawId ?? m.songmid ?? m.mid ?? m.hash ?? m.midCode ?? "").trim();
     if (id.length < 4) continue;
-    out.push({ rawID: id, title: String(m.name || m.title || "").slice(0, 80), artist: String(m.singer || m.artist || "").slice(0, 80) });
+    const album = typeof m.album === "string" ? m.album : (m.album && (m.album.name || m.album.title)) || "";
+    const pic = m.picUrl || m.img || m.coverUrl || m.cover || (m.album && (m.album.picUrl || m.album.img)) || "";
+    const seconds = Number(m.interval ?? m.duration ?? m.playTime ?? 0);
+    out.push({
+      rawID: id,
+      title: text(m.name || m.title || "").slice(0, 80),
+      artist: text(m.singer || m.artist || "").slice(0, 80),
+      album: text(album).slice(0, 80),
+      coverURL: typeof pic === "string" && /^https?:\/\//i.test(pic) ? pic.slice(0, 300) : null,
+      duration: Number.isFinite(seconds) && seconds > 0 && seconds < 86400 ? Math.round(seconds) : 0,
+    });
     if (out.length >= 12) break;
   }
   return out;
+}
+
+/** 洛雪的 singer 有时是数组（[{name, hash}]），有时是字符串；UI 只想要一行字。 */
+function text(x) {
+  if (typeof x === "string") return x;
+  if (Array.isArray(x)) {
+    return x.map((i) => (typeof i === "string" ? i : (i && (i.name || i.title)) || "")).filter(Boolean).join(", ");
+  }
+  if (x && typeof x === "object") return String(x.name || x.title || "");
+  return "";
 }

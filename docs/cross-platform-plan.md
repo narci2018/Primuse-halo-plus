@@ -1009,8 +1009,8 @@ if (guarded.kind === "error") {
 
 只读验证脚本 `npm run verify:live`（15 项，全程不改任何数据）确认的现网形态：
 
-- `functions/api/music-sources.js` —— 后台管理入口（增删改、体检、runner 部署与对齐），需要 `SOURCES_ADMIN_TOKEN`。
-- `functions/api/manifest.js` —— 暴露给 App 的**唯一 URL**。返回可用源 + 每条的 `check` 字段（含 runner 取到的真实字节数），带 **ETag → 304**，且**绝不下发脚本正文**（有专项断言守着）。`settings.homeTitle` 按 `deviceId` 关联，这就是"首页文案由服务端设置"的实现。
+- `functions/api/music-sources.js` —— **一个 URL 两用**：`?action=` 的 POST 是后台管理入口（增删改、体检、runner 部署与对齐），需要 `SOURCES_ADMIN_TOKEN`；**GET 就是给 App 的清单**（`contract: "primuse.music-sources.v1"`）。
+- GET 返回可用源 + 每条的 `check` 字段（含 runner 取到的真实字节数）+ `usable` + `suggestions`（`suggest_delete` 的明细），带 **ETag → 304**（`W/"rev-{revision}"`，`?force=1` 跳过），且**绝不下发脚本正文**（有专项断言守着）。`settings.homeTitle` 按 `deviceId` 关联（设备覆盖 > 全局默认 > "首页"），`settings.homeTitleFrom` 告诉客户端这个词是哪一层来的。清单还带 `runtime`（每类协议"在哪儿算"：`lxjs: "server-runner"`，其余 `client-or-gateway`）和 `gateway.base/actions` —— 这就是"首页文案由服务端设置"的实现。
 - `functions/api/gateway.js` —— 取直链：`capabilities` 按 `byProtocol` 报能力，`search` / `url` 走 meting 或 runner。本机端到端从"只有一个 manifest URL"出发，两条路径都拿到 `206 audio/mpeg 65536B magic=true`；按 `sourceId` 指名 lxjs 源走 runner 同样出声；对已判死的源回 `409`。
 - **向下兼容**：老的 `/api/sync-playlists` 契约与字段完全没动，iPhone 现网继续按原样用（用户那句"已经部署了，不需要重新部署，跟 iPhone 版用同一个服务器"指的是 HALO 后端，不是 cf-sync-server，两回事）。
 

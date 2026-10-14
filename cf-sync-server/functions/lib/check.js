@@ -49,23 +49,36 @@ function rowToSource(row) {
 
 async function checkHttpSource(env, source, keyword) {
   const s = await search(source, keyword);
-  if (!s.items.length) {
-    return { status: "search_empty", detail: s.note || "搜索无结果", bytes: 0 };
+  const labelOf = new Map(s.items.map((i) => [i.rawID, `${i.title || ""}${i.artist ? ` / ${i.artist}` : ""}`]));
+  let ids = s.items.map((i) => i.rawID).filter(Boolean);
+  if (ids.length) {
+    // 顺手喂样本池：洛雪音源不会搜索，靠这里攒的真实歌曲 id 才能被体检。
+    await rememberSamples(env, source.platform, s.items);
+  } else {
+    // **搜索没结果 ≠ 这条源不能播。** 第三方解析站的 /search 路径经常单独挂掉
+    // （现网实测：520 的 Cloudflare 拦截页、`{"error":"unknown type"}`、"需要卡密"），
+    // 而它的 /url 那条路还是好的。判据是"能不能出声"，所以这里退回样本池里
+    // （由别的线路或会搜的洛雪源喂进来的）真实歌曲 id，继续验播放。
+    // 只有池子也空着才是真的无从判断 —— 那是我们的观测盲区，报 no_sample、绝不停用。
+    ids = await ensureSamples(env, source.platform, keyword);
+    if (!ids.length) {
+      return { status: "no_sample", detail: `搜索无结果（${s.note || "未返回条目"}），样本池里也没有 ${source.platform} 的可考 id，暂无法验证`, bytes: 0 };
+    }
   }
-  // 顺手喂样本池：洛雪音源不会搜索，靠这里攒的真实歌曲 id 才能被体检。
-  await rememberSamples(env, source.platform, s.items);
   const tried = [];
-  for (const item of s.items.slice(0, 3)) {
-    const url = await resolveURL(source, item.rawID);
+  for (const rawID of ids.slice(0, 3)) {
+    const label = labelOf.get(rawID) || "";
+    const url = await resolveURL(source, rawID);
     if (!url) {
-      tried.push(`解析无直链 ${item.title || item.rawID}`);
+      tried.push(`解析无直链 ${label || rawID}`);
       continue;
     }
     const a = await probeAudio(url);
     if (a.playable) {
       return {
         status: "ok",
-        detail: `${item.title || ""} / ${item.artist || ""} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}`,
+        // 用样本池 id 验出来时要说清楚，否则"这条源搜索接口挂了却显示 ok"看着像假阳性。
+        detail: `${label || rawID} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}${labelOf.size ? "" : "（搜索接口当前无结果，用样本池的歌曲 id 验的播放）"}`,
         bytes: a.bytes,
         host: a.finalHost,
       };

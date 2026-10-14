@@ -35,6 +35,12 @@ export async function startLxRunner({ files, port, token, timeoutMs = 180000 }) 
 
   const entries = [];
   for (const f of files) {
+    // 内联脚本：{ name, scriptText }。用于那些"真实文件里学不到"的形状 ——
+    // 比如声明了 search 能力的音源（现网那 23 个文件里能搜的都不稳定，测试要的是确定性）。
+    if (f && typeof f === "object" && f.scriptText) {
+      entries.push({ hash: await sha256Hex(f.scriptText), name: f.name || "inline", scriptText: f.scriptText });
+      continue;
+    }
     const abs = path.isAbsolute(f) ? f : path.resolve(ROOT, "..", "音源文件", f);
     if (!existsSync(abs)) throw new Error(`缺少音源文件：${abs}`);
     const text = readFileSync(abs, "utf8");

@@ -44,45 +44,6 @@ export function onRequestOptions() {
   return new Response(null, { status: 204, headers: corsHeaders() });
 }
 
-async function manifest(env, { deviceId, revision }) {
-  const rows = await listSources(env);
-  const pub = rows.map(publicSource);
-  const pref = deviceId ? await getDevicePref(env, deviceId) : null;
-  const globalTitle = await metaGet(env, "home_title_default", "");
-  const homeTitle = (pref && pref.home_title) || globalTitle || "首页";
-  return {
-    revision: revision.revision,
-    revisionAt: revision.revisionAt,
-    serverTime: Date.now(),
-    contract: "primuse.music-sources.v1",
-    settings: {
-      homeTitle,
-      // 让客户端知道这个词是"本机覆盖"还是"全局默认"，后台展示用得上。
-      homeTitleFrom: (pref && pref.home_title) ? "device" : globalTitle ? "global" : "default",
-      deviceId: deviceId || "",
-    },
-    platforms: Object.keys(PLATFORMS).map((k) => ({ id: k, displayName: PLATFORMS[k].displayName, meting: PLATFORMS[k].meting, hyw: PLATFORMS[k].hyw, lx: PLATFORMS[k].lx })),
-    protocols: PROTOCOLS.slice(),
-    gateway: {
-      base: "/api/music-gateway",
-      actions: ["search", "url", "lyric", "capabilities"],
-      note: "lxjs（洛雪 js 音源）由服务端的 runner Worker 执行，客户端必须走网关；其余协议客户端可以本地直连，也可统一走网关。",
-    },
-    // 告诉客户端每类协议"在哪儿算"，客户端据此决定要不要本地实现。
-    runtime: {
-      meting: "client-or-gateway",
-      hyw: "client-or-gateway",
-      nxinxz: "client-or-gateway",
-      openApi: "client-or-gateway",
-      customJson: "none",
-      lxjs: "server-runner",
-    },
-    sources: pub,
-    usable: pub.filter((s) => s.enabled && s.check.status === "ok").map((s) => s.id),
-    suggestions: pub.filter((s) => s.suggestDelete).map((s) => ({ id: s.id, name: s.name, reason: s.check.detail, status: s.check.status })),
-  };
-}
-
 export async function onRequestGet({ request, env }) {
   if (!env || !env.DB) return fail(500, "D1 数据库未绑定（env.DB 为空）", 500);
   try {
@@ -133,7 +94,21 @@ export async function onRequestGet({ request, env }) {
       },
       platforms: Object.keys(PLATFORMS).map((k) => ({ id: k, displayName: PLATFORMS[k].displayName, meting: PLATFORMS[k].meting, hyw: PLATFORMS[k].hyw, lx: PLATFORMS[k].lx })),
       protocols: PROTOCOLS.slice(),
-      gateway: { base: "/api/music-gateway", actions: ["search", "url", "lyric", "capabilities"] },
+      gateway: {
+        base: "/api/music-gateway",
+        actions: ["search", "url", "lyric", "capabilities"],
+        note: "lxjs（洛雪 js 音源）由服务端的 runner Worker 执行，客户端必须走网关；其余协议客户端可以本地直连，也可统一走网关。",
+      },
+      // 每类协议"在哪儿算"：客户端据此决定要不要本地实现。lxjs 只有服务端能算，
+      // customJson 两端都不做搜索（Swift :183-184），所以 none。
+      runtime: {
+        meting: "client-or-gateway",
+        hyw: "client-or-gateway",
+        nxinxz: "client-or-gateway",
+        openApi: "client-or-gateway",
+        customJson: "none",
+        lxjs: "server-runner",
+      },
       sources: pub,
       usable: pub.filter((s) => s.enabled && s.check.status === "ok").map((s) => s.id),
       suggestions: pub.filter((s) => s.suggestDelete).map((s) => ({ id: s.id, name: s.name, reason: s.check.detail, status: s.check.status })),
