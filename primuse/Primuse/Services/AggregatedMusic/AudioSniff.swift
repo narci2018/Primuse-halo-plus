@@ -80,7 +80,7 @@ public enum AudioSniff {
     /// `nonisolated(unsafe)`：`URLSession` 不是 Sendable，Swift 6 不让我把一个不可发的类型
     /// 放进枚举的全局 `static let`（`@MainActor` 又能把 `probe` 拽回主线程，检测就不并发了）。
     /// 这里的安全由用法保证：只在这条只读路径上取/发起请求，配置建好之后不再改。
-    @nonisolated(unsafe) private static let probeSession: URLSession = {
+    nonisolated(unsafe) private static let probeSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
@@ -105,7 +105,12 @@ public enum AudioSniff {
         request.setValue("bytes=0-\(probeBytes - 1)", forHTTPHeaderField: "Range")
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        let (response, byteStream) = try await probeSession.bytes(for: request)
+        // `bytes(for:)` 回的是 `URLResponse`，状态码与响应头只长在 `HTTPURLResponse` 上 ——
+        // 不转这一层，下面 `statusCode` / `value(forHTTPHeaderField:)` 直接编不过。
+        let (rawResponse, byteStream) = try await probeSession.bytes(for: request)
+        guard let response = rawResponse as? HTTPURLResponse else {
+            throw NSError(domain: "AudioSniff", code: 502, userInfo: [NSLocalizedDescriptionKey: "响应不是 HTTP，无法判定"])
+        }
         var buffer: [UInt8] = []
         buffer.reserveCapacity(probeBytes)
         // 不套 try-catch：读body 半路断（`网络链接已中断`）同样属于"我们没测成"。
