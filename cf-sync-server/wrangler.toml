@@ -6,3 +6,9 @@ pages_build_output_dir = "public"
 binding = "DB"
 database_name = "halo-music-db"
 database_id = "3f1eaf4d-5d00-4849-857d-51b25e5e7ac6"
+
+# 仅本地 `wrangler pages dev` / 契约测试用的假令牌。
+# 线上令牌在 Cloudflare Pages 后台的 Environment variables（Secret）里，绝不要把真令牌写进这里。
+[vars]
+SOURCES_ADMIN_TOKEN = "local-dev-admin-token"
+SOURCES_CHECK_TOKEN = "local-dev-check-token"

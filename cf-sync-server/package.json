@@ -1,14 +1,18 @@
 {
   "name": "primuse-sync-server",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "Primuse 歌单备份与同步 Cloudflare Pages 服务端",
+  "description": "Primuse 歌单同步 + 音乐源管理中心（Cloudflare Pages Functions）",
   "scripts": {
     "dev": "wrangler pages dev public",
-    "deploy": "wrangler pages deploy public"
+    "test": "node tests/cf-contract.test.mjs",
+    "test:offline": "node tests/cf-contract.test.mjs --no-net",
+    "test:runner": "node tests/runner-e2e.mjs",
+    "test:all": "node tests/cf-contract.test.mjs && node tests/runner-e2e.mjs",
+    "deploy": "wrangler pages deploy public --project-name=primuse-sync-server"
   },
   "devDependencies": {
-    "wrangler": "^3.100.0"
+    "wrangler": "^4.114.0"
   }
 }

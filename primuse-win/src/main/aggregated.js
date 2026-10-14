@@ -423,6 +423,11 @@ module.exports = {
   DEFAULT_SOURCES,
   normalizeSources,
   enabledSources,
+  // 下面三个本来只在模块内用，为了让 scripts/probe-lines-live.js 逐条体检
+  // 而走与 App 完全相同的代码路径才导出；行为一字未改。
+  searchURLFor,
+  searchSingleSource,
+  resolveFromSource,
   searchAll,
   resolveStreamURL,
   resolveLyrics,

@@ -365,6 +365,74 @@
       outline: none;
     }
     .search-input:focus { border-color: var(--accent); }
+
+    /* ── 音乐源管理（后台）── */
+    .admin-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .admin-row .form-input { width: auto; flex: 1 1 240px; }
+    .src-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .src-table th, .src-table td {
+      padding: 8px 8px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      vertical-align: top;
+    }
+    .src-table th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+    .src-table tr:hover td { background: rgba(255,255,255,0.03); }
+    .src-name { color: #fff; font-weight: 600; }
+    .src-sub { color: var(--muted); font-size: 11px; margin-top: 3px; word-break: break-all; }
+    .pill {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .pill-ok { background: rgba(16,185,129,0.15); color: #34d399; border-color: rgba(16,185,129,0.35); }
+    .pill-bad { background: rgba(239,68,68,0.15); color: #f87171; border-color: rgba(239,68,68,0.35); }
+    .pill-warn { background: rgba(245,158,11,0.15); color: #fbbf24; border-color: rgba(245,158,11,0.35); }
+    .pill-muted { background: #1e293b; color: #94a3b8; border-color: #334155; }
+    .row-off td { opacity: 0.45; }
+    .progress-bar {
+      height: 6px;
+      background: #0f1422;
+      border-radius: 999px;
+      overflow: hidden;
+      margin: 6px 0 12px;
+      border: 1px solid var(--border);
+    }
+    .progress-bar > i {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, #3b82f6, #10b981);
+      transition: width 0.2s ease;
+    }
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+      background: #0f1422;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+    }
+    code.k { font-family: ui-monospace, monospace; color: #93c5fd; }
+    /* 清单表格在窄屏（手机后台）必然超宽；不给横向滚动的话，右侧"操作"三键会被裁掉，
+       而不是像以前那样靠页面整体横向滚动——那会把标题栏也拖走。 */
+    #sourceContainer { overflow-x: auto; }
+    #sourceContainer .src-table { min-width: 720px; }
   </style>
 </head>
 <body>
@@ -387,6 +455,13 @@
         <span id="apiUrl">加载中...</span>
         <button class="btn btn-sm" onclick="copyUrl()">复制地址</button>
       </div>
+      <p style="font-size: 13px; color: var(--muted); margin: 10px 0 10px;">
+        音乐源清单端点（App 只需再保存这一个 URL，源的管理全在这里）：
+      </p>
+      <div class="api-box">
+        <span id="sourcesUrl">加载中...</span>
+        <button class="btn btn-sm" onclick="copySourcesUrl()">复制地址</button>
+      </div>
       <p style="font-size: 12px; color: #64748b;">
         支持自动备份（POST）、拉取恢复（GET）、跨设备一键复制（Copy）与同名去重合并（Merge）。
       </p>
@@ -400,6 +475,37 @@
       </div>
       <div id="deviceContainer">
         <div class="empty-tip">正在加载设备列表...</div>
+      </div>
+    </div>
+
+    <!-- 音乐源管理（服务端是唯一管理入口，App 侧只读 + 刷新） -->
+    <div class="card">
+      <div class="card-title">
+        <span>🎛️ 音乐源管理</span>
+        <span style="display:flex;gap:8px;align-items:center;">
+          <span class="badge" id="revBadge">rev -</span>
+          <button class="btn btn-secondary btn-sm" onclick="loadSources()">↻ 刷新清单</button>
+        </span>
+      </div>
+      <div class="hint">
+        这里增删改，App 里只读：<b>客户端只保存这一个 URL</b>，拉一次清单就拿到可用源、最新体检结论和该设备的界面文案。
+        体检判据是<b>真出声</b>：搜索命中 → 解析直链 → Range 取前 64KB → 校验音频字节魔数，只有"能访问"不算可用。
+        判为不可用的源会被自动停用并给出删除建议；<code class="k">runner_missing / no_sample / unsupported</code> 这类"没法下结论"的情况不会停用任何源。
+      </div>
+      <div class="admin-row">
+        <input type="password" id="adminToken" class="form-input" placeholder="管理令牌（SOURCES_ADMIN_TOKEN，只留在本浏览器 sessionStorage）" autocomplete="off">
+        <button class="btn btn-sm" onclick="saveToken()">记住令牌</button>
+      </div>
+      <div class="admin-row">
+        <button class="btn btn-warning btn-sm" id="btnCheckAll" onclick="checkAll()">🔊 检测全部可用</button>
+        <button class="btn btn-secondary btn-sm" onclick="openImportDialog()">📥 导入洛雪 js 音源</button>
+        <button class="btn btn-secondary btn-sm" onclick="openRunnerDialog()">🧩 runner 状态 / 部署</button>
+        <button class="btn btn-secondary btn-sm" onclick="openSettingsDialog()">🏷️ 首页文案</button>
+      </div>
+      <div class="progress-bar" id="checkBar" style="display:none;"><i></i></div>
+      <div id="checkStatus" style="font-size:12px;color:var(--muted);margin-bottom:12px;"></div>
+      <div id="sourceContainer">
+        <div class="empty-tip">点击「刷新清单」加载音源</div>
       </div>
     </div>
   </div>
@@ -496,9 +602,96 @@
     </div>
   </div>
 
+  <!-- 4. 导入洛雪 js 音源 -->
+  <div id="importModal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>📥 导入洛雪（lx）js 音源</h3>
+        <button class="modal-close" onclick="closeModal('importModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">选择 .js 文件（支持多个，逐个导入）</label>
+          <input type="file" id="jsFiles" class="form-input" accept=".js,.txt" multiple onchange="onFilesPicked()">
+          <div class="form-help">脚本正文 gzip 后存进 D1，执行体是服务端部署的 runner Worker；按脚本声明的平台自动拆成多条音源。</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">优先级（1–20，越大越先被用到）</label>
+          <input type="number" id="jsPriority" class="form-input" value="5" min="1" max="20">
+        </div>
+        <div id="importResult" class="hint" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('importModal')">关闭</button>
+        <button class="btn btn-sm" id="btnImport" onclick="doImport()">开始导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. runner Worker -->
+  <div id="runnerModal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>🧩 洛雪音源执行体（runner Worker）</h3>
+        <button class="modal-close" onclick="closeModal('runnerModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint">
+          Cloudflare 边缘禁止在请求里生成代码，所以 js 音源只能在<b>部署期编成静态模块</b>的 runner Worker 里跑。
+          音源有增删改后点「重新部署」把当前启用的脚本集推上去；缺 CF 凭据时会明确报「未部署」，不会假装成功。
+        </div>
+        <div id="runnerStatus" class="hint">尚未查询。</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="queryRunner()">↻ 查询状态</button>
+        <button class="btn btn-sm" id="btnDeployRunner" onclick="deployRunner(false)">🚀 重新部署 runner</button>
+        <button class="btn btn-warning btn-sm" onclick="deployRunner(true)">强制部署</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. 界面文案（首页 header） -->
+  <div id="settingsModal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>🏷️ 首页文案</h3>
+        <button class="modal-close" onclick="closeModal('settingsModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">全局默认（所有设备）</label>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="globalHomeTitle" class="form-input" placeholder="例如：免费音乐 / 发现" maxlength="60">
+            <button class="btn btn-sm" onclick="saveGlobalTitle()">保存</button>
+          </div>
+          <div class="form-help">App 顶部 header 显示的就是这个词；设备本机覆盖优先于全局默认。</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">按设备覆盖（本机唯一标识 deviceId）</label>
+          <select id="prefDevice" class="form-select" onchange="loadDevicePref()">
+            <option value="">-- 请选择设备 --</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">该设备的首页文案（留空 = 清除覆盖，回落全局默认）</label>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="deviceHomeTitle" class="form-input" maxlength="60">
+            <button class="btn btn-sm" onclick="saveDeviceTitle()">保存</button>
+          </div>
+          <div class="form-help" id="prefHelp"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('settingsModal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const fullApiUrl = window.location.origin + "/api/sync-playlists";
+    const sourcesApiUrl = window.location.origin + "/api/music-sources";
     document.getElementById("apiUrl").textContent = fullApiUrl;
+    document.getElementById("sourcesUrl").textContent = sourcesApiUrl;
 
     let cachedDevices = [];
     let currentDetailData = null;
@@ -506,7 +699,13 @@
 
     function copyUrl() {
       navigator.clipboard.writeText(fullApiUrl).then(() => {
-        alert("已复制 API 接口地址: " + fullApiUrl);
+        alert("已复制歌单同步接口地址: " + fullApiUrl);
+      });
+    }
+
+    function copySourcesUrl() {
+      navigator.clipboard.writeText(sourcesApiUrl).then(() => {
+        alert("已复制音乐源清单地址: " + sourcesApiUrl);
       });
     }
 
@@ -882,6 +1081,322 @@
       }
     }
 
+    /* ══════════════ 音乐源管理（/api/music-sources）══════════════
+       约定：读接口开放（App 也走它），写接口一律带 Bearer 管理令牌。
+       令牌只存 sessionStorage —— 关掉标签页就没了，不落 localStorage。 */
+    const TOKEN_KEY = "primuse_sources_admin_token";
+    let cachedSources = [];
+    let cachedPlatforms = [];
+
+    function getToken() {
+      return sessionStorage.getItem(TOKEN_KEY) || "";
+    }
+
+    function saveToken() {
+      const t = document.getElementById("adminToken").value.trim();
+      if (t) sessionStorage.setItem(TOKEN_KEY, t);
+      else sessionStorage.removeItem(TOKEN_KEY);
+      alert(t ? "令牌已记住（仅本标签页会话）" : "令牌已清除");
+    }
+
+    async function adminPost(action, body) {
+      const res = await fetch(`/api/music-sources?action=${encodeURIComponent(action)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify(body || {}),
+      });
+      let json = null;
+      try { json = await res.json(); } catch { /* 非 JSON（例如 502 页面）按失败处理 */ }
+      if (res.status === 401 || res.status === 403 || (json && json.code === 401)) {
+        throw new Error("管理令牌不对或缺失，请先在上面填令牌");
+      }
+      if (!json || json.code !== 0) throw new Error((json && (json.error || json.message)) || `HTTP ${res.status}`);
+      return json.data;
+    }
+
+    const STATUS_TEXT = {
+      ok: "能出声", unchecked: "未体检", search_empty: "搜不到歌", no_url: "取不到直链",
+      no_sample: "没有测试样本", audio_dead: "直链取不到音频", runner_missing: "runner 未部署",
+      unsupported: "协议不支持", timeout: "超时", error: "出错",
+    };
+
+    function statusPill(s) {
+      const c = s.check || {};
+      if (!s.enabled) return '<span class="pill pill-muted">已停用</span>';
+      if (c.status === "ok") return `<span class="pill pill-ok">能出声 · ${(c.bytes / 1024).toFixed(0)}KB</span>`;
+      if (["runner_missing", "no_sample", "unsupported"].indexOf(c.status) >= 0) {
+        return `<span class="pill pill-warn">${STATUS_TEXT[c.status] || c.status}</span>`;
+      }
+      return `<span class="pill pill-bad">${STATUS_TEXT[c.status] || c.status || "未知"}</span>`;
+    }
+
+    async function loadSources() {
+      const box = document.getElementById("sourceContainer");
+      box.innerHTML = '<div class="empty-tip">正在读取云端清单...</div>';
+      try {
+        const res = await fetch("/api/music-sources");
+        const json = await res.json();
+        if (!json || json.code !== 0) throw new Error((json && json.error) || "HTTP " + res.status);
+        const d = json.data;
+        cachedSources = d.sources || [];
+        cachedPlatforms = d.platforms || [];
+        document.getElementById("revBadge").textContent = `rev ${d.revision} · 可用 ${(d.usable || []).length}`;
+        document.getElementById("adminToken").value = getToken();
+        renderSources();
+      } catch (err) {
+        box.innerHTML = `<div class="empty-tip" style="color:#ef4444;">清单读取失败: ${err.message}</div>`;
+      }
+    }
+
+    function renderSources() {
+      const box = document.getElementById("sourceContainer");
+      if (!cachedSources.length) {
+        box.innerHTML = '<div class="empty-tip">清单是空的。内置线路可能已被删光，点「导入洛雪 js 音源」加新源。</div>';
+        return;
+      }
+      const platName = (p) => {
+        const hit = cachedPlatforms.find((x) => x.id === p);
+        return hit ? hit.displayName : p;
+      };
+      let h = `<table class="src-table"><thead><tr>
+        <th>音源</th><th>平台</th><th>协议</th><th>优先级</th><th>体检</th><th>结论</th><th></th>
+      </tr></thead><tbody>`;
+      for (const s of cachedSources) {
+        const verdict = (s.check && s.check.detail) || "";
+        h += `
+          <tr class="${s.enabled ? "" : "row-off"}">
+            <td>
+              <div class="src-name">${escapeHtml(s.name)}</div>
+              <div class="src-sub">${escapeHtml(s.id)}${s.scriptHash ? " · sha256 " + escapeHtml(s.scriptHash.slice(0, 12)) : ""}${s.baseURL ? "<br>" + escapeHtml(s.baseURL) : ""}${s.note ? "<br>" + escapeHtml(s.note) : ""}</div>
+              ${s.suggestDelete ? '<div style="margin-top:4px;"><span class="pill pill-bad">建议删除</span></div>' : ""}
+            </td>
+            <td>${escapeHtml(platName(s.platform))}</td>
+            <td>${escapeHtml(s.protocol)}</td>
+            <td>${s.priority}</td>
+            <td>${statusPill(s)}</td>
+            <td style="max-width:230px;color:var(--muted);">${escapeHtml(verdict).slice(0, 160)}</td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-secondary btn-sm" onclick="toggleSource('${encodeURIComponent(s.id)}', ${!s.enabled})">${s.enabled ? "停用" : "启用"}</button>
+              <button class="btn btn-secondary btn-sm" onclick="checkOne('${encodeURIComponent(s.id)}')">体检</button>
+              <button class="btn btn-danger btn-sm" onclick="removeSource('${encodeURIComponent(s.id)}')">删除</button>
+            </td>
+          </tr>`;
+      }
+      h += "</tbody></table>";
+      box.innerHTML = h;
+    }
+
+    async function toggleSource(encId, enabled) {
+      try {
+        await adminPost("toggle", { id: decodeURIComponent(encId), enabled });
+        loadSources();
+      } catch (err) { alert(err.message); }
+    }
+
+    async function removeSource(encId) {
+      const id = decodeURIComponent(encId);
+      if (!confirm(`确认删除【${id}】？删掉后所有设备的 App 都会立刻拿不到它。`)) return;
+      try {
+        const d = await adminPost("delete", { id });
+        if (d && d.runner && d.runner.deployed) alert("已删除，runner 也已同步。");
+        loadSources();
+      } catch (err) { alert(err.message); }
+    }
+
+    async function checkOne(encId) {
+      try {
+        await adminPost("check-one", { id: decodeURIComponent(encId) });
+        loadSources();
+      } catch (err) { alert(err.message); }
+    }
+
+    // 一次 HTTP 只检一条：CF 免费计划单请求子请求数有上限，全塞一次必然超。
+    async function checkAll() {
+      const bar = document.getElementById("checkBar");
+      const st = document.getElementById("checkStatus");
+      const btn = document.getElementById("btnCheckAll");
+      btn.disabled = true;
+      bar.style.display = "block";
+      bar.firstElementChild.style.width = "0%";
+      try {
+        const plan = await adminPost("check-plan", {});
+        const ids = plan.plan || [];
+        let bad = 0;
+        for (let i = 0; i < ids.length; i++) {
+          const one = ids[i];
+          st.textContent = `正在体检 ${i + 1}/${ids.length}：${one.name}`;
+          try {
+            const r = await adminPost("check-one", { id: one.id });
+            if (r.result && r.result.status !== "ok") bad++;
+          } catch (e) {
+            st.textContent = `体检 ${i + 1}/${ids.length}：${one.name} 失败 —— ${e.message}`;
+          }
+          bar.firstElementChild.style.width = `${Math.round(((i + 1) / ids.length) * 100)}%`;
+          // 边跑边刷表，用户能立刻看到哪条被停用了
+          await loadSourcesQuiet();
+          renderSources();
+        }
+        st.textContent = `体检完成：${ids.length} 条，其中 ${bad} 条判为不可用（已自动停用并给出删除建议）。`;
+      } catch (err) {
+        st.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function loadSourcesQuiet() {
+      try {
+        const res = await fetch("/api/music-sources");
+        const json = await res.json();
+        if (json && json.data) {
+          cachedSources = json.data.sources || [];
+          document.getElementById("revBadge").textContent = `rev ${json.data.revision} · 可用 ${(json.data.usable || []).length}`;
+        }
+      } catch { /* 轮询中的读取失败不打断体检 */ }
+    }
+
+    function openImportDialog() {
+      document.getElementById("importResult").style.display = "none";
+      document.getElementById("jsFiles").value = "";
+      openModal("importModal");
+    }
+
+    function onFilesPicked() {
+      const fs = document.getElementById("jsFiles").files || [];
+      const box = document.getElementById("importResult");
+      box.style.display = "block";
+      box.textContent = fs.length ? `已选 ${fs.length} 个文件：${Array.from(fs).map((f) => f.name).join("、")}` : "还没选文件。";
+    }
+
+    async function doImport() {
+      const fs = Array.from(document.getElementById("jsFiles").files || []);
+      if (!fs.length) { alert("先选 .js 文件"); return; }
+      if (!getToken()) { alert("先填管理令牌"); return; }
+      const btn = document.getElementById("btnImport");
+      btn.disabled = true;
+      const box = document.getElementById("importResult");
+      const lines = [];
+      try {
+        for (let i = 0; i < fs.length; i++) {
+          const f = fs[i];
+          box.textContent = `导入中 ${i + 1}/${fs.length}：${f.name}`;
+          const text = await f.text();
+          try {
+            const d = await adminPost("import-js", {
+              filename: f.name,
+              script: text,
+              priority: Number(document.getElementById("jsPriority").value || 5),
+            });
+            lines.push(`✅ ${f.name} → ${d.meta && d.meta.name ? d.meta.name : "(无名)"} · 平台 ${(d.platforms || []).join("/") || "netease"} · sha256 ${String(d.hash || "").slice(0, 12)}`);
+          } catch (e) {
+            lines.push(`❌ ${f.name} —— ${e.message}`);
+          }
+        }
+        box.textContent = lines.join("\n");
+        box.style.whiteSpace = "pre-wrap";
+        loadSources();
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function openRunnerDialog() {
+      openModal("runnerModal");
+      queryRunner();
+    }
+
+    async function queryRunner() {
+      const box = document.getElementById("runnerStatus");
+      box.textContent = "查询中...";
+      try {
+        const d = await adminPost("runner-status", {});
+        const fmt = (arr) => (Array.isArray(arr) && arr.length ? arr.map((x) => x.slice(0, 10)).join(", ") : "（空）");
+        box.innerHTML = [
+          `脚本名：<code class="k">${escapeHtml(d.script)}</code>`,
+          `目标：<code class="k">${escapeHtml(d.target || "未配置")}</code> · ${d.reachable ? "连通" : "不通" + (d.error ? "（" + escapeHtml(d.error) + "）" : "")}`,
+          `已装模块：${d.modules} · ${fmt(d.liveHashes)}`,
+          `音源表想要：${fmt(d.desiredHashes)}`,
+          `是否需要同步：<b>${d.stale ? "需要（音源变了，点下面的部署）" : "不需要"}</b>`,
+          `bundle 体量：${d.bytes}B · 可自动部署：${d.canDeploy ? "是" : "否（缺 CF_ACCOUNT_ID / CF_API_TOKEN）"}`,
+          (d.skipped && d.skipped.length) ? `被跳过的脚本：${d.skipped.map((s) => escapeHtml(String(s.hash).slice(0, 10) + "（" + s.reason + "）")).join("、")}` : "",
+        ].filter(Boolean).join("<br>");
+      } catch (err) {
+        box.textContent = err.message;
+      }
+    }
+
+    async function deployRunner(force) {
+      const btn = document.getElementById("btnDeployRunner");
+      btn.disabled = true;
+      const box = document.getElementById("runnerStatus");
+      box.textContent = force ? "强制部署中..." : "部署中...";
+      try {
+        const d = await adminPost("deploy-runner", force ? { force: true } : {});
+        if (d.deployed) box.textContent = `✅ runner 已部署（${d.script}），模块 ${d.hashes ? d.hashes.length : "?"} 个。`;
+        else if (d.skipped === "no_credentials") box.textContent = `⚠️ ${d.error || "未部署"}：给 Pages 配上 CF_ACCOUNT_ID / CF_API_TOKEN 后再点。`;
+        else box.textContent = d.changed ? "已更新。" : "内容没变化，无需重新部署。";
+        queryRunner();
+      } catch (err) {
+        box.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function openSettingsDialog() {
+      openModal("settingsModal");
+      try {
+        const res = await fetch("/api/music-sources");
+        const json = await res.json();
+        const s = json.data && json.data.settings;
+        document.getElementById("globalHomeTitle").value = s && s.homeTitleFrom !== "default" ? s.homeTitle : "";
+        if (s && s.homeTitleFrom === "default") document.getElementById("globalHomeTitle").placeholder = "当前是内置默认「首页」，填入即改";
+      } catch { /* 读不到也不挡着填设备覆盖 */ }
+      try {
+        const d = await adminPost("devices", {});
+        const sel = document.getElementById("prefDevice");
+        sel.innerHTML = '<option value="">-- 请选择设备 --</option>';
+        for (const dev of d.devices || []) {
+          sel.innerHTML += `<option value="${escapeHtml(dev.device_id)}">${escapeHtml(dev.device_name || "未命名")} (${escapeHtml(String(dev.device_id).slice(0, 18))}…)</option>`;
+        }
+      } catch (err) {
+        document.getElementById("prefHelp").textContent = "设备列表需要管理令牌：" + err.message;
+      }
+    }
+
+    async function loadDevicePref() {
+      const id = document.getElementById("prefDevice").value;
+      const help = document.getElementById("prefHelp");
+      if (!id) { document.getElementById("deviceHomeTitle").value = ""; help.textContent = ""; return; }
+      try {
+        const res = await fetch(`/api/music-sources?deviceId=${encodeURIComponent(id)}`);
+        const json = await res.json();
+        const s = json.data && json.data.settings;
+        document.getElementById("deviceHomeTitle").value = s && s.homeTitleFrom === "device" ? s.homeTitle : "";
+        help.textContent = s ? `该设备当前显示「${s.homeTitle}」，来源：${s.homeTitleFrom === "device" ? "本机覆盖" : s.homeTitleFrom === "global" ? "全局默认" : "内置默认"}` : "";
+      } catch (err) {
+        help.textContent = err.message;
+      }
+    }
+
+    async function saveGlobalTitle() {
+      try {
+        await adminPost("global-settings", { homeTitle: document.getElementById("globalHomeTitle").value.trim() });
+        alert("全局默认文案已保存，客户端下次刷新清单生效。");
+      } catch (err) { alert(err.message); }
+    }
+
+    async function saveDeviceTitle() {
+      const id = document.getElementById("prefDevice").value;
+      if (!id) { alert("先选设备"); return; }
+      try {
+        const t = document.getElementById("deviceHomeTitle").value.trim();
+        await adminPost("prefs", { deviceId: id, homeTitle: t === "" ? null : t });
+        alert(t === "" ? "已清除该设备覆盖，回落全局默认。" : "该设备文案已保存。");
+        loadDevicePref();
+      } catch (err) { alert(err.message); }
+    }
+
     function escapeHtml(str) {
       if (!str) return "";
       return String(str)
@@ -893,6 +1408,7 @@
     }
 
     loadDevices();
+    loadSources();
   </script>
 </body>
 </html>
