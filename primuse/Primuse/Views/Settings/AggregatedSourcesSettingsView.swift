@@ -267,7 +267,10 @@ public struct AggregatedSourcesSettingsView: View {
     }
 
     /// 不是 `@ViewBuilder`：`ViewBuilder` 会把函数体里的 `switch` 当成"条件视图"去 buildExpression，
-    /// 而这里是给变量赋值（`()` 不是 View，CI 就这么报的）。builder 对这个函数本来也不需要。
+    /// 而这里是给变量赋值（`()` 不是 View，CI 就这么报的）。去掉 builder 之后函数体是普通语句，
+    /// 所以最后那个视图必须**显式 `return`** —— 隐式尾表达式只在 builder（和单表达式函数）里成立，
+    /// 少了这一行 CI 报的是"function declares an opaque return type, but has no return statements"。
+    /// 两个错是同一处的上下两半，记下免得下次改回头又踩另一半。
     private func verdictIcon(_ verdict: AggregatedSourceVerdict) -> some View {
         let symbol: String
         switch verdict.tone {
@@ -275,7 +278,7 @@ public struct AggregatedSourcesSettingsView: View {
         case .blind: symbol = "questionmark.circle"
         case .dead: symbol = "exclamationmark.triangle.fill"
         }
-        Image(systemName: symbol)
+        return Image(systemName: symbol)
             .font(.body)
             .foregroundStyle(verdictColor(verdict))
             .frame(width: 22, alignment: .center)
