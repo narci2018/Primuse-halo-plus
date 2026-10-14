@@ -1098,6 +1098,109 @@ D1 抖、runner 转发不上去。现网真的这么杀掉过唯一还能用的 
 
 `npm test` **88 项 0 失败**（离线 50 项）、`npm run verify:live` **18 项 0 失败**（全只读）。
 
+## 23. 客户端接上云端音源管理，以及判据的第四次收口（2026-10-14，v1.9.15 / build 77）
+
+§22 那份判据只覆盖了服务端。把 Windows 客户端接上去（需求 4："客户端只保存这个 URL"）之后，
+同一套口径要在三个地方各写一遍：CF 的 `protocols.js`、本机的 `cloud-sources.js`、以及冒烟里的界面。
+写三遍就意味着飘三遍 —— 这一节记的是飘出来的四处，以及"怎么让它下次飘不动"。
+
+### 23.1 字节判据里两处写死的错位（魔数与 content-type）
+
+`sniffAudio` / `looksLikeAudio` 有两处纯粹是手写的字节错位，方向都是"把好源判成死源"：
+
+- 服务端 `head = bytes.slice(0, 3)` 只截 3 个字节，而 `OggS` / `fLaC` 是**四**字节魔数 —— 永远比不中；
+  mp4 那条正则又只认 box 长度正好是 `0x18`/`0x20` 的两种，`0x1c` 的 m4a 直接漏掉。
+- 客户端 `looksLikeAudio` 把 `ftyp` 按 `f-t-p-y` 比（真实字节是 `f-t-y-p`），所以 m4a 一条都认不出来；
+  `fLaC` 与 `RIFF…WAVE` 压根没写。QQ 音乐/网易云的 m4a 直链全在这一类里。
+
+更要命的是旧 `playable` 只看 content-type。挂掉的解析站会拿 `audio/mpeg` 的头回一段 HTML 报错页 ——
+这正是旧"检测全部延迟"被骗绿的同一个位置。现在的口径两边一字不差：
+
+```
+bytes > 8192 && 不像文本 && (命中音频魔数 || content-type 声称是音频)
+```
+
+"不像文本"（`/^\s*(<\?xml|<!DOCTYPE|<html|<HTML|\{|\[)/`）是一票否决项，魔数与 content-type 是**或**关系。
+这个组合是旧口径的严格超集：只会把过去误杀的源救回来，不会新杀掉任何原本判"能播"的源 —— 改判据必须守住这条，
+否则一次收紧就是一次现网名册跳水。§7e 用 10 组字节 + 4 种 HTTP 组合（真音频配 `text/plain`、干脆不给 content-type、
+挂着 `audio/mpeg` 的 HTML、只取前 64KB）把两边钉在一起，客户端 `isPlayableAudio` 另有一条同样形状的 parity 断言。
+
+### 23.2 第四类误杀：取字节超时被算成源坏了
+
+现网真事故（2026-10-14）：`墨澜聚合音源 (网易云音乐)` 上一次体检还是 `ok`，这一次三条样本全回
+`The operation was aborted` —— 那是**我们自己的 15 秒 fetch 预算**没等到字节，不是那条源给了不能播的东西。
+根因在 `checkLxSource`：`try` 把"解析直链"和"取字节"两跳一起包住，`probeAudio` 抛的异常被 catch 成
+`audio_fail`。HTTP 线路反而是对的（异常一路抛到 `checkSource` 的 catch，落成 `error`，吃 §22.2 那 3 次宽限）。
+
+修法是把这一跳**从 try 里拿出来**：解析失败留在原地按源的问题处理，取字节的异常一路抛出去。
+客户端 `probeSource` 同步对齐，并且多修一层 —— 本机 `probeAudio` 原来把流错误咽成"0 字节、不可播"，
+现在一律 reject（服务端 `fetch` 遇到这几种情况本来就是抛的，不咽才是同口径）。
+
+§7f 用本机一个 `/stall` 路由（只回头部、永不结束）造出这个超时，不依赖任何第三方站点，
+并额外断言"这一跳真的走到了取字节"（搜索/解析/取字节三个请求各计数 ≥1）——
+否则 workerd 连不上 127.0.0.1 也会落 `error`，测试绿了但测的根本不是那件事。**证明测到了，比测过了重要。**
+
+### 23.3 顺手的一处：线路地址自带查询串时被拼坏
+
+`protocols.js` 与 `aggregated.js` 里 11 处 `${base}?types=search&…`。真实清单里就有 baseURL 本身带查询串的线路
+（`?server=netease&type=url` 这种），旧写法会写出第二个 `?`，请求 404 → "搜索没结果" → 判死。
+两边统一成 `sep(base)`：已有 `?` 用 `&` 续，没有才用 `?`。这一处是客户端契约测试的 7b 组先抓出来的
+（`?line=junk` 那个夹具拼出了畸形 URL），修完把夹具留下来当回归。
+
+### 23.4 Windows 客户端：只保存一个 URL
+
+新增 `src/main/cloud-sources.js`（清单/网关/体检）+ `store.cloud` 缓存块 + `preload` 的 `api.cloud` / `api.sources.checkAll`
++ 设置页里的「聚合音乐源」只读屏。四条口径：
+
+- **契约不认识就整份拒收**，本机线路一条不动；拉不到清单（断网 / CF 挂了 / 500）也绝不清空 ——
+  上一次检到能出声的那份照样能播，界面写明"用缓存"。向下兼容包括这一条。
+- 洛雪 js 源的脚本跑在服务端 runner Worker 里（请求期不允许生成代码），本机不落地脚本，
+  搜索/取流/歌词都经 `/api/music-gateway`；它的可用性结论只能来自服务端体检，界面上如实标"服务端结论"。
+- 需求 2 的"检测全部可用"本机也有一份（搜→解析→Range 取 64KB 看字节），并发压到 4，每条出结论就回调。
+- 需求 3：**App 侧只读**。冒烟里有一条 `editControls === 0` 的断言 —— 这一屏不许长出任何输入框、下拉或删除按钮，
+  增删改只在 CF 后台。停线与删除同样是服务端的权力，`checkAll` 改不了任何 `isEnabled`。
+- 需求 5 的首页文案：`settings.homeTitle` 按 deviceId 下发，`homeTitle()` 取不到才回落到「首页」。
+  冒烟里两处原先写死的 `title === '首页'` 改成与渲染层报回去的期望值比 —— 服务端能改的东西，断言不能写死。
+
+`scripts/cloud-sources-contract-test.js`：**82 项 0 失败**，全程离线。它跑的是**真的 `store.js`**：
+用 `Module._load` 在 require 之前把 `electron` 换成假的 `{app:{getPath},safeStorage}`，
+userData 指到 `fs.mkdtempSync(os.tmpdir())` —— 所以它既不需要 Electron，也绝不碰 `%APPDATA%\Primuse`。
+清单/网关/meting 搜索解析/音频字节四段都是本机一个 `http.createServer` 在演。已挂进 CI 预检
+（`.github/workflows/build-primuse-win.yml`，与 DaoLiYu、歌单同步两份契约测试并列，注释写清了为什么必须在 CI 里跑）。
+
+### 23.5 冒烟：断言只看渲染结果，截图还得证明画面真的换了
+
+云源页新增一个 `phase:'cloud-sources'`：注入三种结论（可播 / 未检出 / 不可播+建议删除）再看 DOM ——
+分组标题、三种 tone 各自的图标底色（`rgb(31,138,91)` / `rgb(94,107,135)` / `rgb(192,57,43)`）、
+胶囊文案，以及"未检出那一组没有挂建议删除"。注入的东西只活在渲染层 state，跑完由
+`cloud-sources-cleanup` 收走，并断言屏幕上一条 `〔冒烟〕` 都不留。
+
+这一节踩回了自己写过的坑：第一版截图截出来是**首页**。DOM 断言全绿，图是错的 ——
+组合器提交一帧比 IPC 回一句慢。现在截图前轮询最多 6 秒，把 `capturePage()` 的 PNG 画进 canvas
+`readback` 一遍，同时要求屏幕文本里真的有「聚合音乐源」和「〔冒烟〕」，两边都命中才落盘，
+并把"画面真的停在云源页"写进这一步的 ok 条件（旧写法一律 `step(..., true, path)`，等于截图永不失败）。
+
+### 23.6 现网名册与本轮验证记录（2026-10-14）
+
+`check:live --all=1` 全量重检 50 条，清单 revision 322，启用 17 · 可用 14 · 建议删除 33：
+
+| 状态 | 条数 | 处理 |
+| --- | --- | --- |
+| `ok` | **14** | 进可用清单 |
+| `audio_fail` | 24 | 停用 + `suggest_delete`（失败原因都是脚本/源站自己报的） |
+| `resolve_fail` | 6 | 停用 + `suggest_delete` |
+| `script_error` | 3 | 停用 + `suggest_delete`（`musicUrl 超过 20000ms 没返回` 是脚本内部超时，不是我们的 fetch 预算） |
+| `no_sample` | 3（都是 migu） | **不停用**，只标"暂无法验证" |
+
+与 §22.4 那次（15 条）少了一条：`墨澜聚合音源 (网易云音乐)`。区别在于这一次脚本自己回了
+`"获取歌曲地址失败，可能是会员到期了"` —— 源的问题，不是 §23.2 那种"我们的 15 秒没等到"。
+本轮全量重检里再没有出现任何一条以 `The operation was aborted` 判死的源。
+
+- `cf-sync-server`：`npm test` **109 项 0 失败**（workerd + 本机假服务器）→ 部署 → `npm run verify:live` **18 项 0 失败**（全只读）→ `check:live --all=1`。
+- `primuse-win`：`node scripts/cloud-sources-contract-test.js` **82 项 0 失败**（离线，临时 userData）→ `npm run smoke` **RESULT ok**（新增云源页 3 步：渲染断言 / 画面自证截图 / 合成数据收干净）。
+
+
+
 
 
 
