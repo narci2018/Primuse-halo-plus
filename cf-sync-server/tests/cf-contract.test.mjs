@@ -93,6 +93,9 @@ async function req(p, { method = "GET", body, token, headers = {}, etag } = {}) 
 
 const ADMIN_POST = (p, body, token = ADMIN) => req(`/api/${p}`, { method: "POST", body, token: token === null ? undefined : token });
 
+/** 网关搜索里"被扫过却没出歌"的洛雪源留下的说明。空数组意味着静默丢弃 —— 那是代码坏了。 */
+const lxNotesOf = (res) => (res.json?.data?.notes || []).filter((n) => String(n.id).startsWith("lxjs-"));
+
 function waitReady(ms = 120000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
@@ -343,6 +346,27 @@ async function main() {
       const aliveSrc = alive.json?.data?.source;
       record("GDStudio 网易云体检 = 真取到音频（>8KB audio）", alive.json?.code === 0 && aliveSrc?.check.status === "ok" && aliveSrc.check.bytes > 8192, JSON.stringify({ status: aliveSrc?.check?.status, bytes: aliveSrc?.check?.bytes, detail: aliveSrc?.check?.detail }));
 
+      // 误杀必须能翻案：体检把"停用"写进 D1 之后，那条源就不在 check-plan 里了，
+      // 判据修好、或者站点自己缓过来，都不会自动把它捞回来 —— 除非"检到 ok"本身就把启停位写回 1。
+      // 上一版 writeCheckResult 保留旧 enabled（pass 也只当"维持现状"），现网那批被搜索接口害死的线路
+      // 就永远躺在建议删除里。这条用例先让它被误停，再把地址换成能播的那条，验它能自己活过来。
+      const reviveId = "contract-misjudged-line";
+      const gbaseUrl = ((await req("/api/music-sources")).json?.data?.sources || []).find((s) => s.id === "default-netease-gdstudio")?.baseURL;
+      await ADMIN_POST("music-sources", {
+        action: "upsert", id: reviveId, name: "〔用例〕先被误停、之后能救回的线路",
+        platform: "netease", protocol: "meting", baseURL: "https://example.com/api.php", priority: 1,
+      });
+      const firstVerdict = await ADMIN_POST("music-sources", { action: "check-one", id: reviveId }, CHECK);
+      record("用例线路先被体检停用（后面才谈翻案）", firstVerdict.json?.data?.source?.enabled === false && firstVerdict.json?.data?.source?.enabledLocked !== true, `enabled=${firstVerdict.json?.data?.source?.enabled} locked=${firstVerdict.json?.data?.source?.enabledLocked}`);
+      // 只改地址、不碰 enabled：碰了 enabled 就是"用户手动指定"（锁定），体检不再有权改它。
+      await ADMIN_POST("music-sources", { action: "upsert", id: reviveId, name: "〔用例〕先被误停、之后能救回的线路", platform: "netease", protocol: "meting", baseURL: gbaseUrl, priority: 1 });
+      const second = await ADMIN_POST("music-sources", { action: "check-one", id: reviveId }, CHECK);
+      const revived = second.json?.data?.source;
+      record("检到能出声就把之前误停的源救回来（enabled 0→1）", second.json?.code === 0 && revived?.enabled === true, JSON.stringify({ status: revived?.check?.status, enabled: revived?.enabled }));
+      record("翻案后删除建议一并撤掉", revived?.suggestDelete === false && !(revived?.check?.status !== "ok"), JSON.stringify({ suggestDelete: revived?.suggestDelete }));
+      record("翻案的源重新出现在 usable 里（客户端马上能用它）", (await req("/api/music-sources")).json?.data?.usable?.includes(reviveId), JSON.stringify(((await req("/api/music-sources")).json?.data?.usable || []).slice(0, 5)));
+      await ADMIN_POST("music-sources", { action: "delete", id: reviveId });
+
       const lxId = impData.sources.find((s) => s.platform === "netease")?.id;
       const lxCheck = await ADMIN_POST("music-sources", { action: "check-one", id: lxId }, CHECK);
       const lxSrc = lxCheck.json?.data?.source;
@@ -414,6 +438,19 @@ async function main() {
       const gwSearch = await req("/api/music-gateway?action=search&keyword=晴天&platform=netease&deviceId=CF-TEST");
       const first = gwSearch.json?.data?.results?.[0];
       record("网关搜索有结果并返回标准曲型", gwSearch.json?.code === 0 && gwSearch.json.data.count > 0 && first?.rawID && first.id.startsWith("agg_netease_"), JSON.stringify({ count: gwSearch.json?.data?.count, sample: first && `${first.title}/${first.artist}`, notes: (gwSearch.json?.data?.notes || []).length }));
+      // 每条结果自带 protocol + sourceId：客户端拿到结果就能决定"本地直连播"还是"交给网关播"，
+      // 不用回头在清单里找那一条（清单可能已经被后台改掉了，那种情况下结果就是孤儿）。
+      const gwAll = gwSearch.json?.data?.results || [];
+      record(
+        "搜索结果每条都带 protocol/sourceId/rawID（自描述，客户端不必回查清单）",
+        gwAll.length > 0 && gwAll.every((r) => r.protocol && r.sourceId && r.rawID),
+        JSON.stringify(gwAll.slice(0, 3).map((r) => [r.protocol, r.sourceId]))
+      );
+      record(
+        "网关搜索对每条被扫的洛雪源都给了交代（没歌就写明原因，不静默丢弃）",
+        lxNotesOf(gwSearch).length > 0 && lxNotesOf(gwSearch).every((n) => n.note && n.name),
+        JSON.stringify(lxNotesOf(gwSearch).map((n) => `${n.name}:${n.note}`).slice(0, 4))
+      );
 
       const gwUrl = await req(`/api/music-gateway?action=url&platform=netease&rawID=${first ? first.rawID : ""}&deviceId=CF-TEST`);
       record("网关解析出可播直链", gwUrl.json?.code === 0 && /^https?:\/\//.test(String(gwUrl.json.data.url)), JSON.stringify({ source: gwUrl.json?.data?.sourceName, url: String(gwUrl.json?.data?.url || gwUrl.json?.error).slice(0, 70) }));

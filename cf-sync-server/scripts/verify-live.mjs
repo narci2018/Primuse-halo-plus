@@ -67,6 +67,14 @@ const manifest = await get(`/api/music-sources?deviceId=${DEV}`);
 const m = manifest.json?.data;
 check("清单契约 primuse.music-sources.v1", manifest.status === 200 && m?.contract === "primuse.music-sources.v1", `revision=${m?.revision}`);
 check("清单里有网关地址与可用动作", Boolean(m?.gateway?.base) && Array.isArray(m?.gateway?.actions), JSON.stringify(m?.gateway || null));
+// runtime 是客户端"哪些协议我在本地算、哪些必须交给服务端"的唯一依据。
+// 它曾经一直是 undefined —— 因为清单正文由一个永远不会被调用的 manifest() 死代码拼，
+// 现网走的是另一条路。契约测试盯不住"两条路"，所以这条要在线上再断一次。
+check(
+  "清单带 runtime：lxjs 标明由服务端 runner 执行，其余协议可本地直连",
+  m?.runtime?.lxjs === "server-runner" && m?.runtime?.meting === "client-or-gateway" && m?.runtime?.customJson === "none",
+  JSON.stringify(m?.runtime || null)
+);
 check(
   "清单带「首页文案」设置（需求 5：服务端可设、按本机唯一标识关联）",
   Boolean(m?.settings) && typeof m.settings.homeTitle === "string" && m.settings.homeTitle.length > 0 && m.settings.deviceId === DEV,
@@ -89,6 +97,25 @@ check("网关 capabilities 在线并给出各协议启用数", caps.json?.code =
 const search = await post("search", { action: "search", keyword: "晴天", platform: "netease", limit: 5 });
 const hit = search.json?.data?.results?.[0];
 check("网关搜索有结果", search.json?.code === 0 && Number(search.json?.data?.count) > 0, `命中 ${search.json?.data?.count ?? 0} 条 · 首选 ${hit?.title} / ${hit?.artist}`);
+
+// 洛雪源能不能被搜到，决定客户端要不要自己再装一套搜索。这里**不能**断言"必须搜到歌"：
+// 官方洛雪协议只保证 musicUrl，搜索是各家脚本自己加的，而且它们的搜索站自己会挂
+// （实测 2026-10-14：4 条被扫的源里 2 条未声明 search、1 条返回非 JSON、1 条答"该平台不支持搜索"）。
+// 能确定的是网关必须**诚实**：每条被扫的 lxjs 源要么进结果，要么在 notes 里留下原因 ——
+// 静默丢掉就是代码坏了（lxBallot 没 await、capabilities 判错、异常被吞）。
+const lxFromGw = (search.json?.data?.results || []).filter((r) => r.protocol === "lxjs");
+const lxNotes = (search.json?.data?.notes || []).filter((n) => String(n.id).startsWith("lxjs-"));
+const triedLx = new Set([...lxFromGw.map((r) => r.sourceId), ...lxNotes.map((n) => n.id)]);
+check(
+  "网关搜索对每条被扫的洛雪源都给了交代（进结果或写明落选原因，不静默丢弃）",
+  lxNotes.length > 0 && [...lxNotes].every((n) => n.note && n.name),
+  `洛雪进结果 ${lxFromGw.length} 条 · 有交代 ${triedLx.size} 条 · ${lxNotes.map((n) => `${n.name}:${n.note}`).join(" / ").slice(0, 260)}`
+);
+check(
+  "每条搜索结果都自带 protocol/sourceId（客户端据此决定本地播还是走网关，不用回查清单）",
+  (search.json?.data?.results || []).length > 0 && (search.json?.data?.results || []).every((r) => r.protocol && r.sourceId && r.rawID),
+  JSON.stringify((search.json?.data?.results || []).slice(0, 2).map((r) => [r.protocol, r.sourceId, r.rawID]))
+);
 
 const rawUrl = await post("url", { action: "url", rawID: hit?.rawID, platform: hit?.platform || "netease", quality: "320k" });
 const url = rawUrl.json?.data?.url;

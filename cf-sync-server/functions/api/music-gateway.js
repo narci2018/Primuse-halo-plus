@@ -151,7 +151,9 @@ export async function handleGateway(ctx) {
           const key = `${item.platform}:${item.rawID}`;
           if (seen.has(key)) continue;
           seen.add(key);
-          results.push(item);
+          // 每条结果自带 protocol，客户端拿到结果就能判断"这条我本地播还是交给网关"，
+          // 不必回头在清单里找 sourceId 对应的那一行（清单可能已经变了）。
+          results.push({ ...item, protocol: item.protocol || s.protocol || "" });
         }
       }
     }

@@ -204,10 +204,21 @@ export async function writeCheckResult(env, id, result) {
   // 那是这条源永远出不了声，停用 + 建议删除才对得上"能播的源才有价值"。
   const inconclusive = ["no_sample", "runner_missing", "unsupported"].indexOf(result.status) >= 0;
   const streak = pass ? 0 : inconclusive ? Number((cur && cur.fail_streak) || 0) : Number((cur && cur.fail_streak) || 0) + 1;
-  // 检不到可用的源：直接停用 + 建议删除（用户明确要求）。用户手动锁过启停的源不动它的 enabled。
-  const enabled = cur && Number(cur.enabled_locked) === 1
+  // 启停位三条分支，缺一条都会留下洗不掉的错账：
+  //   锁过（enabled_locked）→ 一律不动，用户的手比体检大；
+  //   检到能出声（pass）→ **置回启用**。别只写"不行就停用"：上一版体检因为只看搜索接口
+  //     误停过一批线路（第三方站的 /search 坏了但 /url 照样出音），修正判据后重检会给出 ok，
+  //     如果这里仍保留旧的 enabled=0，那条好源就永远躺在"建议删除"里 —— 停用的理由消失了，
+  //     惩罚却留着，等于我们自己的历史错误洗不掉。
+  //   检不出结果（inconclusive）→ 维持现状：没看清既不复活也不判死。
+  const locked = Boolean(cur) && Number(cur.enabled_locked) === 1;
+  const enabled = locked
     ? Number(cur.enabled)
-    : pass || inconclusive ? Number((cur && cur.enabled) ?? 1) : 0;
+    : pass
+      ? 1
+      : inconclusive
+        ? Number((cur && cur.enabled) ?? 1)
+        : 0;
   await env.DB.prepare(
     `UPDATE music_sources SET
        check_status=?, check_detail=?, check_bytes=?, checked_at=?, fail_streak=?, suggest_delete=?, enabled=?, updated_at=?
