@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { startLxRunner } from "./lx-runner.mjs";
 import { probeAudio } from "../functions/lib/protocols.js";
 import { normalizeLxSearch } from "../functions/lib/runner.js";
+import { verdictEffect, ERROR_GRACE } from "../functions/lib/store.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // 端口每次都换一个新的：上一轮被强杀的 workerd 可能还占着旧端口，
@@ -528,6 +529,81 @@ async function main() {
       rich.artist === "周杰伦" && rich.album === "叶惠美" && /^https:\/\//.test(String(rich.coverURL || "")) && Number(rich.duration) === 269,
       JSON.stringify({ artist: rich.artist, album: rich.album, duration: rich.duration, cover: String(rich.coverURL || "").slice(0, 24) })
     );
+
+    // ── 7d. 体检启停判据（纯函数，不联网）────────────────────────────────
+    // verdictEffect 是唯一决定"这条源在客户端是启用还是停用"的地方，而它的三个分支
+    // 每一个都是现网真实误杀/漏杀换来的，必须钉死：
+    //   检到能出声 → **置回启用**（上一版只写"不行就停用"，导致误杀过的坏源永远洗不掉）；
+    //   观测盲区（no_sample/runner_missing/unsupported）与自己没测成（error 未达宽限）→ 维持现状；
+    //   真不行 → 停用 + 建议删除；用户手动锁过启停的，一律不动 enabled。
+    const row = (over = {}) => ({ enabled: 1, enabled_locked: 0, fail_streak: 0, ...over });
+    const veCases = [
+      [
+        "检到能出声 → 启用位从 0 复活为 1，删除建议清零",
+        verdictEffect({ status: "ok" }, row({ enabled: 0, fail_streak: 4 })),
+        (v) => v.enabled === 1 && v.suggestDelete === 0 && v.streak === 0 && v.pass === true && v.blind === false,
+      ],
+      [
+        "观测盲区（no_sample）→ 不动启用位，也不建议删除",
+        verdictEffect({ status: "no_sample" }, row({ enabled: 0 })),
+        (v) => v.enabled === 0 && v.suggestDelete === 0 && v.blind === true && v.streak === 0,
+      ],
+      [
+        "runner 没部署（runner_missing）是服务端自己的问题，不能算源的头",
+        verdictEffect({ status: "runner_missing" }, row()),
+        (v) => v.enabled === 1 && v.suggestDelete === 0 && v.blind === true,
+      ],
+      [
+        "customJson 两端都不做搜索（unsupported）→ 按定义无从判断，维持现状",
+        verdictEffect({ status: "unsupported" }, row({ enabled: 0 })),
+        (v) => v.enabled === 0 && v.suggestDelete === 0 && v.blind === true,
+      ],
+      [
+        "我们自己没测成（error）第 1 次 → 宽限，绝不停用",
+        verdictEffect({ status: "error" }, row()),
+        (v) => v.enabled === 1 && v.suggestDelete === 0 && v.blind === true && v.flakyProbe === true && v.streak === 1,
+      ],
+      [
+        "我们自己没测成（error）第 2 次 → 还在宽限内",
+        verdictEffect({ status: "error" }, row({ fail_streak: 1 })),
+        (v) => v.enabled === 1 && v.blind === true && v.streak === 2,
+      ],
+      [
+        `我们自己没测成（error）连着第 3 次 → 不再是运气，停用并建议删除`,
+        verdictEffect({ status: "error" }, row({ fail_streak: 2 })),
+        (v) => v.enabled === 0 && v.suggestDelete === 1 && v.blind === false && v.flakyProbe === false && v.streak === 3,
+      ],
+      [
+        "真不行（解析无直链）→ 第一次就停用 + 建议删除，不拖",
+        verdictEffect({ status: "resolve_fail" }, row()),
+        (v) => v.enabled === 0 && v.suggestDelete === 1 && v.blind === false && v.streak === 1,
+      ],
+      [
+        "脚本连编译都过不去（script_uncompilable）→ 永远出不了声，判死",
+        verdictEffect({ status: "script_uncompilable" }, row()),
+        (v) => v.enabled === 0 && v.suggestDelete === 1 && v.blind === false,
+      ],
+      [
+        "用户手动启用（locked）的坏源：体检不许把它关掉",
+        verdictEffect({ status: "resolve_fail" }, row({ enabled: 1, enabled_locked: 1 })),
+        (v) => v.enabled === 1 && v.locked === true,
+      ],
+      [
+        "用户手动停用的好源：体检也不许把它打开（但删除建议照样清零）",
+        verdictEffect({ status: "ok" }, row({ enabled: 0, enabled_locked: 1 })),
+        (v) => v.enabled === 0 && v.suggestDelete === 0,
+      ],
+      [
+        "未知状态一律按「不行」处理，不许因为判据没覆盖就静默放行",
+        verdictEffect({ status: "something_new" }, row()),
+        (v) => v.enabled === 0 && v.suggestDelete === 1 && v.blind === false,
+      ],
+    ];
+    for (const [label, got, okFn] of veCases) {
+      record(`启停判据：${label}`, okFn(got), JSON.stringify(got));
+    }
+    // 宽限次数本身就是判据的一部分，写死成 3：单次观测失败说明不了任何事。
+    record("启停判据：error 宽限次数是 3（连续 3 次才动手）", Number(ERROR_GRACE) === 3, `实得 ${ERROR_GRACE}`);
 
   } catch (e) {
     record("测试执行未抛异常", false, String(e && e.message ? e.message : e));

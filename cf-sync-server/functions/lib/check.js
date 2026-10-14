@@ -48,7 +48,16 @@ function rowToSource(row) {
 }
 
 async function checkHttpSource(env, source, keyword) {
-  const s = await search(source, keyword);
+  // **我们没测成 ≠ 这条源不行。** search() 里的 fetchText 会抛（9s 超时、连接被重置），
+  // 以前这一抛就顺着 checkSource 的兜底 catch 变成 status:"error" → 立即停用 + 建议删除。
+  // 现网 2026-10-14 真的这么杀掉了唯一还能用的 HTTP 搜索线路（七洁雅 Meting 慢了一拍）。
+  // 所以这里把"我这边的观测失败"接住，按"搜索没结果"同样退回样本池继续验播放。
+  let s;
+  try {
+    s = await search(source, keyword);
+  } catch (e) {
+    s = { items: [], note: `搜索请求没测成：${String((e && e.message) || e).slice(0, 120)}` };
+  }
   const labelOf = new Map(s.items.map((i) => [i.rawID, `${i.title || ""}${i.artist ? ` / ${i.artist}` : ""}`]));
   let ids = s.items.map((i) => i.rawID).filter(Boolean);
   if (ids.length) {

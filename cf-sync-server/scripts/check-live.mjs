@@ -92,8 +92,12 @@ for (let i = 0; i < todo.length; i++) {
   try {
     const d = await post("check-one", { id: p.id, keyword });
     const r = d.result || {};
-    results.push({ ...p, status: r.status, detail: r.detail, bytes: r.bytes, enabled: d.source?.enabled, suggestDelete: d.source?.suggestDelete });
-    const mark = r.status === "ok" ? "✅" : ["no_sample", "runner_missing", "unsupported"].includes(r.status) ? "⚠️" : "❌";
+    // 「检不出结果」由服务端算（applied.inconclusive），脚本不自己枚举状态：
+    // 观测盲区不止 no_sample/runner_missing/unsupported，还包括"我们这边没测成"的 error
+    // ——那种在连续 3 次之前不该算源的错。自己在这里再列一遍，列漏一次就误报一批。
+    const blind = Boolean(d.applied && d.applied.inconclusive);
+    results.push({ ...p, status: r.status, detail: r.detail, bytes: r.bytes, blind, failStreak: Number((d.applied || {}).failStreak) || 0, errorOnce: String(r.status) === "error", enabled: d.source?.enabled, suggestDelete: d.source?.suggestDelete });
+    const mark = r.status === "ok" ? "✅" : blind ? "⚠️" : "❌";
     const flip = p.wasDisabled && d.source?.enabled === true ? " → 已复活（旧结论是误杀）" : d.source && d.source.enabled === false ? " → 已停用" : "";
     console.log(`${mark} ${tag} ${p.name}（${p.protocol}）· ${r.status} · ${r.bytes || 0}B${flip}`);
     if (r.status !== "ok") console.log(`      ${String(r.detail || "").slice(0, 220)}`);
@@ -105,12 +109,9 @@ for (let i = 0; i < todo.length; i++) {
 }
 
 const okList = results.filter((r) => r.status === "ok");
-// 口径和 store.js 的 writeCheckResult 保持一致：**只有"检不出结果"才不停用**。
-// 这里不再枚举坏状态（上一版漏了 resolve_fail，28/30 的差值就是这么来的），
-// 改成"不是 ok、也不是盲区，就是判死"，将来新增判死状态也不会漏报。
-const INCONCLUSIVE = ["no_sample", "runner_missing", "unsupported"];
-const dead = results.filter((r) => r.status !== "ok" && INCONCLUSIVE.indexOf(r.status) < 0);
-const blind = results.filter((r) => INCONCLUSIVE.indexOf(r.status) >= 0);
+// 判死 / 盲区一律听服务端算好的 `blind`（见上面那段），不在脚本里第二遍枚举状态。
+const dead = results.filter((r) => r.status !== "ok" && !r.blind);
+const blind = results.filter((r) => r.blind);
 
 console.log(`\n── 名单（已写回 ${OUT}）──────────────────────────`);
 console.log(`✅ 真能出声：${okList.length} 条`);
@@ -120,4 +121,4 @@ for (const r of okList) console.log(`   · ${r.name}（${r.platform}/${r.protoco
 console.log(`❌ 判为不可用（已停用 + 建议删除）：${dead.length} 条`);
 for (const r of dead) console.log(`   · ${r.name} · ${r.status} · ${String(r.detail || "").slice(0, 120)}`);
 console.log(`⚠️ 检不出结果（观测盲区，不停用）：${blind.length} 条`);
-for (const r of blind) console.log(`   · ${r.name} · ${r.status} · ${String(r.detail || "").slice(0, 120)}`);
+for (const r of blind) console.log(`   · ${r.name} · ${r.status}${r.errorOnce ? ` · 本机没测成第 ${r.failStreak} 次（连到 3 次才判死）` : ""} · ${String(r.detail || "").slice(0, 120)}`);

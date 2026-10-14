@@ -191,43 +191,57 @@ export async function deleteSource(env, id) {
   return meta(r).changes;
 }
 
-export async function writeCheckResult(env, id, result) {
-  const now = Date.now();
-  const cur = await getSource(env, id);
-  const pass = result.status === "ok";
-  // 「检不出结果」和「检出不行」是两回事，必须分开（用户要求停用/建议删除只针对后者）：
-  //   no_sample       洛雪音源不会搜索，样本池空着时我们根本没有可考的歌曲 id —— 观测盲区
-  //   runner_missing  runner Worker 没部署该脚本/不可达 —— 服务端自己的基础设施问题
-  //   unsupported     customJson 协议两端都不做搜索 —— 按定义无法验证
-  // 这三种如果也去停用，就是把"我没看清"当成"它不行"，会误杀好源。
-  // 反过来 script_uncompilable（脚本在 runner 沙箱里连编译都过不去）不在这里：
-  // 那是这条源永远出不了声，停用 + 建议删除才对得上"能播的源才有价值"。
-  const inconclusive = ["no_sample", "runner_missing", "unsupported"].indexOf(result.status) >= 0;
-  const streak = pass ? 0 : inconclusive ? Number((cur && cur.fail_streak) || 0) : Number((cur && cur.fail_streak) || 0) + 1;
-  // 启停位三条分支，缺一条都会留下洗不掉的错账：
-  //   锁过（enabled_locked）→ 一律不动，用户的手比体检大；
-  //   检到能出声（pass）→ **置回启用**。别只写"不行就停用"：上一版体检因为只看搜索接口
-  //     误停过一批线路（第三方站的 /search 坏了但 /url 照样出音），修正判据后重检会给出 ok，
-  //     如果这里仍保留旧的 enabled=0，那条好源就永远躺在"建议删除"里 —— 停用的理由消失了，
-  //     惩罚却留着，等于我们自己的历史错误洗不掉。
-  //   检不出结果（inconclusive）→ 维持现状：没看清既不复活也不判死。
+/**
+ * 一次体检结论对这一行意味着什么 —— 纯函数，好单独测（见 tests/cf-contract.test.mjs 的"判死口径"一节）。
+ *
+ * 三类结论必须分开，混一起就会误杀：
+ *   1) ok                    能出声 → 启用（**包括把之前误停的源救回来**）。
+ *   2) 观测盲区 blind         我们没看清，不是它不行 → 维持现状、不建议删除：
+ *        no_sample           洛雪音源不会搜索，样本池空着时根本没有可考的歌曲 id
+ *        runner_missing      runner Worker 没部署该脚本 / 不可达（服务端自己的基础设施）
+ *        unsupported         customJson 协议两端都不做搜索，按定义无法验证
+ *        error（宽限期内）    我们这边没测成（fetch 抛、D1 抖、转发失败）
+ *   3) 判死                  确实播不出 → 停用 + 建议删除（用户明确要求"能播的源才有价值"）
+ *
+ * `error` 走宽限而不直接算盲区，是因为它也可能是源真的坏了（脚本编译不过除外，那有专门状态）。
+ * 所以连错 3 次就按判死处理：单次观测失败说明不了任何事，连着三次就不是运气。
+ * 反过来 script_uncompilable / audio_fail / resolve_fail 不在宽限里 —— 那是这条源自己出不了声。
+ */
+export const ERROR_GRACE = 3;
+
+export function verdictEffect(result, cur = null) {
+  const status = String((result && result.status) || "");
+  const pass = status === "ok";
+  const blindStatus = ["no_sample", "runner_missing", "unsupported"].indexOf(status) >= 0;
+  const prev = Number((cur && cur.fail_streak) || 0);
+  const streak = pass || blindStatus ? (pass ? 0 : prev) : prev + 1;
+  const flakyProbe = status === "error" && streak < ERROR_GRACE;
+  const blind = blindStatus || flakyProbe;
   const locked = Boolean(cur) && Number(cur.enabled_locked) === 1;
+  // 用户手动锁过启停的（enabled_locked），体检一律不碰它的 enabled —— 用户的手比体检大。
   const enabled = locked
     ? Number(cur.enabled)
     : pass
       ? 1
-      : inconclusive
+      : blind
         ? Number((cur && cur.enabled) ?? 1)
         : 0;
+  return { pass, blind, flakyProbe, locked, streak, enabled, suggestDelete: pass || blind ? 0 : 1 };
+}
+
+export async function writeCheckResult(env, id, result) {
+  const now = Date.now();
+  const cur = await getSource(env, id);
+  const v = verdictEffect(result, cur);
   await env.DB.prepare(
     `UPDATE music_sources SET
        check_status=?, check_detail=?, check_bytes=?, checked_at=?, fail_streak=?, suggest_delete=?, enabled=?, updated_at=?
      WHERE id=?`
   ).bind(
-    result.status, String(result.detail || "").slice(0, 500), Number(result.bytes || 0), now, streak,
-    pass || inconclusive ? 0 : 1, enabled, now, String(id)
+    result.status, String(result.detail || "").slice(0, 500), Number(result.bytes || 0), now, v.streak,
+    v.suggestDelete, v.enabled, now, String(id)
   ).run();
-  return { enabled: enabled === 1, failStreak: streak, suggestDelete: pass || inconclusive ? 0 : 1, inconclusive };
+  return { enabled: v.enabled === 1, failStreak: v.streak, suggestDelete: v.suggestDelete, inconclusive: v.blind, flakyProbe: v.flakyProbe };
 }
 
 export async function getDevicePref(env, deviceId) {
