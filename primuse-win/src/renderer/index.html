@@ -11,105 +11,122 @@
   </head>
   <body>
     <div id="app">
-      <header class="titlebar">
-        <div class="brand">
-          <img src="icon.png" alt="" class="brand-icon" />
-          <span class="brand-name">Primuse</span>
-          <span class="brand-tag" id="version-tag"></span>
-        </div>
-        <div class="searchbox">
-          <input id="search-input" type="search" placeholder="搜索歌曲、歌手、专辑（在线聚合音源）" autocomplete="off" spellcheck="false" />
-        </div>
-        <div class="titlebar-actions">
-          <button id="btn-queue" class="ghost" title="队列 (Ctrl+Q)">队列</button>
-          <button id="btn-lyrics" class="ghost" title="歌词">歌词</button>
-        </div>
-      </header>
+      <!--
+        iPhone 版的结构（照 ContentView.swift:579-617 / MiniPlayerView / PlayerOverlay 抄）：
+        一列内容 → tab 上方一条胶囊迷你播放器 → 底部四个 tab；全屏播放是覆盖层，不是路由。
+        以前的 macOS 三栏（标题栏 + sidebar + detail）已经整块去掉了。
+      -->
+      <main class="screen" id="screen">
+        <div class="loading">正在载入…</div>
+      </main>
 
-      <div class="shell">
-        <nav class="sidebar">
-          <div class="nav-group">
-            <button class="nav-item" data-route="home">发现</button>
-            <button class="nav-item" data-route="search">搜索</button>
+      <!-- 迷你播放器：ContentView.swift:2036-2053（胶囊、maxWidth 620、ultraThinMaterial） -->
+      <div class="mini-wrap" id="mini-wrap" hidden>
+        <div class="mini" id="mini" data-open-player="1">
+          <span class="mini-cover" id="mini-cover"></span>
+          <div class="mini-meta">
+            <div class="mini-title" id="mini-title"></div>
+            <div class="mini-artist" id="mini-artist"></div>
           </div>
-          <div class="nav-group">
-            <div class="nav-title">音乐库</div>
-            <button class="nav-item" data-route="favorites">我喜欢<span class="nav-count" id="nav-liked-count"></span></button>
-            <button class="nav-item" data-route="playlists">歌单</button>
-            <div id="playlist-nav"></div>
-            <button class="nav-item" data-route="history">最近播放</button>
-          </div>
-          <div class="nav-group">
-            <div class="nav-title">音源</div>
-            <button class="nav-item" data-route="online">在线聚合线路</button>
-            <div id="server-nav"></div>
-          </div>
-          <div class="nav-group grow">
-            <div class="nav-title">设备</div>
-            <button class="nav-item" data-route="settings">设置</button>
-          </div>
-        </nav>
-
-        <main class="detail" id="detail">
-          <div class="loading">正在载入…</div>
-        </main>
-
-        <aside class="drawer" id="drawer" hidden>
-          <div class="drawer-head">
-            <span id="drawer-title">队列</span>
-            <button class="ghost" id="drawer-close">×</button>
-          </div>
-          <div class="drawer-body" id="drawer-body"></div>
-        </aside>
+          <button class="mini-btn" id="mini-play" title="播放 / 暂停"></button>
+          <button class="mini-btn" id="mini-next" title="下一曲"></button>
+        </div>
       </div>
 
-      <footer class="player-bar" id="player-bar">
-        <div class="pb-track">
-          <img id="pb-cover" class="pb-cover" alt="" />
-          <div class="pb-meta">
-            <div class="pb-title" id="pb-title">未播放</div>
-            <div class="pb-artist" id="pb-artist">在左侧选一首歌开始</div>
-          </div>
-          <button class="pb-like" id="pb-like" title="收藏 (Ctrl+L)">♡</button>
+      <!-- 多选批量条：SongBatchActionBar.swift —— 与迷你播放器互斥（原版批量态会隐藏迷你条） -->
+      <div class="batch-wrap" id="batch-bar" hidden>
+        <span class="batch-count" id="batch-count">已选择 0 首</span>
+        <button class="batch-btn" data-batch="all">全选</button>
+        <button class="batch-btn" data-batch="playlist">加入歌单</button>
+        <button class="batch-btn" data-batch="next">下一首播放</button>
+        <button class="batch-btn" data-batch="queue">加入播放队列</button>
+        <button class="batch-btn" data-batch="remove">从歌单中移除</button>
+        <button class="batch-x" data-batch="cancel" title="取消选择">✕</button>
+      </div>
+
+      <nav class="tabbar" id="tabbar">
+        <button class="tab" data-tab="home"><span class="ico">home</span><span class="lab">首页</span></button>
+        <button class="tab" data-tab="library"><span class="ico">library</span><span class="lab">资料库</span></button>
+        <button class="tab" data-tab="search"><span class="ico">search</span><span class="lab">搜索</span></button>
+        <button class="tab" data-tab="settings"><span class="ico">settings</span><span class="lab">设置</span></button>
+      </nav>
+    </div>
+
+    <!-- 全屏播放浮层（PlayerOverlay：覆盖层 + 下拉/左缘滑动收起） -->
+    <div class="player" id="player" hidden>
+      <div class="player-bg" id="player-bg"></div>
+      <div class="player-inner">
+        <div class="grabber" data-close-player="1"><span></span></div>
+        <div class="player-err" id="player-err" hidden></div>
+
+        <div class="art-area">
+          <div class="art" id="art"></div>
         </div>
 
-        <div class="pb-center">
-          <!-- 按钮顺序照 MacBottomBar.swift:146-192：shuffle · 上一曲 · 播放/暂停 · 下一曲 · repeat -->
-          <div class="pb-buttons">
-            <button id="pb-shuffle" class="mode" title="随机播放">随机</button>
-            <button id="pb-prev" title="上一曲">⏮</button>
-            <button id="pb-play" class="primary" title="播放 / 暂停 (空格)">▶</button>
-            <button id="pb-next" title="下一曲">⏭</button>
-            <button id="pb-repeat" class="mode" title="播放模式：关 → 列表循环 → 单曲循环">循环: 关</button>
+        <div class="meta-row">
+          <div class="meta-text">
+            <div class="meta-title" id="np-title">未在播放</div>
+            <div class="meta-sub" id="np-artist"></div>
           </div>
-          <div class="pb-progress">
-            <span id="pb-current">0:00</span>
-            <input id="pb-seek" type="range" min="0" max="0" step="1" value="0" />
-            <span id="pb-total">0:00</span>
+          <button class="np-fav" id="np-fav" title="我喜欢"></button>
+          <div class="menu np-menu">
+            <button class="np-more" data-np-menu="1" title="更多"></button>
+            <div class="menu-pop right" id="np-menu" hidden></div>
           </div>
         </div>
 
-        <div class="pb-right">
-          <span class="vol-label">音量</span>
-          <input id="pb-volume" type="range" min="0" max="1" step="0.01" value="0.8" />
+        <div class="progress" id="progress">
+          <div class="track" id="track"><div class="fill" id="fill"></div><div class="knob" id="knob"></div></div>
+          <div class="times"><span id="t-cur">0:00</span><span id="t-left">-0:00</span></div>
         </div>
-      </footer>
+
+        <div class="controls">
+          <button class="ctrl mode" id="c-shuffle" title="随机播放"></button>
+          <button class="ctrl" id="c-prev" title="上一曲"></button>
+          <button class="ctrl big" id="c-play" title="播放 / 暂停"></button>
+          <button class="ctrl" id="c-next" title="下一曲"></button>
+          <button class="ctrl mode" id="c-repeat" title="单曲循环"></button>
+        </div>
+
+        <div class="volume-row">
+          <span class="vol-ico lo"></span>
+          <input id="c-volume" type="range" min="0" max="1" step="0.01" value="0.8" />
+          <span class="vol-ico hi"></span>
+        </div>
+
+        <div class="slots">
+          <button class="slot" data-toggle-view="lyrics" id="s-lyrics" title="歌词"></button>
+          <button class="slot" data-open-device="1" id="s-device" title="播放设备"></button>
+          <button class="slot" data-toggle-view="queue" id="s-queue" title="播放队列"></button>
+        </div>
+        <div class="format-row" id="np-format"></div>
+
+        <div class="lyrics" id="lyrics" hidden></div>
+      </div>
+
+      <!-- 队列：原版是 sheet（detents medium/large），Windows 用底部抽屉 -->
+      <div class="queue-sheet" id="queue-sheet" hidden>
+        <div class="qs-head"><span>播放队列</span><button class="ghost" data-close-queue="1">完成</button></div>
+        <div class="qs-body" id="qs-body"></div>
+      </div>
     </div>
 
     <audio id="audio" preload="auto"></audio>
     <div id="toast" class="toast" hidden></div>
 
-    <!-- 弹层：添加到歌单 / 新建歌单 / 重命名 / 同步设备选择 -->
+    <!-- sheet：添加到歌单 / 新建 / 重命名 / 重新排序 / 歌曲菜单 -->
     <div id="sheet" class="sheet" hidden>
       <div class="sheet-card">
+        <div class="sheet-grabber"><span></span></div>
         <div class="sheet-head">
           <span id="sheet-title"></span>
-          <button class="ghost" id="sheet-close">×</button>
+          <button class="ghost" id="sheet-close">✕</button>
         </div>
         <div class="sheet-body" id="sheet-body"></div>
       </div>
     </div>
 
+    <script src="icons.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

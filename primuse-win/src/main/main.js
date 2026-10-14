@@ -6,9 +6,10 @@
  * App 内也没有账号体系 —— 与 iPhone/macOS 版一致，登录只发生在"添加需要鉴权的
  * 音源"这一步（道理鱼的 /api/auth/login），由用户在"来源"页自己填。
  *
- * 界面结构照 `primuse/Primuse/Views/Mac/`：侧栏（MacSidebar）+ 主详情
- * （MacDetailContainer）+ 常驻底部播放条（MacBottomBar）+ 队列（MacQueuePanel），
- * 路由集合与 MacRoute.swift:6-19 对齐。
+ * 界面结构照的是 **iPhone 版**：单列内容 + 底部四个 tab（首页/资料库/搜索/设置）
+ * + tab 上方一条胶囊迷你播放器 + 全屏播放浮层（覆盖层，不是路由），来源与同步都在
+ * 设置里。对应 Swift 侧 `ContentView.swift:579-617`、`MiniPlayerView.swift`、
+ * `NowPlayingView.swift`。以前那套 macOS 三栏（侧栏 + 详情 + 常驻播放条）已整块废弃。
  */
 
 const path = require('path');
@@ -21,6 +22,7 @@ const sync = require('./sync');
 const { startProxy } = require('./proxy');
 
 const SMOKE = process.argv.includes('--primuse-smoke');
+const packageJson = require('../../package.json');
 // 打包版里 __dirname 在 app.asar 内不可写，所以报告与截图一律写到系统临时目录
 const OUT_DIR = process.env.PRIMUSE_SMOKE_OUT || path.join(app.getPath('temp'), 'primuse-smoke');
 
@@ -85,6 +87,7 @@ async function trackLyrics(track) {
 function registerIpc() {
   ipcMain.handle('meta:get', () => ({
     version: app.getVersion(),
+    build: packageJson.buildNumber || packageJson.version,
     platform: 'win32',
     proxyBaseUrl: proxy ? proxy.baseUrl : null,
     credentialsEncrypted: store.credentialsAvailable(),
@@ -287,14 +290,17 @@ function registerIpc() {
 // MARK: - 窗口
 
 function createWindow() {
+  // 纵向单列、宽度贴着 iPhone 的内容列（styles.css 的 --col:620px）。
+  // 以前默认 1360×860 是把 iPhone 版面塞进横屏桌面壳，左右大片留白，观感完全不是原版。
   mainWindow = new BrowserWindow({
-    width: 1360,
-    height: 860,
-    minWidth: 980,
+    width: 560,
+    height: 920,
+    minWidth: 400,
     minHeight: 620,
     title: 'Primuse',
     backgroundColor: '#0f1013',
     show: false,
+    autoHideMenuBar: true,
     icon: path.join(__dirname, '../../build/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, '../preload.js'),
@@ -625,21 +631,39 @@ async function runSmoke() {
       };
       tick();
     });
-    step('渲染层自检', Boolean(report.ui && report.ui.ready), JSON.stringify(report.ui));
+    const coverOk = Object.values((report.ui && report.ui.coverLoads) || {}).some((v) => String(v).startsWith('ok:'));
     step(
-      '歌单 UI 已接线（侧栏 / 播放模式 / 加入歌单入口）',
-      Boolean(report.ui && report.ui.navHasPlaylists && report.ui.playlistNav && report.ui.shuffleButton && report.ui.repeatButton && report.ui.addToPlaylistButtons > 0),
-      `侧栏歌单入口 ${report.ui && report.ui.navHasPlaylists}、播放队列 ${report.ui && report.ui.playlistNav}、随机按钮 ${report.ui && report.ui.shuffleButton}、循环按钮 ${report.ui && report.ui.repeatButton}、行内「＋歌单」${report.ui && report.ui.addToPlaylistButtons} 个`
+      '渲染层自检',
+      Boolean(report.ui && report.ui.ready && report.ui.coverSamples && report.ui.coverSamples.length > 0 && coverOk),
+      `${JSON.stringify(report.ui)} —— 封面按平台实测（酷狗那批 meting type=pic 上游返回空 body，属数据源缺陷，与渲染无关）`
+    );
+    const ui = report.ui || {};
+    step(
+      'iPhone 外壳已接线（底部四 tab / 胶囊迷你条 / 全屏播放浮层 / 批量条 / 行内 ⋯）',
+      Boolean(
+        ui.tabs === 4 &&
+          ui.tabLabels === '首页·资料库·搜索·设置' &&
+          ui.tabIcons === 4 &&
+          ui.hasMini &&
+          ui.hasPlayerOverlay &&
+          ui.playerControls === 5 &&
+          ui.playerSlots === 3 &&
+          ui.batchButtons === 6 &&
+          ui.rowMenus > 0 &&
+          ui.hasLoginWall === false &&
+          Array.isArray(ui.overlayLeaks) && ui.overlayLeaks.length === 0
+      ),
+      `tab ${ui.tabs} 个（${ui.tabLabels}，图标 ${ui.tabIcons}）、当前 ${ui.activeTab}、迷你条 ${ui.hasMini}（未播放时隐藏 ${ui.miniHidden}）、` +
+        `浮层控件 ${ui.playerControls} + 槽位 ${ui.playerSlots}、批量条按钮 ${ui.batchButtons}、行内「⋯」${ui.rowMenus} 个、登录墙 ${ui.hasLoginWall}、` +
+        `该隐藏却糊在页面上的浮层 ${JSON.stringify(ui.overlayLeaks || [])}`
     );
 
     const image = await mainWindow.webContents.capturePage();
     require('fs').mkdirSync(OUT_DIR, { recursive: true });
     const shotPath = path.join(OUT_DIR, 'smoke-ui.png');
     require('fs').writeFileSync(shotPath, image.toPNG());
-    step('界面截图', true, shotPath);
+    step('搜索页截图', true, shotPath);
 
-    // 第二段：歌单页 / 详情 / ⋯菜单 / 加入弹层 / 同步页的真实 DOM。
-    // 上面那张截图是搜索页，证明不了这次新加的主体功能"看得见、点得到"。
     const waitUI = (timeoutMs) =>
       new Promise((resolve) => {
         smokeUIState = null;
@@ -652,41 +676,103 @@ async function runSmoke() {
         tick();
       });
 
+    // 首页 / 资料库 / 设置三屏的真实 DOM + 首页实拍。
+    send('smoke:run', { keyword: '', phase: 'shell-pages' });
+    const pages = (await waitUI(30000)) || { note: '渲染层 30s 内未回报三屏状态' };
+    const h = pages.home || {};
+    const l = pages.library || {};
+    const s = pages.settings || {};
+    // 资料库为空时首页是「欢迎 + 去搜索」空壳；有歌时是四个真实分区。两种都算对，
+    // 但必须二选一命中 —— 什么都不渲染才算失败。
+    const homeHasContent = Boolean(
+      (h.sections || []).length >= 4 && (h.sections || []).includes('我的歌单') && (h.sections || []).includes('快捷收藏')
+    );
+    const pagesOk = Boolean(
+      h.title === '首页' &&
+        (h.aggregatedCTA || homeHasContent) &&
+        l.title === '资料库' &&
+        JSON.stringify(l.rows) === JSON.stringify(['歌曲', '专辑', '艺术家', '歌单', '我喜欢', '最近播放', '听歌统计']) &&
+        l.icons === 7 &&
+        /首歌曲/.test((l.counts || [])[0] || '') &&
+        /个歌单/.test((l.counts || [])[3] || '') &&
+        s.title === '设置' &&
+        ['资料库', '播放', '外观', '同步', '关于'].every((g) => (s.groups || []).includes(g)) &&
+        s.rows >= 12 &&
+        s.icons === s.rows &&
+        s.switches >= 3 &&
+        s.volumeSlider &&
+        s.loginWall === false &&
+        Array.isArray(pages.overlayLeaks) &&
+        pages.overlayLeaks.length === 0
+    );
+    step('首页 / 资料库 / 设置三屏渲染（分节、入口、计数、开关、音量）', pagesOk, JSON.stringify(pages));
+
+    const homeShot = path.join(OUT_DIR, 'smoke-ui-home.png');
+    require('fs').writeFileSync(homeShot, (await mainWindow.webContents.capturePage()).toPNG());
+    step('首页截图', true, homeShot);
+
+    // 第三段：歌单页 / 详情 / ⋯菜单 / 加入弹层 / 同步页的真实 DOM。
+    // 前面两张截图是搜索页和首页，证明不了这次新加的主体功能"看得见、点得到"。
     send('smoke:run', { keyword: '', phase: 'playlist-ui' });
-    const pui = (await waitUI(20000)) || { ok: false, note: '渲染层 20s 内未回报歌单状态' };
+    const pui = (await waitUI(45000)) || { ok: false, note: '渲染层 45s 内未回报歌单状态' };
     const puiOk = Boolean(
       pui.ok &&
-        pui.list && pui.list.rows >= 1 && pui.list.navItems >= 1 && pui.list.upload && pui.list.download &&
+        pui.list && pui.list.rows >= 1 && pui.list.navItems === 4 && pui.list.upload && pui.list.download &&
         pui.detail && pui.detail.name && pui.detail.caption && pui.detail.playAll && pui.detail.shufflePlay &&
-        pui.detail.menuButton && pui.detail.songs === 2 && pui.detail.removeInRow === 2 && pui.detail.nextInRow === 2 &&
+        pui.detail.menuButton && pui.detail.songs === 2 && pui.detail.rowMenu === 2 &&
         pui.menuItems && pui.menuItems.includes('重新排序') && pui.menuItems.includes('删除歌单') &&
+        pui.rowSheet && pui.rowSheet.visible && pui.rowSheet.add && pui.rowSheet.fav &&
         pui.sheet && pui.sheet.visible && pui.sheet.title === '添加到歌单' && pui.sheet.createRow && pui.sheet.checked === 1 &&
-        pui.syncView && pui.syncView.form && pui.syncView.deviceId && pui.syncView.backup && pui.syncView.restore && pui.syncView.honest
+        pui.syncView && pui.syncView.form && pui.syncView.deviceId && pui.syncView.backup && pui.syncView.restore && pui.syncView.honest &&
+        pui.shell && pui.shell.tabs === 4 && pui.shell.playerControls === 5 && pui.overlayOpened && pui.queueLoaded &&
+        Array.isArray(pui.overlayLeaks) && pui.overlayLeaks.length === 0
     );
-    step('歌单页渲染（列表 / 详情 / ⋯菜单 / 加入弹层 / 同步页）', puiOk, JSON.stringify(pui));
+    step('歌单页渲染（列表 / 详情 / ⋯菜单 / 行内弹层 / 加入弹层 / 同步页 / 播放浮层）', puiOk, JSON.stringify(pui));
 
     const playlistShot = path.join(OUT_DIR, 'smoke-ui-playlist.png');
     require('fs').writeFileSync(playlistShot, (await mainWindow.webContents.capturePage()).toPNG());
-    step('歌单页截图', true, playlistShot);
+    step('歌单页截图（含胶囊迷你条）', true, playlistShot);
+
+    // 第四段专拍全屏播放浮层：iPhone 最有辨识度的一屏，必须有实拍证据。
+    send('smoke:run', { keyword: '', phase: 'player-shot' });
+    const ply = (await waitUI(25000)) || { visible: false, note: '渲染层 25s 内未回报浮层状态' };
+    const plyOk = Boolean(
+      ply.visible &&
+        ply.title === '冒烟 UI 探针 A' &&
+        ply.hasArtwork && ply.grabberCloses &&
+        ply.controls.startsWith('随机播放·上一曲·播放 / 暂停·下一曲·') && ply.controls.split('·').length === 5 &&
+        ply.controlIcons === 5 &&
+        ply.slots === '歌词·播放设备·播放队列' &&
+        ply.hasProgress && ply.hasVolume && ply.menuOpens &&
+        ply.menuItems && ply.menuItems.includes('添加到歌单') && ply.menuItems.includes('关闭播放页') &&
+        Array.isArray(ply.overlayLeaks) && ply.overlayLeaks.length === 0
+    );
+    step('全屏播放浮层（5 控件 / 3 槽位 / 进度条 / 音量 / ⋯菜单）', plyOk, JSON.stringify(ply));
+
+    const playerShot = path.join(OUT_DIR, 'smoke-ui-player.png');
+    require('fs').writeFileSync(playerShot, (await mainWindow.webContents.capturePage()).toPNG());
+    step('播放浮层截图', true, playerShot);
 
     send('smoke:run', { keyword: '', phase: 'playlist-cleanup' });
     const cleaned = (await waitUI(10000)) || { removed: false, note: '渲染层未回报' };
     const fs2 = require('fs');
     store.save(true); // 渲染层的删除只走了 IPC，落盘还有 250ms 防抖
-    const stillOnDisk = JSON.parse(fs2.readFileSync(path.join(app.getPath('userData'), 'primuse.json'), 'utf8'))
-      .playlists.some((p) => p.name === '冒烟 UI 歌单');
-    step('歌单 UI 探针已清理', Boolean(cleaned.removed) && cleaned.stillThere === false && !stillOnDisk,
-      `${JSON.stringify(cleaned)}；落盘残留 ${stillOnDisk}`);
+    const onDisk = JSON.parse(fs2.readFileSync(path.join(app.getPath('userData'), 'primuse.json'), 'utf8'));
+    const stillOnDisk = (onDisk.playlists || []).some((p) => p.name === '冒烟 UI 歌单');
+    // 截图时在内存里塞过两首探针用来点亮胶囊迷你条；它们绝不能落盘
+    const queueLeak = ((onDisk.queue && onDisk.queue.items) || []).filter((t) => /^冒烟/.test(t.title || '')).map((t) => t.title);
+    step('歌单 UI 探针已清理', Boolean(cleaned.removed) && cleaned.stillThere === false && !stillOnDisk && queueLeak.length === 0,
+      `${JSON.stringify(cleaned)}；落盘歌单残留 ${stillOnDisk}，队列残留 ${queueLeak.length}`);
 
-    // 第三段：真派发 click 走一遍用户路径（弹层、新建并立即加入、再点取消、手动调序、移除、删除）。
-    // 前两段只看 DOM；这一段验的是"点下去到底发生了什么"。
+    // 最后一段：真派发 click 走一遍用户路径（弹层、新建并立即加入、再点取消、手动调序、移除、删除、批量、浮层）。
+    // 前面几段只看 DOM；这一段验的是"点下去到底发生了什么"。
     send('smoke:run', { keyword: '', phase: 'playlist-clicks' });
-    const clicks = (await waitUI(40000)) || { ok: false, note: '渲染层 40s 内未回报点击结果' };
+    const clicks = (await waitUI(90000)) || { ok: false, note: '渲染层 90s 内未回报点击结果' };
     store.save(true);
     const leftovers = JSON.parse(fs2.readFileSync(path.join(app.getPath('userData'), 'primuse.json'), 'utf8'))
       .playlists.filter((p) => /^冒烟(歌单| UI 歌单|点击歌单|点击新建)/.test(p.name || ''));
     step(
-      '歌单点击流（＋歌单 / 新建 / 取消包含 / 调序 / 移除 / 删除）',
+      '歌单点击流（＋歌单 / 新建 / 取消包含 / 调序 / 移除 / 删除 / 批量 / 浮层）',
       clicks.ok === true && leftovers.length === 0,
       JSON.stringify(leftovers.length ? { ...clicks, 落盘残留: leftovers.map((p) => p.name) } : clicks)
     );

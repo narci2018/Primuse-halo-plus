@@ -795,3 +795,64 @@ PASS 界面截图
 
 云端"整库同步/歌曲源同步"（按用户纠正，不做）；歌单封面真图（现在依赖远端封面 URL 能否加载，加载不到退回 ♪）；批量选择与拖拽排序；把 Windows 的歌单结构回灌给 iPhone（现网契约是同一份，理论上 iPhone 下载 Windows 备份即可，**未验证**）。
 
+## 19. 外壳重做成 iPhone 结构，以及真正的病根：`hidden` 属性根本没生效（2026-10-14，v1.9.12 / build 74）
+
+用户第三次说同一件事："**UI界面还是跟iPhone完全不一样！我的需求UI及功能跟iPhone版本基本保持一致！**"。前两次我一直在"歌单层像不像原版"上打转，外壳却仍然是 macOS 三栏（侧栏 + 详情 + 常驻播放条 + `MacRoute`）。这次先把参照物钉回 Swift 源码本身：iPhone 是**单列内容 + 底部四个 tab + tab 上方 44pt 胶囊迷你条 + 全屏播放覆盖层（不是路由）**，来源 `ContentView.swift:579-617`、`MiniPlayerView.swift:47-92`、`NowPlayingView.swift:2100-2350`、`SourcesView.swift:589-940`（音乐源在设置里，不在外层导航）。`src/main/` 与数据层一行没动 —— 契约是对的，错的是壳。
+
+### 19.1 病根不是布局数值，是作者样式表把 `[hidden]` 吃掉了
+
+改完之后我逼自己去看冒烟截图（以前只看断言文本，这是这次最大的失误）。截图上第一眼看到的是：一坨"未在播放"的全屏播放浮层压在搜索结果上面，底部还糊着一个弹层。原因在 `styles.css`：
+
+```css
+.player { display: flex; }  .sheet { display: flex; }
+.batch-wrap { display: flex; }  .queue-sheet { display: flex; }
+```
+
+作者样式表里的类选择器优先级**高于** UA 样式表的 `[hidden] { display: none }`，所以 `el.hidden = true` 只改了属性、根本没改渲染 —— 播放浮层、弹层、批量条、队列抽屉**四样东西从启动那一刻起就同时糊在页面上**。这才是"跟 iPhone 完全不一样"的直接原因，跟字号、圆角、配色都没关系。修法是一行：
+
+```css
+[hidden] { display: none !important; }
+```
+
+顺带解释了一件更难看的事：**当时的 19 项断言全绿**。因为它们检查的是 `$('player').hidden === false` 这种**属性**，属性完全正确、屏幕完全是错的。所以断言全部改成看**渲染结果**：新增 `overlayLeaks()`（列出所有带 `hidden` 但计算样式仍不是 `none` 的浮层）与 `vis(id)`（属性 + 计算样式双条件），`hiddenButVisible` 非空即失败。这条 `[hidden]` 规则以后被谁删掉，CI 立刻红，不会再出现"断言全绿、界面是坨屎"。
+
+### 19.2 结构对照表（照抄的出处都写在各文件头注释里）
+
+| 屏 | iPhone 原版 | Windows 落点 |
+| --- | --- | --- |
+| 外壳 | TabView 四 tab（首页/资料库/搜索/设置），再点当前 tab 回根 | `#tabbar` + 每 tab 一条独立导航栈 `state.stacks[tab]` |
+| 迷你条 | tab 上方 44pt 胶囊、maxWidth 620、ultraThinMaterial | `#mini-wrap > .mini`，只在有当前曲目且未开浮层/未多选时出现；左右滑 ≥56px = 上/下一曲 |
+| 全屏播放 | 覆盖层，grabber 下拉收起 | `#player`（`hidden` 控制），槽位：歌词 / 播放设备 / 播放队列 |
+| 首页 | Hero 一键开听 → 继续听 → 快捷收藏 → 我的歌单 → 常听艺术家 → 听歌统计条 | `pageHome()`，空库时退回「欢迎 + 去搜索」 |
+| 资料库 | 「浏览资料库」7 行图标 + 计数 + 3 张叠封 | `HUB_ROWS`（歌曲/专辑/艺术家/歌单/我喜欢/最近播放/听歌统计） |
+| 搜索 | 大标题 + `search_prompt` + 最近搜索 + 平台 chips + 末组「全网聚合音乐」 | `pageSearch()`，`state.filter` 驱动 `filteredResults()` |
+| 设置 | 节：资料库 / 播放 / 外观 / 同步 / 关于；音乐源在设置里 | `pageSettingsRoot()` + `sources`/`lines`/`server`/`sync`/`appearance`/`about` 子页 |
+| 多选 | `SongBatchActionBar` 底部条，与迷你条互斥 | `#batch-bar` 6 个按钮（全选/加入歌单/下一首播放/加入队列/从歌单移除/取消） |
+
+窗口默认尺寸从 1360×860 改成 **560×920** 并 `autoHideMenuBar`：把 620 的 iPhone 内容列塞进横屏桌面壳，左右大片留白，本身就不像原版。`meta:get` 增加 `build`（读 `package.json.buildNumber`），关于页显示 `1.9.12 (74)`。
+
+### 19.3 这一段顺带抓到并修掉的 4 个 bug
+
+1. `restoreNav(snap)` 把整个 `{ tab, stacks }` 快照赋给了 `state.stacks`，于是每个 tab 的栈变 `undefined`，`pageRef()` 读 `.length` 抛 `TypeError`，整块内容渲染不出来 —— 而且因为异常发生在 async 回调里，界面上只是"白了一下"。修了 `restoreNav`，同时给 `pageRef()` 加了「栈永远至少装着 root」的兜底。
+2. 冒烟会在内存里塞两首探针歌曲点亮胶囊迷你条（截图要用），但批量"加入播放队列"那几步走的是真 IPC，会把探针**落盘**，用户下次打开看到"点击探针 A"。新增 `snapshotQueue()/restoreQueue()` + `smokeQueueRestore`，cleanup 段把用户真实队列原样换回并写盘；主进程另外断言 `primuse.json` 的队列里没有 `冒烟*` 曲目。
+3. 重新排序的断言 `before[0] === after[1]` 比的是**字符串下标**（`'点' === '击'`），`rows` 明明真的翻转了却判 FAIL。改成数组比较。这类"断言自己写错"和"功能真的坏"必须分清，所以 `out.rows` 保留翻转前后的原值。
+4. 搜索页头部计数写死 `state.results.length`，筛到「网易 23」还显示「63 条」。改成跟着 `filteredResults()` 走，分组标题也变成「网易 · 聚合音乐」。
+
+### 19.4 封面：酷狗那批 meting 的 `type=pic` 上游是空的（实测，不是渲染问题）
+
+新截图里封面全是灰方块，我一开始以为是 CSP 或热链防盗链。用 App 自己的网络栈逐条实测才定位到：搜索结果 63 条里 60 条带 `coverURL`，但**前 20 条全是酷狗**，而 `https://api.qijieya.cn/meting/?server=kugou&type=pic&id=…` 返回的是 `HTTP 200 / text/html / 0 字节`（curl 与 Node 一致，加不加 `Accept: image/*`、`Referer` 都一样）—— 上游就是空的，浏览器解不出图片，`<img>` 必然 `onerror`。同一接口 `server=netease` / `server=tencent` 则 302 到 CDN 并拿到 300×300 真图。iPhone 版读的是同一个 meting 接口、同一份 `pic` 字段，所以**原版在酷狗上表现一样**；这不是移植缺陷，也不是我能在客户端"修好"的东西（要修只能另找酷狗自己的封面接口，那属于 §17.5 的扩源范畴）。
+
+两处落地：① `styles.css` 给没有 `background-image` 的 `.song-cover` / `.mini-cover` 加了 ♪ 占位（原版是 `Image(systemName:"music.note")`，而不是一块死灰）；② 冒烟改成**按平台各取一条**用 `Image()` 实测，报告 `coverLoads: {netease:"ok:300x300", qq:"ok:300x300", kugou:"err"}`，至少一个平台通才算过 —— 并且截图前把筛选切到"封面真能加载"的那个平台，免得拿一张全灰的图当证据。
+
+### 19.5 验证（本机全绿）
+
+1. `npm run smoke` 现在 **24 项全 PASS**（v1.9.11 是 20 项）。新增/重写的界面断言：`iPhone 外壳已接线`（4 tab + 标签文案 + 4 个 SVG + 迷你条 + 浮层 + 5 控件 + 3 槽位 + 批量条 6 键 + 行内 ⋯ + 无登录墙 + `overlayLeaks:[]`）、`首页/资料库/设置三屏渲染`（大标题、7 行 hub 及计数、5 个设置分节、14 行且每行都有图标、3 个开关、音量滑块、无退出登录）、`歌单页渲染`（列表/详情/⋯菜单/行内弹层/加入弹层/同步页/浮层/队列）、`全屏播放浮层`（5 控件标题逐字、3 槽位、进度条、音量、⋯ 菜单五项）、`歌单点击流`（新增批量条四步 + 浮层开关 + 歌词/队列槽位 + `noOverlayLeaks`）。
+2. 四张实拍截图：`smoke-ui.png`（搜索，网易筛选、真封面）、`smoke-ui-home.png`（首页 Hero + 继续听 + 快捷收藏 + 常听艺术家 + 迷你条）、`smoke-ui-playlist.png`（歌单详情 + 胶囊迷你条）、`smoke-ui-player.png`（全屏播放浮层）。
+3. `scripts/preload-api-check.js` 50 条 `api.*` 链全解析；`playlist-sync-contract-test.js` 11/11；`daoliyu-contract-test.js` 7/7；聚合线路契约（9 条 / 4 平台 / 优先级序列）OK；`find src scripts -name '*.js'` 逐个 `node --check` 通过。
+4. 打包形态回归：`dist/win-unpacked/Primuse.exe --primuse-smoke` 退出码 0（见下）。
+
+### 19.6 这次踩到的流程教训
+
+**断言必须看渲染结果，不能看属性；截图必须有人眼看过。** 上一轮 19 项全绿的同时，用户看到的是一坨叠在一起的浮层 —— 因为我把"绿"当成了"对"。以后新增浮层，`overlayLeaks()` 会自动把没被真正隐藏的算失败。
+
+

@@ -1,8 +1,27 @@
 'use strict';
-/* Primuse 桌面版渲染层。只做视图与播放器编排，任何网络请求都在主进程。 */
+/*
+ * Primuse Windows 版渲染层 —— 结构照 iPhone 版（不是 macOS 版）逐屏抄：
+ *
+ *   外壳      ContentView.swift:579-617（TabView 四 tab：首页 / 资料库 / 搜索 / 设置）
+ *             ContentView.swift:2036-2053 + MiniPlayerView.swift:47-92（tab 上方 44pt 胶囊迷你条）
+ *   首页      HomeView.swift（Hero 一键开听 → 继续听 → 快捷收藏 → 我的歌单 → 常听艺术家 → 听歌统计条）
+ *   资料库    LibraryView.swift:495-587（「浏览资料库」图标行 + 计数 + 3 张叠封）
+ *   歌曲行    SongRowView.swift:281-509（封面 44 / 标题 subheadline / 副行 caption / 尾列 ⋯ 32）
+ *   搜索      SearchView.swift（search_prompt、最近搜索、结果分组，末组「全网聚合音乐」）
+ *   设置      SettingsView.swift:164-356（节：资料库 / 播放 / 外观 / 同步 / 关于）
+ *   音乐源    SourcesView.swift:589-940（源行进设置里，不在外层导航）
+ *   播放浮层  NowPlayingView.swift:2100-2350（覆盖层，不是路由；shuffle·prev·play.circle.fill(56)·next·repeat）
+ *   同步页    PlaylistSyncSettingsView.swift（文案 1:1，同步的是歌单结构不是歌曲源）
+ *
+ * 任何网络请求都在主进程；这里只做视图与播放器编排。
+ */
 
 const api = window.primuse;
 const audio = document.getElementById('audio');
+
+/* ── 常量 ─────────────────────────────── */
+
+const LIKED_PLAYLIST_ID = 'primuse.system.liked'; // MusicLibrary.swift:5138
 
 const PLATFORM_LABEL = {
   all: '全部',
@@ -12,44 +31,112 @@ const PLATFORM_LABEL = {
   kuwo: '酷我',
   bilibili: 'Bili',
   custom: '自定义',
+  server: '服务器',
 };
+
+/** FullscreenPlayerEffectSettings.swift:145-158 —— ThemeService 的 12 色板，顺序与命名照抄 */
+const ACCENT_SWATCHES = [
+  ['147d8a', '青'],
+  ['2aaa8a', '翠绿'],
+  ['1f8a5b', '森绿'],
+  ['0a84ff', '蓝'],
+  ['5e5ce6', '靛'],
+  ['af52de', '紫'],
+  ['ff2d55', '品红'],
+  ['e8453c', '朱'],
+  ['c96442', '赭'],
+  ['ff9500', '橙'],
+  ['d4a017', '金'],
+  ['5e6b87', '石板'],
+];
+
+/** ThemeService.swift:61-62 + Assets AccentColor：默认强调色浅色 #147D8A / 深色 #54C79E */
+const DEFAULT_ACCENT_LIGHT = '#147d8a';
+const DEFAULT_ACCENT_DARK = '#54c79e';
+
+const SORT_OPTIONS = [
+  ['added', '添加日期'],
+  ['title', '标题'],
+  ['artist', '艺术家'],
+  ['album', '专辑'],
+  ['duration', '时长'],
+  ['source', '来源日期'],
+];
+
+const TABS = [
+  ['home', '首页', 'house.fill'],
+  ['library', '资料库', 'books.vertical'],
+  ['search', '搜索', 'magnifyingglass'],
+  ['settings', '设置', 'gearshape'],
+];
+
+/* ── 状态 ─────────────────────────────── */
 
 const state = {
   meta: null,
-  route: 'home',
+
+  // 导航：每个 tab 一条自己的栈（iPhone 的 TabView + NavigationStack）
+  tab: 'home',
+  stacks: { home: ['root'], library: ['root'], search: ['root'], settings: ['root'] },
+
   sources: [],
   servers: [],
   favorites: [],
   playlists: [],
   playlistView: null,
-  sheet: null,
-  menu: null,
   history: [],
+  detailSongs: [], // 专辑 / 艺术家页的当前曲目
+
   results: [],
   searching: false,
   progress: null,
-  filter: 'all',
   keyword: '',
+  filter: 'all', // 搜索结果里的平台筛选 chip
+  scope: 'aggregated', // 搜索范围：本机资料库 ⇄ 全网聚合
+  searchHistory: [],
+
   queue: [],
   order: [],
   index: -1,
+  playing: false,
   repeat: 'off',
   shuffle: false,
   volume: 0.8,
+
   lyrics: null,
   lyricRows: [],
   lyricIndex: -1,
-  drawer: null,
+
+  playerOpen: false,
+  playerView: null, // null | 'lyrics'
+  queueOpen: false,
+  seekDrag: null,
+  playerError: null,
+  lastResolve: null, // { kind, upstream, at } —— 播放浮层底部那行「来自哪条线路」
+  idCopied: false,
+
+  sheet: null,
+  menu: null, // 'playlist:<id>' 之类的行内菜单
+  npMenu: false,
+
+  selection: null, // { list, keys:Set } —— 批量选择态
+  sort: { key: 'added', asc: false },
+
   serverView: { sourceID: null, items: [], total: 0, skip: 0, filter: '', loading: false, error: null },
   form: null,
+  formServerId: null,
+  formError: null,
+  formResult: null,
+
   settings: {},
+  theme: { mode: 'automatic', accent: '', coverDriven: true, lyricScale: 1, resolvedAccent: '' },
+
   sync: null,
   syncBusy: false,
   syncError: null,
   syncResult: null,
+  syncDevices: [],
 };
-
-const LIKED_PLAYLIST_ID = 'primuse.system.liked'; // MusicLibrary.swift:5138
 
 /* ── 小工具 ───────────────────────────── */
 
@@ -61,6 +148,53 @@ function fmtTime(seconds) {
   const s = Math.max(0, Math.floor(Number(seconds) || 0));
   const m = Math.floor(s / 60);
   return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function fmtDate(ms) {
+  const n = Number(ms);
+  if (!n) return '';
+  const d = new Date(n);
+  const pad = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function fmtDateTime(ms) {
+  const n = Number(ms);
+  if (!n) return '';
+  return new Date(n).toLocaleString('zh-Hans-CN', { hour12: false });
+}
+
+/** iPhone 的相对时间（歌单副标题「N 首歌曲 · 3 天前」） */
+function fmtRelative(ms) {
+  const n = Number(ms);
+  if (!n) return '';
+  const days = Math.floor((Date.now() - n) / 86400000);
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days < 7) return `${days} 天前`;
+  if (days < 30) return `${Math.floor(days / 7)} 周前`;
+  if (days < 365) return `${Math.floor(days / 30)} 个月前`;
+  return fmtDate(n);
+}
+
+/** HomeView 的时段问候（home_hero_narrative_*） */
+function greeting(count) {
+  const h = new Date().getHours();
+  const n = count || 0;
+  if (h < 5) return `今晚, 你的资料库里藏着 ${n} 个故事`;
+  if (h < 12) return `早上好, 你的资料库里有 ${n} 个故事`;
+  if (h < 18) return `下午好, 你的资料库里有 ${n} 个故事`;
+  return `晚上好, 你的资料库里藏着 ${n} 个故事`;
+}
+
+const trackKey = (t) => `${t.kind || 'aggregated'}:${t.sourceID || t.platform}:${t.rawID}`;
+
+function isFavorite(track) {
+  return state.favorites.some((t) => trackKey(t) === trackKey(track));
+}
+
+function currentTrack() {
+  return state.queue[state.index] || null;
 }
 
 function coverOf(track) {
@@ -87,13 +221,135 @@ function toast(message, bad = false) {
   }, bad ? 4200 : 2200);
 }
 
-const trackKey = (t) => `${t.kind || 'aggregated'}:${t.sourceID || t.platform}:${t.rawID}`;
-
-function isFavorite(track) {
-  return state.favorites.some((t) => trackKey(t) === trackKey(track));
+let persistTimer = null;
+function persistSoon() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    api.queue.save({ items: state.queue, index: state.index });
+    api.player.save({ volume: state.volume, repeat: state.repeat, shuffle: state.shuffle });
+  }, 600);
 }
 
-// MARK: - 歌单读取（真源在主进程 store，渲染层只拿快照）
+function saveThemeSoon() {
+  clearTimeout(saveThemeSoon.timer);
+  saveThemeSoon.timer = setTimeout(() => {
+    api.settings.save({ theme: state.theme, searchHistory: state.searchHistory });
+  }, 400);
+}
+
+/* ── 主题（ThemeService.swift:61-62 + 封面取色）───────── */
+
+function rgbToHsv(r, g, b) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  return { h, s: max === 0 ? 0 : d / max, v: max };
+}
+
+function hsvToHex(h, s, v) {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  const seg = Math.floor(h / 60) % 6;
+  const [r, g, b] = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][seg];
+  const to = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+/** WCAG 相对亮度 —— 原版用它决定强调色上的文字是黑是白（阈值 0.179） */
+function contrastOn(hexColor) {
+  const n = hexColor.replace('#', '');
+  const ch = (i) => parseInt(n.slice(i, i + 2), 16) / 255;
+  const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const l = 0.2126 * lin(ch(0)) + 0.7152 * lin(ch(2)) + 0.0722 * lin(ch(4));
+  return l > 0.179 ? '#0a0a0c' : '#ffffff';
+}
+
+function isDarkNow() {
+  if (state.theme.mode === 'dark') return true;
+  if (state.theme.mode === 'light') return false;
+  return Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+function applyAccent(hex) {
+  const root = document.documentElement;
+  const color = hex || (isDarkNow() ? DEFAULT_ACCENT_DARK : DEFAULT_ACCENT_LIGHT);
+  const rgb = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  root.style.setProperty('--accent', color);
+  root.style.setProperty('--accent-soft', `rgba(${rgb.join(', ')}, 0.14)`);
+  root.style.setProperty('--accent-soft-2', `rgba(${rgb.join(', ')}, 0.24)`);
+  root.style.setProperty('--on-accent', contrastOn(color));
+}
+
+function applyAppearance() {
+  const root = document.documentElement;
+  if (state.theme.mode === 'automatic') root.removeAttribute('data-appearance');
+  else root.setAttribute('data-appearance', state.theme.mode);
+  applyAccent(state.theme.resolvedAccent || state.theme.accent || '');
+}
+
+/**
+ * defaultCoverDrivenAccent = true：界面氛围色取自封面主色。
+ * 算法照 CoverPalette：40×40 降采样 → 24 个色相桶 → 过滤 s≥0.24 且 0.10<v<0.95 → 权重 s²·(0.55+0.45v)
+ * → 命中色归一到 S∈[0.35,0.92]、V∈[0.50,0.85]。
+ * 跨域封面会污染 canvas，getImageData 抛 SecurityError → 退回用户设定色，不炸界面。
+ */
+function refreshAccentFromArtwork(url) {
+  if (!state.theme.coverDriven || !url) {
+    state.theme.resolvedAccent = '';
+    applyAccent(state.theme.accent || '');
+    return;
+  }
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    try {
+      const cv = document.createElement('canvas');
+      cv.width = 40;
+      cv.height = 40;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, 40, 40);
+      const data = ctx.getImageData(0, 0, 40, 40).data;
+      const buckets = new Array(24).fill(0).map(() => ({ w: 0, h: 0, s: 0, v: 0 }));
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] < 200) continue;
+        const px = rgbToHsv(data[i] / 255, data[i + 1] / 255, data[i + 2] / 255);
+        if (px.s < 0.24 || px.v <= 0.1 || px.v >= 0.95) continue;
+        const b = buckets[Math.min(23, Math.floor(px.h / 15))];
+        const w = px.s * px.s * (0.55 + 0.45 * px.v);
+        b.w += w;
+        b.h += px.h * w;
+        b.s += px.s * w;
+        b.v += px.v * w;
+      }
+      const best = buckets.reduce((a, b) => (b.w > (a ? a.w : -1) ? b : a), null);
+      if (!best || best.w <= 0) throw new Error('no-swatch');
+      const hex = hsvToHex(
+        best.h / best.w,
+        Math.min(0.92, Math.max(0.35, best.s / best.w)),
+        Math.min(0.85, Math.max(0.5, best.v / best.w))
+      );
+      state.theme.resolvedAccent = hex;
+      applyAccent(hex);
+      if (state.playerOpen) $('player-bg').style.setProperty('--ambient', hex);
+    } catch {
+      // 多数第三方 CDN 不发 Access-Control-Allow-Origin，canvas 被污染读不回像素
+      state.theme.resolvedAccent = '';
+      applyAccent(state.theme.accent || '');
+    }
+  };
+  img.onerror = () => applyAccent(state.theme.accent || '');
+  img.src = url;
+}
+
+/* ── 歌单读取（真源在主进程 store，渲染层只拿快照）──────── */
 
 function playlistById(id) {
   return state.playlists.find((p) => p.id === id) || null;
@@ -109,17 +365,9 @@ function inPlaylist(id, track) {
   return playlistSongs(id).some((t) => trackKey(t) === key);
 }
 
-function fmtDate(ms) {
-  const n = Number(ms);
-  if (!n) return '';
-  const d = new Date(n);
-  const pad = (x) => String(x).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
 function playlistSubtitle(p) {
-  const when = fmtDate(p.updatedAt || p.createdAt);
-  return `${p.songs.length} 首${when ? ` · ${when}` : ''}`;
+  const when = fmtRelative(p.updatedAt || p.createdAt);
+  return `${p.songs.length} 首歌曲${when ? ` · ${when}` : ''}`;
 }
 
 async function reloadPlaylists() {
@@ -138,447 +386,1549 @@ function playlistError(res) {
   return true;
 }
 
-let persistTimer = null;
-function persistSoon() {
-  clearTimeout(persistTimer);
-  persistTimer = setTimeout(() => {
-    api.queue.save({ items: state.queue, index: state.index });
-    api.player.save({ volume: state.volume, repeat: state.repeat, shuffle: state.shuffle });
-  }, 600);
-}
-
-/* ── 视图 ─────────────────────────────── */
-
-function songRow(track, listRef, idx) {
-  const key = trackKey(track);
-  const currentKey = state.queue[state.index] ? trackKey(state.queue[state.index]) : null;
-  const playing = key === currentKey;
-  const badge =
-    track.kind === 'server'
-      ? `<span class="badge server">${esc(track.sourceName || '服务器源')}</span>`
-      : `<span class="badge ${esc(track.platform)}">${esc(PLATFORM_LABEL[track.platform] || track.platform)}</span>`;
-  const unresolved = track.unresolved ? '<span class="badge unresolved" title="同步下来的是歌单结构，本机没有这台服务器源">无对应源</span>' : '';
-  const cover = coverOf(track);
-  const ref = `${esc(listRef)}:${idx}`;
-  const rowActions =
-    listRef === 'currentPlaylist'
-      ? `<button class="icon-btn" data-next="${ref}" title="接下来播放">⇥</button>
-      <button class="icon-btn" data-remove-from-playlist="${ref}" title="从歌单中移除">✕</button>`
-      : '';
-  return `<tr data-play="${ref}" class="${playing ? 'playing' : ''}">
-    <td class="col-play"><button class="icon-btn" data-play="${ref}">${playing ? '▮▮' : '▶'}</button></td>
-    <td style="width:44px">${cover ? `<img class="mini-cover" src="${esc(cover)}" loading="lazy">` : '<span class="mini-cover"></span>'}</td>
-    <td>${esc(track.title)}</td>
-    <td>${esc(track.artist || '')}</td>
-    <td>${esc(track.album || '')}</td>
-    <td class="col-flags">${badge}${unresolved}</td>
-    <td class="muted">${track.duration ? fmtTime(track.duration) : '--:--'}</td>
-    <td class="col-flags"><button class="icon-btn ${isFavorite(track) ? 'on' : ''}" data-fav="${ref}">${isFavorite(track) ? '♥' : '♡'}</button>
-      <button class="icon-btn" data-queue="${ref}">＋队列</button>
-      <button class="icon-btn" data-add-to-playlist="${ref}" title="添加到歌单">＋歌单</button>${rowActions}</td>
-  </tr>`;
-}
-
-function songTable(tracks, listRef, emptyText) {
-  if (!tracks.length) return `<p class="muted">${esc(emptyText)}</p>`;
-  return `<table class="songs"><thead><tr>
-      <th></th><th></th><th>标题</th><th>艺人</th><th>专辑</th><th>平台</th><th>时长</th><th></th>
-    </tr></thead><tbody>${tracks.map((t, i) => songRow(t, listRef, i)).join('')}</tbody></table>`;
-}
-
-function viewHome() {
-  const enabled = state.sources.filter((s) => s.isEnabled).length;
-  const perPlatform = {};
-  for (const s of state.sources) {
-    if (!s.isEnabled) continue;
-    perPlatform[s.platform] = (perPlatform[s.platform] || 0) + 1;
-  }
-  const serverCards = state.servers
-    .map((s) => `<div class="card"><b>${esc(s.name || s.host)}</b><span>${esc(s.host)}${s.port ? `:${s.port}` : ''} · ${s.useSSL ? 'https' : 'http'}</span><div class="row" style="margin-top:8px"><button data-nav="server:${esc(s.id)}">打开曲库</button><button class="ghost" data-nav="addServer:${esc(s.id)}">编辑</button></div></div>`)
-    .join('');
-
-  return `<h2>发现</h2><p class="sub">在线聚合音源开箱即用，本 App 没有账号、也没有登录墙。</p>
-    <div class="cards">
-      <div class="card"><b>在线聚合线路</b><span>${enabled} / ${state.sources.length} 条已启用</span>
-        <div class="row" style="margin-top:8px"><button data-nav="online">管理线路</button><button data-nav="search">去搜索</button></div></div>
-      <div class="card"><b>我喜欢</b><span>${state.favorites.length} 首</span><div class="row" style="margin-top:8px"><button data-nav="favorites">打开</button></div></div>
-      <div class="card"><b>歌单</b><span>${visiblePlaylists().length} 个 · 云端${state.sync && state.sync.lastBackupAt ? '已备份' : '未备份'}</span><div class="row" style="margin-top:8px"><button data-nav="playlists">打开</button><button class="ghost" data-sync-backup="1">上传歌单</button></div></div>
-      <div class="card"><b>最近播放</b><span>${state.history.length} 首</span><div class="row" style="margin-top:8px"><button data-nav="history">打开</button></div></div>
-      <div class="card"><b>服务器型源</b><span>${state.servers.length} 台已配置</span><div class="row" style="margin-top:8px"><button data-nav="addServer">添加道理鱼 / 服务器源</button></div></div>
-    </div>
-    <h2 style="font-size:16px">平台可用性</h2>
-    <p class="sub">每个平台的线路数（多线路会按优先级自动降级重试）。</p>
-    <div class="cards">${['qq', 'netease', 'kugou', 'kuwo', 'bilibili']
-      .map((p) => `<div class="card"><b>${esc(PLATFORM_LABEL[p])}</b><span>${perPlatform[p] || 0} 条线路</span><div class="row" style="margin-top:8px"><button data-platform-search="${p}">搜索</button></div></div>`)
-      .join('')}</div>
-    ${serverCards ? `<h2 style="font-size:16px">我的服务器源</h2><div class="cards">${serverCards}</div>` : ''}`;
-}
-
-function viewSearch() {
-  const counts = {};
-  for (const t of state.results) counts[t.platform] = (counts[t.platform] || 0) + 1;
-  const tabs = ['all', ...Object.keys(PLATFORM_LABEL).filter((p) => p !== 'all' && counts[p])]
-    .map((p) => `<button class="tab ${state.filter === p ? 'active' : ''}" data-filter="${p}">${PLATFORM_LABEL[p]}${p === 'all' ? ` (${state.results.length})` : ` (${counts[p]})`}</button>`)
-    .join('');
-
-  const filtered = filteredResults();
-  const head = state.searching
-    ? `<p class="sub">正在并发打 ${state.sources.filter((s) => s.isEnabled).length} 条线路…已探测 ${state.progress ? state.progress.done : 0}/${state.progress ? state.progress.total : '?'} 条，先回来的 ${state.results.length} 条已上屏</p>`
-    : `<p class="sub">${state.keyword ? `“${esc(state.keyword)}” 共 ${state.results.length} 条` : '输入关键词开始搜索'}</p>`;
-
-  return `<h2>搜索</h2>${head}<div class="tabs">${tabs}</div>
-    ${state.results.length ? songTable(filtered, 'results', '') : `<p class="muted">搜索结果来自内置的 9 条聚合线路（与 iPhone 版同一份清单）。若某平台一直为空，可在「在线聚合线路」里换线路或调优先级。</p>`}`;
-}
-
-function filteredResults() {
-  return state.filter === 'all' ? state.results : state.results.filter((t) => t.platform === state.filter);
-}
-
-function viewFavorites() {
-  return viewPlaylistFor(LIKED_PLAYLIST_ID, '我喜欢');
-}
-
 function visiblePlaylists() {
-  // PlaylistListView.swift:36-38 —— 歌单总览过滤掉「我喜欢」，它走侧栏的固定入口。
+  // PlaylistListView.swift:36-38 —— 歌单总览过滤掉「我喜欢」，它走固定入口。
   return state.playlists.filter((p) => !p.isSystem);
 }
 
-/**
- * PlaylistArtworkView 的取图规则（PrimuseKit/.../Playlist.swift:169-227）：
- * 不是"取第一首"，而是用 playlist.id + 排序后的成员 ID 做稳定哈希来排名挑一张。
- * 这里保留"稳定"这个关键性质（同一歌单每次打开封面不变、两端一致），用 FNV-1a 取模实现。
- */
-function playlistCover(p) {
+/* ── 资料库（本机留存 = 我喜欢 + 歌单成员 + 最近播放）───── */
+
+function libraryTracks() {
+  const seen = new Map();
+  const push = (t, addedAt) => {
+    if (!t || !t.rawID) return;
+    const k = trackKey(t);
+    if (!seen.has(k)) seen.set(k, { ...t, addedAt: Number(addedAt) || 0 });
+    else if ((Number(addedAt) || 0) > seen.get(k).addedAt) seen.get(k).addedAt = Number(addedAt) || 0;
+  };
+  for (const f of state.favorites) push(f, f.addedAt || f.playedAt || Date.now());
+  for (const h of state.history) push(h.track || h, h.playedAt);
+  for (const p of state.playlists) for (const s of p.songs || []) push(s, p.updatedAt);
+  return [...seen.values()];
+}
+
+function sortedLibrary() {
+  const { key, asc } = state.sort;
+  const cmp = {
+    added: (a, b) => a.addedAt - b.addedAt,
+    title: (a, b) => String(a.title).localeCompare(String(b.title), 'zh-Hans-CN'),
+    artist: (a, b) => String(a.artist || '').localeCompare(String(b.artist || ''), 'zh-Hans-CN'),
+    album: (a, b) => String(a.album || '').localeCompare(String(b.album || ''), 'zh-Hans-CN'),
+    duration: (a, b) => (a.duration || 0) - (b.duration || 0),
+    source: (a, b) => a.addedAt - b.addedAt,
+  }[key];
+  return libraryTracks().sort((a, b) => (asc ? cmp(a, b) : -cmp(a, b)));
+}
+
+function groupBy(list, pick) {
+  const map = new Map();
+  for (const t of list) {
+    const k = String(pick(t) || '').trim();
+    if (!k) continue;
+    if (!map.has(k)) map.set(k, { name: k, songs: [], cover: coverOf(t) || null, artist: t.artist || '' });
+    const g = map.get(k);
+    g.songs.push(t);
+    if (!g.cover) g.cover = coverOf(t);
+    if (!g.artist && t.artist) g.artist = t.artist;
+  }
+  return [...map.values()].sort((a, b) => b.songs.length - a.songs.length || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+}
+
+const albumsOf = () => groupBy(libraryTracks(), (t) => t.album);
+const artistsOf = () => groupBy(libraryTracks(), (t) => t.artist);
+
+function weekStats() {
+  const since = Date.now() - 7 * 86400000;
+  const rows = state.history.filter((h) => Number(h.playedAt) >= since);
+  return {
+    count: new Set(rows.map((h) => trackKey(h))).size,
+    days: new Set(rows.map((h) => fmtDate(h.playedAt))).size,
+    seconds: rows.reduce((n, h) => n + (Number(h.playedSeconds) || Number(h.duration) || 0), 0),
+  };
+}
+
+/* ── 列表访问（data-* 里的 "listRef:index" 靠它解析）───── */
+
+function filteredResults() {
+  if (state.scope === 'library') {
+    const q = state.keyword.toLowerCase();
+    return libraryTracks().filter((t) => `${t.title} ${t.artist} ${t.album}`.toLowerCase().includes(q));
+  }
+  if (state.filter === 'all') return state.results;
+  return state.results.filter((t) => (t.platform || 'server') === state.filter);
+}
+
+const LISTS = {
+  results: () => filteredResults(),
+  library: () => sortedLibrary(),
+  liked: () => state.favorites,
+  history: () => state.history,
+  queue: () => state.queue,
+  serverView: () => state.serverView.items,
+  currentPlaylist: () => (state.playlistView ? state.playlistView.songs : []),
+  detail: () => state.detailSongs,
+  forYou: () => libraryTracks().slice(0, 12),
+};
+
+function listOf(ref) {
+  const fn = LISTS[ref];
+  return fn ? fn() : [];
+}
+
+function trackAt(ref) {
+  const [list, idx] = String(ref).split(':');
+  return listOf(list)[Number(idx)] || null;
+}
+
+/* ── 导航 ─────────────────────────────── */
+
+function pageRef() {
+  // 每个 tab 一条独立导航栈（iPhone NavigationStack）。栈永远至少装着 root：
+  // 少了这层兜底，一次错误的 stacks 赋值会让整块内容渲染不出来。
+  let stack = state.stacks[state.tab];
+  if (!Array.isArray(stack) || !stack.length) {
+    stack = ['root'];
+    state.stacks[state.tab] = stack;
+  }
+  return stack[stack.length - 1];
+}
+
+/** 'root' | 'songs' | 'playlist:<id>' | 'server:<id>' | 'album:<n>' … */
+function parsePage(ref) {
+  const i = ref.indexOf(':');
+  return i < 0 ? { name: ref, arg: '' } : { name: ref.slice(0, i), arg: ref.slice(i + 1) };
+}
+
+const LIBRARY_PAGES = ['songs', 'albums', 'album', 'artists', 'artist', 'playlists', 'playlist', 'liked', 'history', 'stats'];
+const SETTINGS_PAGES = ['sources', 'lines', 'server', 'editServer', 'sync', 'appearance', 'about'];
+
+function tabOfPage(name) {
+  if (LIBRARY_PAGES.includes(name)) return 'library';
+  if (SETTINGS_PAGES.includes(name)) return 'settings';
+  return 'home';
+}
+
+function push(page) {
+  state.stacks[state.tab].push(page);
+  state.selection = null;
+  render();
+}
+
+function pop() {
+  const stack = state.stacks[state.tab];
+  if (stack.length > 1) stack.pop();
+  state.selection = null;
+  render();
+}
+
+/** 原版从首页/资料库跳详情 = push；跨 tab 的跳转先切 tab 再 push */
+function open(page, opts = {}) {
+  const target = opts.tab || tabOfPage(parsePage(page).name);
+  if (state.tab !== target) {
+    state.tab = target;
+    state.stacks[target] = ['root', page];
+    state.selection = null;
+    render();
+  } else {
+    push(page);
+  }
+}
+
+function switchTab(tab) {
+  if (state.tab === tab) {
+    state.stacks[tab] = ['root']; // 再点一次回根页（原版行为）
+    render();
+    return;
+  }
+  state.tab = tab;
+  render();
+  if (tab === 'search') {
+    const input = $('search-input');
+    if (input) input.focus();
+  }
+}
+
+/* ── 视图碎片 ─────────────────────────── */
+
+const num = (n) => Number(n || 0).toLocaleString('zh-Hans-CN');
+
+function bgStyle(url) {
+  return url ? ` style="background-image:url('${esc(url)}')"` : '';
+}
+
+function badgeOf(track) {
+  if (track.kind === 'server') return `<span class="badge server">${esc(track.sourceName || '服务器源')}</span>`;
+  return `<span class="badge ${esc(track.platform || 'netease')}">${esc(PLATFORM_LABEL[track.platform] || track.platform || '')}</span>`;
+}
+
+const unresolvedBadge = '<span class="badge unresolved" title="同步下来的是歌单结构，本机没有这台服务器源">无对应源</span>';
+
+/** 导航条：根页用 large title，push 进来的页用 inline + 返回（iOS NavigationBar 的两种形态） */
+function navBar({ title, lead = '', large = false, backLabel = '返回', trailing = '' }) {
+  if (large) {
+    return `<div class="navbar"><div class="navbar-large"><span class="ttl">${esc(title)}</span>${
+      lead ? `<span class="lead">${esc(lead)}</span>` : ''
+    }${trailing}</div></div>`;
+  }
+  return `<div class="navbar"><div class="navbar-inline">
+      <button class="back" data-back="1">${icon('chevron.left')}<span>${esc(backLabel)}</span></button>
+      <span class="ttl">${esc(title)}</span>${trailing}
+    </div></div>`;
+}
+
+function emptyState({ icon: name, title, desc, action }) {
+  return `<div class="empty-state">${icon(name)}<div class="t">${esc(title)}</div><div class="d">${esc(desc)}</div>${action || ''}</div>`;
+}
+
+/** SongRowView.swift:281-509：封面 44 圆角 6 → 标题 subheadline + 副行 caption → 尾列角标与 ⋯ */
+function songRow(track, listRef, idx) {
+  const key = trackKey(track);
+  const cur = currentTrack();
+  const playing = cur && trackKey(cur) === key;
+  const selected = state.selection && state.selection.list === listRef && state.selection.keys.has(key);
+  const cover = coverOf(track);
+  const ref = `${listRef}:${idx}`;
+  const parts = [track.artist || '未知艺术家'];
+  if (track.album) parts.push(track.album);
+  if (track.duration) parts.push(fmtTime(track.duration));
+  const sub = parts.map((p) => esc(p)).join('<span class="dot">·</span>');
+  const check = state.selection
+    ? `<span class="row-check">${icon(selected ? 'checkmark.circle.fill' : 'checkmark.circle')}</span>`
+    : '';
+  return `<div class="song-row${playing ? ' playing' : ''}${selected ? ' selected' : ''}" data-play="${ref}">
+    <div class="song-cover${playing ? ' is-playing' : ''}"${bgStyle(cover)}>${
+      playing && state.playing ? '<span class="wave"><i></i><i></i><i></i></span>' : ''
+    }</div>
+    ${check}
+    <div class="cols"><div class="song-title">${esc(track.title)}</div><div class="song-sub">${sub}</div></div>
+    <div class="song-tail">${track.unresolved ? unresolvedBadge : badgeOf(track)}
+      <button class="song-more" data-row-menu="${esc(ref)}" title="更多">${icon('ellipsis')}</button>
+    </div>
+  </div>`;
+}
+
+function songList(tracks, listRef, empty) {
+  if (!tracks.length) return empty || '';
+  return `<div class="section-list">${tracks
+    .map((t, i) => songRow(t, listRef, i))
+    .join('<div class="list-divider"></div>')}</div>`;
+}
+
+/** PlaylistArtworkView 的取图规则（PrimuseKit/.../Playlist.swift:169-227）：
+ *  不是"取第一首"，而是用 playlist.id + 排序后的成员 ID 做稳定哈希挑一张 —— 两端一致、每次打开不变。 */
+function playlistCoverURL(p) {
   const candidates = (p.songs || []).map(coverOf).filter(Boolean);
-  if (!candidates.length) return '<span class="pl-cover">♪</span>';
+  if (!candidates.length) return null;
   const basis = `${p.id}|${(p.songs || []).map((t) => trackKey(t)).sort().join(',')}`;
   let hash = 0x811c9dc5;
   for (let i = 0; i < basis.length; i += 1) {
     hash ^= basis.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  const url = candidates[hash % candidates.length];
-  return `<span class="pl-cover"><img class="pl-cover" src="${esc(url)}" loading="lazy" alt=""></span>`;
+  return candidates[hash % candidates.length];
 }
 
-function viewPlaylists() {
-  const list = visiblePlaylists();
-  const rows = list
-    .map(
-      (p) => `<div class="playlist-row" data-nav="playlist:${esc(p.id)}">
-        ${playlistCover(p)}
-        <div>
-          <div class="pl-name">${esc(p.name)}</div>
-          <div class="pl-sub">${esc(playlistSubtitle(p))}</div>
-        </div>
-        <div class="pl-count">${p.songs.length} 首</div>
-        <div class="row" style="justify-content:flex-end">
-          <button class="icon-btn" data-play-playlist="${esc(p.id)}" title="全部播放">▶</button>
-          <button class="icon-btn" data-nav="playlist:${esc(p.id)}" title="打开">›</button>
-        </div>
-      </div>`
-    )
-    .join('');
-
-  const empty = `<p class="muted">没有歌单<br>创建歌单来整理你的音乐。<button class="ghost small" data-new-playlist="1">新建歌单</button></p>`;
-
-  return `<p class="eyebrow">资料库</p><h2>歌单</h2>
-    <p class="sub">${list.length ? `${list.length} 个歌单 · 共 ${list.reduce((n, p) => n + p.songs.length, 0)} 首` : '创建歌单来整理你的音乐'}</p>
-    <div class="row" style="margin-bottom:14px">
-      <button data-new-playlist="1">新建歌单</button>
-      <button class="ghost" data-sync-backup="1">上传歌单</button>
-      <button class="ghost" data-sync-restore="1">下载歌单</button>
-      <button class="ghost" data-import-file="1">导入歌单</button>
-      <button class="ghost" data-nav="sync">歌单同步</button>
-    </div>
-    ${list.length ? rows : empty}`;
+function coverSpan(p, cls) {
+  const url = p.id === LIKED_PLAYLIST_ID ? (state.favorites.map(coverOf).find(Boolean) || null) : playlistCoverURL(p);
+  return `<div class="${cls}"${bgStyle(url)}>${url ? '' : '♪'}</div>`;
 }
 
-function viewPlaylist() {
-  return viewPlaylistFor(state.playlistView ? state.playlistView.id : LIKED_PLAYLIST_ID);
+function playlistRow(p) {
+  return `<div class="pl-row" data-page="${p.id === LIKED_PLAYLIST_ID ? 'liked' : `playlist:${esc(p.id)}`}">
+    ${coverSpan(p, 'pl-cover')}
+    <div class="pl-body"><div class="pl-name">${esc(p.name)}</div><div class="pl-sub">${esc(playlistSubtitle(p))}</div></div>
+    <span class="chev">${icon('chevron.right')}</span>
+  </div>`;
 }
 
-function viewPlaylistFor(id, fallbackName) {
-  const p = id === LIKED_PLAYLIST_ID
-    ? { id, name: fallbackName || '我喜欢', isSystem: true, songs: state.favorites, updatedAt: 0 }
-    : playlistById(id) || { id, name: '找不到歌单', songs: [] };
-  const menuOpen = state.menu === `playlist:${p.id}`;
-  // PlaylistDetailView.swift:287-363 的 ellipsis 菜单顺序。
-  // 省略项：更换封面 / 选择（批量）/ 刮削缺失元数据 —— 前两项依赖本地封面文件与多选态，
-  // 第三项是 iPhone 的元数据刮削，Windows 版没有本地歌曲表，不适用。
-  const menu = menuOpen
-    ? `<div class="menu-pop">
-        <button data-reorder="1">重新排序</button>
-        <button data-queue-playlist="1">加入播放队列</button>
-        <button data-next-playlist="1">接下来播放</button>
-        ${p.isSystem ? '' : '<button data-rename-playlist="1">重命名</button>'}
-        <button data-pl-export="1">导出</button>
-        ${p.isSystem ? '' : `<button class="danger" data-remove-playlist="1">删除歌单</button>`}
+/** 行内 ⋯ 菜单（.menu 容器 + .menu-pop 绝对定位）；条目 HTML 由 menuButtons 统一生成 */
+function menuPop(open, items, cls = '') {
+  if (!open) return '';
+  return `<div class="menu-pop ${cls}">${menuButtons(items)}</div>`;
+}
+
+function menuItem(attr, label, opts = {}) {
+  return { attr, label, ...opts };
+}
+
+/* ── 首页（HomeView.swift 的分区顺序）────────────────── */
+
+function pageHome() {
+  const library = libraryTracks();
+  if (!library.length) {
+    return (
+      navBar({ title: '首页', large: true }) +
+      `<div class="page-body">${emptyState({
+        icon: 'music.note',
+        title: '欢迎使用猿音',
+        desc: '在设置中添加音乐源，开始构建你的音乐库',
+        action: `<button class="pill prominent" data-page="sources">${icon('externaldrive')}<span>音乐源管理</span></button>`,
+      })}${heroForAggregated()}</div>`
+    );
+  }
+
+  const heroCovers = library
+    .slice(0, 4)
+    .map((t) => coverOf(t))
+    .filter(Boolean);
+  const rotates = [-10, -3, 5, 12];
+  const art = heroCovers.length
+    ? `<div class="hero-art">${heroCovers
+        .map(
+          (u, i) =>
+            `<span style="background-image:url('${esc(u)}');left:${i * 15}px;top:${i % 2 ? 6 : 2}px;transform:rotate(${rotates[i % 4]}deg);z-index:${i}"></span>`
+        )
+        .join('')}</div>`
+    : '';
+
+  const recent = state.history.slice(0, 12);
+  const playlists = visiblePlaylists().slice(0, 4);
+  const artists = artistsOf().slice(0, 8);
+  const albums = albumsOf().slice(0, 8);
+  const wk = weekStats();
+  const hours = wk.seconds >= 3600 ? `${Math.floor(wk.seconds / 3600)} 小时` : `${Math.round(wk.seconds / 60)} 分钟`;
+
+  const continueRow = recent.length
+    ? `<div class="section">
+        <div class="section-head"><h3>继续听</h3><button class="more" data-page="history">全部</button></div>
+        <div class="hscroll">${recent
+          .map(
+            (t, i) => `<div class="hcard" data-play="history:${i}">
+              <div class="song-cover"${bgStyle(coverOf(t))}></div>
+              <div class="cols"><div class="song-title">${esc(t.title)}</div><div class="song-sub">${esc(t.artist || '')}</div></div>
+            </div>`
+          )
+          .join('')}</div>
       </div>`
     : '';
 
-  return `<p class="eyebrow">${p.isSystem ? '音乐库' : '歌单'}</p><h2>${esc(p.name)}</h2>
-    <p class="sub">${p.songs.length} 首歌曲${p.isSystem ? ' · 点心形即收藏' : ` · ${esc(fmtDate(p.updatedAt || p.createdAt))}`}</p>
-    <div class="row" style="margin-bottom:14px">
-      <button data-play-playlist="${esc(p.id)}">全部播放</button>
-      <button class="ghost" data-shuffle-playlist="${esc(p.id)}">随机播放</button>
-      <div class="menu">
-        <button class="ghost" data-pl-menu="${esc(p.id)}">⋯</button>
-        ${menu}
+  const quick = `<div class="section">
+      <div class="section-head"><h3>快捷收藏</h3></div>
+      <div class="qa-grid">
+        <div class="qa-item" data-page="liked"><div class="art"${bgStyle(state.favorites.map(coverOf).find(Boolean))}>${
+          state.favorites.map(coverOf).find(Boolean) ? '' : icon('heart.fill')
+        }</div><div class="nm">我喜欢</div></div>
+        <div class="qa-item" data-page="playlists"><div class="art">${icon('music.note.list')}</div><div class="nm">歌单</div></div>
+        <div class="qa-item" data-page="albums"><div class="art"${bgStyle(albums[0] ? albums[0].cover : '')}>${
+          albums[0] && albums[0].cover ? '' : icon('square.stack')
+        }</div><div class="nm">专辑</div></div>
+        <div class="qa-item" data-page="artists"><div class="art"${bgStyle(artists[0] ? artists[0].cover : '')}>${
+          artists[0] && artists[0].cover ? '' : icon('person.2')
+        }</div><div class="nm">艺术家</div></div>
+        <div class="qa-item" data-page="history"><div class="art">${icon('clock')}</div><div class="nm">最近播放</div></div>
+        <div class="qa-item" data-page="sources"><div class="art">${icon('externaldrive')}</div><div class="nm">音乐源</div></div>
       </div>
-    </div>
-    ${p.songs.length
-      ? songTable(p.songs, 'currentPlaylist', '')
-      : `<p class="muted">这首歌单还是空的。在搜索结果里点「＋歌单」，或在服务器源列表里加入。</p>`}`;
-}
+    </div>`;
 
-function viewSync() {
-  const cfg = state.sync || {};
-  const devices = state.syncDevices || [];
-  return `<h2>歌单同步</h2>
-    <p class="sub">同步的是<b>歌单结构</b>（歌单名与曲目元数据），不是歌曲源。音频仍在播放瞬间由本机线路解析：内置聚合线路或你自建的服务器型源。</p>
-    ${state.syncBusy ? '<p class="sub">正在与云端通信…</p>' : ''}
-    ${state.syncError ? `<p class="err">${esc(state.syncError)}</p>` : ''}
-    ${state.syncResult ? `<p class="ok">${esc(state.syncResult)}</p>` : ''}
-    <form class="grid" id="sync-form">
-      <label>服务器端点 (API URL)</label><input name="serverURL" value="${esc(cfg.serverURL || '')}" placeholder="${esc(cfg.defaultServerURL || '')}">
-      <label>设备名称</label><input name="deviceName" value="${esc(cfg.deviceName || '')}">
-      <label>本机唯一标识 (机器码)</label><input value="${esc(cfg.deviceId || '尚未生成')}" readonly>
-      <label>最近备份时间</label><input value="${esc(cfg.lastBackupAt ? new Date(cfg.lastBackupAt).toLocaleString('zh-Hans-CN') : '从未备份')}" readonly>
-      <div></div>
-      <div class="row">
-        <button type="submit">保存</button>
-        <button type="button" data-sync-backup="1">立即备份到云端（上传歌单）</button>
-        <button type="button" data-sync-restore="1">从云端恢复歌单（拉取同步）</button>
-        <button type="button" class="ghost" data-sync-devices="1">查看云端设备列表 / 跨设备导入</button>
-      </div>
-    </form>
-    <p class="sub">备份会将当前设备的所有自建歌单及曲目上传至云端；恢复会从云端拉取已保存的歌单并合并到本地。<br>
-    本机用自己的机器码备份，<b>不会</b>覆盖 iPhone 那台设备的数据。</p>
-    ${devices.length
-      ? `<h2 style="font-size:16px">云端设备</h2><table class="songs"><thead><tr><th>设备</th><th>平台</th><th>歌单</th><th>歌曲</th><th>更新于</th><th></th></tr></thead><tbody>${devices
+  const plSection = `<div class="section">
+      <div class="section-head"><h3>我的歌单</h3><button class="more" data-page="playlists">全部</button></div>
+      ${
+        playlists.length
+          ? `<div class="section-list">${playlists.map(playlistRow).join('<div class="list-divider"></div>')}</div>`
+          : `<p class="hint">还没有歌单。<button class="ghost" data-new-playlist="1">新建歌单</button></p>`
+      }
+    </div>`;
+
+  const artistSection = artists.length
+    ? `<div class="section">
+        <div class="section-head"><h3>常听艺术家</h3></div>
+        <div class="hscroll">${artists
           .map(
-            (d) => `<tr><td>${esc(d.device_name || d.device_id)}</td><td>${esc(d.platform || '')}</td><td class="muted">${d.playlist_count}</td><td class="muted">${d.song_count}</td><td class="muted">${esc(fmtDate(d.updated_at))}</td>
-              <td>${d.device_id === cfg.deviceId ? '<span class="badge">本机</span>' : `<button class="ghost small" data-sync-import="${esc(d.device_id)}">下载它的歌单</button>`}</td></tr>`
+            (a) => `<div class="qa-item" data-page="artist:${esc(a.name)}" style="width:76px">
+              <div class="art" style="width:64px;height:64px;border-radius:50%;${a.cover ? `background-image:url('${esc(a.cover)}')` : ''}">${
+              a.cover ? '' : icon('person.2')
+            }</div><div class="nm">${esc(a.name)}</div>
+            </div>`
           )
-          .join('')}</tbody></table>`
-      : ''}`;
-}
+          .join('')}</div>
+      </div>`
+    : '';
 
-function viewHistory() {
-  return `<h2>最近播放</h2><p class="sub">${state.history.length} 首。<button class="ghost small" data-clear-history="1">清空</button></p>${songTable(state.history, 'history', '还没有播放记录。')}`;
-}
+  const albumSection = albums.length
+    ? `<div class="section">
+        <div class="section-head"><h3>最近添加专辑</h3><button class="more" data-page="albums">全部</button></div>
+        <div class="hscroll">${albums
+          .map(
+            (a) => `<div class="hcard" data-page="album:${esc(a.name)}" style="width:150px">
+              <div class="song-cover"${bgStyle(a.cover)}></div>
+              <div class="cols"><div class="song-title">${esc(a.name)}</div><div class="song-sub">${a.songs.length} 首</div></div>
+            </div>`
+          )
+          .join('')}</div>
+      </div>`
+    : '';
 
-function viewOnline() {
-  const rows = state.sources
-    .map(
-      (s) => `<div class="line-item">
-        <div><div class="name">${esc(s.name)}</div><div class="muted" style="font-size:11px">${esc(s.baseURL)}</div></div>
-        <div><span class="badge ${esc(s.platform)}">${PLATFORM_LABEL[s.platform] || s.platform}</span></div>
-        <div class="muted">${esc(s.protocolType)}</div>
-        <div class="muted">p${s.priority}</div>
-        <div class="row">
-          <button class="ghost small" data-toggle-source="${esc(s.id)}">${s.isEnabled ? '停用' : '启用'}</button>
+  const statRow = `<div class="section">
+      <div class="stat-bar" data-page="stats">
+        <div class="sico" style="background:var(--accent)">${icon('chart.bar')}</div>
+        <div style="flex:1"><div class="t">本周已听 ${num(wk.count)} 首 · ${hours}</div>
+        <div class="s">${num(library.length)} 首在库 · ${num(visiblePlaylists().length)} 个歌单 · ${wk.days} 天有听</div></div>
+        <span class="chev">${icon('chevron.right')}</span>
+      </div>
+    </div>`;
+
+  return (
+    navBar({ title: '首页', large: true, trailing: `<button class="bar-btn ghost" data-page="stats">${icon('chart.bar')}</button>` }) +
+    `<div class="page-body">
+      <div class="hero">
+        <div class="hero-top">
+          <div class="hero-text"><div class="hero-greet">${esc(greeting(library.length))}</div><div class="hero-title">一键开听整个资料库</div></div>
+          ${art}
         </div>
+        <div class="hero-actions">
+          <button class="btn-prominent" data-library-shuffle="1">随机播放</button>
+          <button class="btn-bordered" data-library-play="1">全部播放</button>
+        </div>
+      </div>
+      ${continueRow}${quick}${plSection}${artistSection}${albumSection}${statRow}
+    </div>`
+  );
+}
+
+/** 资料库为空时首页仍要能开听 —— 聚合线路不依赖本地库（SearchView.swift:486-487） */
+function heroForAggregated() {
+  return `<div class="section">
+      <div class="section-head"><h3>全网聚合搜索</h3></div>
+      <p class="hint">输入歌曲名或歌手，即可直接搜索并畅听全网聚合音乐</p>
+      <div class="actions-row"><button class="pill prominent" data-tab="search">${icon('magnifyingglass')}<span>去搜索</span></button>
+      <button class="pill" data-page="lines">${icon('sparkles')}<span>聚合音乐源设置</span></button></div>
+    </div>`;
+}
+
+/* ── 资料库（LibraryView.swift:495-587 的 hub）────────── */
+
+const HUB_ROWS = [
+  ['songs', '歌曲', 'music.note', '#0a84ff', (s) => `${num(s.library)} 首歌曲`],
+  ['albums', '专辑', 'square.stack', '#af52de', (s) => `${num(s.albums)} 张专辑`],
+  ['artists', '艺术家', 'person.2', '#ff9500', (s) => `${num(s.artists)} 位艺术家`],
+  ['playlists', '歌单', 'music.note.list', '#1f8a5b', (s) => `${num(s.playlists)} 个歌单`],
+  ['liked', '我喜欢', 'heart.fill', '#ff2d55', (s) => `${num(s.favorites)} 首歌曲`],
+  ['history', '最近播放', 'clock', '#5e6b87', (s) => `${num(s.history)} 首歌曲`],
+  ['stats', '听歌统计', 'chart.bar', '#147d8a', (s) => `本周 ${num(s.week)} 首`],
+];
+
+function pageLibrary() {
+  const library = libraryTracks();
+  const albums = albumsOf();
+  const artists = artistsOf();
+  const counts = {
+    library: library.length,
+    albums: albums.length,
+    artists: artists.length,
+    playlists: visiblePlaylists().length,
+    favorites: state.favorites.length,
+    history: state.history.length,
+    week: weekStats().count,
+  };
+  const coversFor = (ref) => {
+    if (ref === 'songs') return library.slice(0, 3).map(coverOf);
+    if (ref === 'albums') return albums.slice(0, 3).map((a) => a.cover);
+    if (ref === 'artists') return artists.slice(0, 3).map((a) => a.cover);
+    if (ref === 'playlists') return visiblePlaylists().slice(0, 3).map(playlistCoverURL);
+    if (ref === 'liked') return state.favorites.slice(0, 3).map(coverOf);
+    if (ref === 'history') return state.history.slice(0, 3).map(coverOf);
+    return [];
+  };
+
+  const rows = HUB_ROWS.map(([ref, name, iconName, color, fmt]) => {
+    const stack = coversFor(ref)
+      .filter(Boolean)
+      .map((u) => `<span${bgStyle(u)}></span>`)
+      .join('');
+    return `<div class="hub-row" data-page="${ref}">
+      <div class="hub-ico" style="background:${color}">${icon(iconName)}</div>
+      <div style="flex:1;min-width:0"><div class="hub-name">${name}</div><div class="hub-count">${esc(fmt(counts))}</div></div>
+      <div class="hub-stack">${stack}</div><span class="chev">${icon('chevron.right')}</span>
+    </div>`;
+  }).join('');
+
+  const sources = state.servers
+    .map(
+      (s) => `<div class="hub-row" data-page="server:${esc(s.id)}">
+        <div class="hub-ico" style="background:#c96442">${icon('globe')}</div>
+        <div style="flex:1;min-width:0"><div class="hub-name">${esc(s.name || s.host)}</div>
+          <div class="hub-count">服务器型源 · ${esc(s.host)}${s.port ? `:${s.port}` : ''}</div></div>
+        <span class="chev">${icon('chevron.right')}</span>
       </div>`
     )
     .join('');
 
-  const latency = state.sources.filter((s) => s.latencyMs > 0).length;
-  return `<h2>在线聚合线路</h2>
-    <p class="sub">与 iPhone 版 <code>AggregatedSourceStore.defaultSources</code> 同一份清单（9 条）。线路挂了可以自己加，不用等发版。</p>
-    <div class="row" style="margin-bottom:14px">
-      <button data-ping-all="1">检测全部延迟${latency ? `（已测 ${latency} 条）` : ''}</button>
-      <button class="ghost" data-add-source="1">添加线路</button>
-      <button class="ghost" data-reset-sources="1">恢复默认 9 条</button>
-    </div>
-    ${state.form === 'addSource' ? addSourceForm() : ''}
-    ${rows}`;
+  return (
+    navBar({ title: '资料库', large: true, lead: `${num(counts.library)} 首 · ${num(counts.playlists)} 个歌单` }) +
+    `<div class="page-body">
+      <div class="section"><div class="section-head"><h3>浏览资料库</h3></div><div class="hub">${rows}</div></div>
+      ${
+        sources
+          ? `<div class="section"><div class="section-head"><h3>我的音乐源</h3><button class="more" data-page="sources">管理</button></div>
+             <div class="hub">${sources}</div></div>`
+          : `<div class="section"><div class="section-head"><h3>我的音乐源</h3></div>
+             <p class="hint">资料库目前只有本机收藏与歌单里的歌。添加自建服务器源（道理鱼）后可以整库浏览。</p>
+             <div class="actions-row"><button class="pill" data-page="editServer">${icon('plus')}<span>添加音乐源</span></button></div></div>`
+      }
+    </div>`
+  );
 }
 
-function addSourceForm() {
-  return `<form class="grid" id="source-form">
-    <label>名称</label><input name="name" placeholder="例：网易云 (我的备用线路)" required>
-    <label>地址</label><input name="baseURL" placeholder="https://xxx/api.php 或 http://ip/path" required>
-    <label>平台</label><select name="platform">${['netease', 'qq', 'kugou', 'kuwo', 'bilibili']
-      .map((p) => `<option value="${p}">${PLATFORM_LABEL[p]}</option>`)
-      .join('')}</select>
-    <label>协议</label><select name="protocolType">${['meting', 'hyw', 'nxinxz', 'openApi']
-      .map((p) => `<option value="${p}">${p}</option>`)
-      .join('')}</select>
-    <label>优先级</label><input name="priority" type="number" value="5" min="0" max="99">
-    <div></div><div class="row"><button type="submit">保存</button><button type="button" class="ghost" data-cancel-form="1">取消</button></div>
-  </form>`;
+/* ── 歌曲 / 专辑 / 艺术家 ─────────────────────────── */
+
+function pageSongs() {
+  const tracks = sortedLibrary();
+  const sortOpen = state.menu === 'sort';
+  const items = [
+    { head: '排序方式' },
+    ...SORT_OPTIONS.map(([key, label]) => menuItem(`data-sort="${key}"`, label, { mark: state.sort.key === key ? (state.sort.asc ? '↑' : '↓') : '' })),
+    '-',
+    menuItem('data-select-mode="library"', '选择'),
+    menuItem('data-play-all-of="library"', '全部播放'),
+    menuItem('data-shuffle-all-of="library"', '随机播放'),
+  ];
+  const trailing = `<div class="menu bar-menu">
+      <button class="bar-btn" data-menu="sort">${icon('line.3.horizontal.decrease.circle')}</button>
+      ${menuPop(sortOpen, items, 'right')}
+    </div>`;
+
+  const head = `<div class="section-head"><h3>${num(tracks.length)} 首</h3></div>`;
+  return (
+    navBar({ title: '歌曲', trailing }) +
+    `<div class="page-body">${
+      tracks.length ? `${head}${songList(tracks, 'library')}` : emptyState({ icon: 'music.note', title: '没有歌曲', desc: '添加音乐源以开始使用', action: `<button class="pill" data-page="sources">${icon('externaldrive')}<span>音乐源管理</span></button>` })
+    }</div>`
+  );
 }
 
-function viewServerNew() {
-  const editing = state.formServerId ? state.servers.find((s) => s.id === state.formServerId) : null;
-  const v = (key, fallback = '') => (editing ? editing[key] ?? fallback : fallback);
-  return `<h2>${editing ? '编辑服务器源' : '添加服务器源'}</h2>
-    <p class="sub">地址、账号、密码只保存在本机（密码走 Windows DPAPI / safeStorage 加密），不会发到任何聊天或第三方。iPhone 版同一个道理。</p>
-    ${state.formError ? `<p class="err">${esc(state.formError)}</p>` : ''}
-    ${state.formResult ? `<p class="ok">${esc(state.formResult)}</p>` : ''}
-    <form class="grid" id="server-form">
-      <label>类型</label><select name="kind"><option value="daoliyu"${v('kind', 'daoliyu') === 'daoliyu' ? ' selected' : ''}>道理鱼 DaoLiYu</option></select>
-      <label>名称</label><input name="name" value="${esc(v('name', '我的道理鱼'))}">
-      <label>地址 host</label><input name="host" value="${esc(v('host'))}" placeholder="例 music.example.com 或 192.168.1.20" required>
-      <label>端口</label><input name="port" value="${esc(v('port') || '')}" placeholder="留空按 http/https 默认">
-      <label>使用 https</label><select name="useSSL"><option value="0"${v('useSSL') ? '' : ' selected'}>否</option><option value="1"${v('useSSL') ? ' selected' : ''}>是</option></select>
-      <label>子路径 basePath</label><input name="basePath" value="${esc(v('basePath'))}" placeholder="例 /music（留空表示根路径）">
-      <label>用户名</label><input name="username" value="${esc(v('username'))}" required>
-      <label>密码</label><input name="password" type="password" placeholder="${editing && v('hasPassword') ? '已保存，留空表示不修改' : ''}">
-      <label>自签名证书</label><select name="insecureTLS"><option value="0"${v('insecureTLS') ? '' : ' selected'}>校验（默认）</option><option value="1"${v('insecureTLS') ? ' selected' : ''}>忽略（自签名 https 才需要）</option></select>
-      <div></div>
-      <div class="row">
-        <button type="button" data-test-server="1">测试连接</button>
-        <button type="submit">保存</button>
-        ${editing ? `<button type="button" class="ghost" data-remove-server="${esc(editing.id)}">删除</button>` : ''}
+function pageAlbums() {
+  const albums = albumsOf();
+  const rows = albums
+    .map(
+      (a) => `<div class="pl-row" data-page="album:${esc(a.name)}">
+        <div class="pl-cover"${bgStyle(a.cover)}>${a.cover ? '' : '♪'}</div>
+        <div class="pl-body"><div class="pl-name">${esc(a.name)}</div><div class="pl-sub">${esc(a.artist || '未知艺术家')} · ${a.songs.length} 首</div></div>
+        <span class="chev">${icon('chevron.right')}</span>
+      </div>`
+    )
+    .join('<div class="list-divider"></div>');
+  return (
+    navBar({ title: '专辑' }) +
+    `<div class="page-body">${
+      albums.length ? `<div class="section-list">${rows}</div>` : emptyState({ icon: 'square.stack', title: '没有专辑', desc: '添加音乐源以开始使用' })
+    }</div>`
+  );
+}
+
+function pageArtists() {
+  const artists = artistsOf();
+  const rows = artists
+    .map(
+      (a) => `<div class="pl-row" data-page="artist:${esc(a.name)}">
+        <div class="pl-cover" style="border-radius:50%;${a.cover ? `background-image:url('${esc(a.cover)}')` : ''}">${a.cover ? '' : icon('person.2')}</div>
+        <div class="pl-body"><div class="pl-name">${esc(a.name)}</div><div class="pl-sub">${a.songs.length} 首歌曲</div></div>
+        <span class="chev">${icon('chevron.right')}</span>
+      </div>`
+    )
+    .join('<div class="list-divider"></div>');
+  return (
+    navBar({ title: '艺术家' }) +
+    `<div class="page-body">${
+      artists.length ? `<div class="section-list">${rows}</div>` : emptyState({ icon: 'person.2', title: '没有艺术家', desc: '添加音乐源以开始使用' })
+    }</div>`
+  );
+}
+
+/** 专辑 / 艺术家详情：detail-hero（180 封面 + 名称 + 计数）+ 全部播放 / 随机播放 */
+function pageDetail(kind, name) {
+  const groups = kind === 'album' ? albumsOf() : artistsOf();
+  const g = groups.find((x) => x.name === name) || { name, songs: [], cover: null, artist: '' };
+  state.detailSongs = g.songs;
+  const sub = kind === 'album' ? esc(g.artist || '未知艺术家') : `${g.songs.length} 首歌曲`;
+  return (
+    navBar({ title: kind === 'album' ? '专辑' : '艺术家' }) +
+    `<div class="page-body">
+      <div class="detail-hero">
+        <div class="detail-cover" style="${kind === 'artist' ? 'border-radius:50%;' : ''}${
+          g.cover ? `background-image:url('${esc(g.cover)}')` : ''
+        }">${g.cover ? '' : icon(kind === 'album' ? 'square.stack' : 'person.2')}</div>
+        <div class="detail-name">${esc(g.name)}</div><div class="detail-sub">${sub}</div>
       </div>
-      <input type="hidden" name="id" value="${esc(v('id') || '')}">
+      <div class="detail-actions">
+        <button class="pill prominent" data-play-all-of="detail">${icon('play.fill')}<span>全部播放</span></button>
+        <button class="pill" data-shuffle-all-of="detail">${icon('shuffle')}<span>随机播放</span></button>
+        <button class="pill" data-select-mode="detail">${icon('checkmark.circle')}<span>选择</span></button>
+      </div>
+      ${songList(g.songs, 'detail')}
+    </div>`
+  );
+}
+
+/* ── 歌单（PlaylistListView / PlaylistDetailView）─────── */
+
+function likedAsPlaylist() {
+  const when = state.favorites.length ? Math.max(...state.favorites.map((t) => Number(t.addedAt) || 0)) : 0;
+  return { id: LIKED_PLAYLIST_ID, name: '我喜欢', isSystem: true, songs: state.favorites, createdAt: when, updatedAt: when };
+}
+
+function pagePlaylists() {
+  const list = visiblePlaylists();
+  const addOpen = state.menu === 'plAdd';
+  const items = [
+    menuItem('data-new-playlist="1"', '新建歌单', { icon: 'plus' }),
+    menuItem('data-import-file="1"', '导入歌单', { icon: 'tray.and.arrow.down' }),
+    '-',
+    menuItem('data-sync-backup="1"', '上传歌单（备份到云端）', { icon: 'square.and.arrow.up' }),
+    menuItem('data-sync-restore="1"', '下载歌单（从云端恢复）', { icon: 'arrow.clockwise' }),
+    menuItem('data-page="sync"', '歌单同步设置', { icon: 'globe' }),
+  ];
+  const trailing = `<div class="menu"><button class="bar-btn" data-menu="plAdd" title="歌单操作">${icon('plus')}</button>${menuPop(addOpen, items, 'right')}</div>`;
+
+  const rows = [playlistRow(likedAsPlaylist()), ...list.map(playlistRow)]
+    .join('<div class="list-divider"></div>');
+
+  return (
+    navBar({ title: '歌单', trailing }) +
+    `<div class="page-body">${
+      list.length
+        ? `<div class="section-list">${rows}</div>
+           <p class="hint">${list.length} 个歌单 · 共 ${num(list.reduce((n, p) => n + p.songs.length, 0))} 首 ·
+           云端备份：${state.sync && state.sync.lastBackupAt ? esc(fmtRelative(state.sync.lastBackupAt)) : '从未'}</p>`
+        : `${emptyState({ icon: 'music.note.list', title: '没有歌单', desc: '创建歌单来整理你的音乐', action: `<button class="pill prominent" data-new-playlist="1">${icon('plus')}<span>新建歌单</span></button>` })}
+           <div class="section-list">${rows}</div>`
+    }</div>`
+  );
+}
+
+function pagePlaylist(id) {
+  const p =
+    id === LIKED_PLAYLIST_ID
+      ? likedAsPlaylist()
+      : playlistById(id) || { id, name: '找不到歌单', songs: [], isSystem: false };
+  state.playlistView = p; // LISTS.currentPlaylist 读它
+
+  const menuOpen = state.menu === `playlist:${p.id}`;
+  // PlaylistDetailView.swift:287-363 的 ⋯ 菜单顺序。省略项：更换封面（要本地图）、
+  // 补齐缺失元数据（要本地歌曲表）、创建公开链接（要服务端分享域）—— Windows 侧不适用，写进方案文档。
+  const items = [
+    menuItem(`data-select-mode="currentPlaylist"`, '选择'),
+    p.songs.length >= 2 ? menuItem('data-reorder="1"', '重新排序') : null,
+    menuItem('data-queue-playlist="1"', '加入播放队列'),
+    menuItem('data-next-playlist="1"', '接下来播放'),
+    '-',
+    p.isSystem ? null : menuItem('data-rename-playlist="1"', '重命名'),
+    menuItem('data-pl-export="1"', '导出'),
+    '-',
+    p.isSystem ? null : menuItem('data-remove-playlist="1"', '删除歌单', { danger: true }),
+  ].filter(Boolean);
+
+  const menu = `<div class="menu"><button class="pill" data-pl-menu="${esc(p.id)}">${icon('ellipsis')}</button>${menuPop(
+    menuOpen,
+    items,
+    'right'
+  )}</div>`;
+
+  return (
+    navBar({ title: p.isSystem ? '我喜欢' : p.name }) +
+    `<div class="page-body">
+      <div class="detail-hero">
+        ${coverSpan(p, 'detail-cover')}
+        <div class="detail-name">${esc(p.name)}</div>
+        <div class="detail-sub">${p.songs.length} 首歌曲${p.isSystem ? ' · 点心形即收藏' : ` · ${esc(fmtDate(p.updatedAt || p.createdAt))}`}</div>
+      </div>
+      <div class="detail-actions">
+        <button class="pill prominent" data-play-playlist="${esc(p.id)}">${icon('play.fill')}<span>全部播放</span></button>
+        <button class="pill" data-shuffle-playlist="${esc(p.id)}">${icon('shuffle')}<span>随机播放</span></button>
+        ${menu}
+      </div>
+      ${
+        p.songs.length
+          ? songList(p.songs, 'currentPlaylist')
+          : emptyState({ icon: 'music.note', title: '这首歌单还是空的', desc: '在搜索结果里点「添加到歌单」，或在服务器源列表里加入' })
+      }
+    </div>`
+  );
+}
+
+function pageHistory() {
+  const trailing = state.history.length ? `<button class="bar-btn ghost" data-clear-history="1">清空</button>` : '';
+  return (
+    navBar({ title: '最近播放', trailing }) +
+    `<div class="page-body">${
+      state.history.length
+        ? songList(state.history, 'history')
+        : emptyState({ icon: 'clock', title: '还没有播放记录', desc: '随便放一首歌，这里就会开始记录' })
+    }</div>`
+  );
+}
+
+function pageStats() {
+  const wk = weekStats();
+  const library = libraryTracks();
+  const hours = wk.seconds >= 3600 ? `${(wk.seconds / 3600).toFixed(1)} 小时` : `${Math.round(wk.seconds / 60)} 分钟`;
+  const row = (label, value) =>
+    `<div class="srow"><span class="slabel">${esc(label)}</span><span class="svalue">${esc(value)}</span></div>`;
+  const top = artistsOf()
+    .slice(0, 5)
+    .map(
+      (a) => `<div class="srow"><span class="sico" style="background:var(--accent)">${icon('person.2')}</span>
+        <span class="slabel">${esc(a.name)}<div class="ssub">${a.songs.length} 首在库</div></span><span class="chev">${icon('chevron.right')}</span></div>`
+    )
+    .join('<div class="sdiv"></div>');
+
+  return (
+    navBar({ title: '听歌统计' }) +
+    `<div class="page-body">
+      <div class="settings-group"><div class="group-title">本周（近 7 天）</div><div class="group-card">
+        ${row('播放曲目', `${num(wk.count)} 首`)}
+        ${row('收听时长', hours)}
+        ${row('有听天数', `${wk.days} 天`)}
+      </div></div>
+      <div class="settings-group"><div class="group-title">本机资料库</div><div class="group-card">
+        ${row('歌曲', `${num(library.length)} 首`)}
+        ${row('我喜欢', `${num(state.favorites.length)} 首`)}
+        ${row('歌单', `${num(visiblePlaylists().length)} 个`)}
+        ${row('专辑', `${num(albumsOf().length)} 张`)}
+        ${row('艺术家', `${num(artistsOf().length)} 位`)}
+        ${row('播放记录', `${num(state.history.length)} 条`)}
+      </div></div>
+      <div class="settings-group"><div class="group-title">常听艺术家</div><div class="group-card">${
+        top || `<div class="srow"><span class="slabel muted">还没有足够播放记录</span></div>`
+      }</div></div>
+      <p class="hint">听满 30 秒以上的歌会自动计入统计。继续听一会再回来看看。</p>
+    </div>`
+  );
+}
+
+/* ── 搜索（SearchView.swift）────────────────────────── */
+
+function pageSearch() {
+  const clearing = state.keyword ? `<button class="search-clear" data-clear-search="1">${icon('xmark')}</button>` : '';
+  const bar = `<div class="searchbar"><div class="search-field">${icon('magnifyingglass')}
+      <input id="search-input" type="search" placeholder="歌曲、艺术家、专辑、歌词" autocomplete="off" spellcheck="false" value="${esc(
+        state.keyword
+      )}" />${clearing}</div></div>`;
+
+  const library = libraryTracks();
+  if (!state.keyword) {
+    const hist = state.searchHistory.length
+      ? `<div class="section">
+          <div class="section-head"><h3 style="font-size:var(--fs-footnote);color:var(--text-2);font-weight:600">最近搜索</h3>
+            <button class="more" data-clear-search-history="1">清除全部</button></div>
+          <div class="section-list">${state.searchHistory
+            .map(
+              (k) => `<div class="hist-row" data-history-search="${esc(k)}">${icon('clock')}<span>${esc(k)}</span>
+                <button class="x" data-del-search-history="${esc(k)}">${icon('xmark')}</button></div>`
+            )
+            .join('')}</div>
+        </div>`
+      : '';
+    const statsLine = library.length
+      ? `<p class="hint">${num(library.length)} 首歌曲 · ${num(albumsOf().length)} 专辑 · ${num(artistsOf().length)} 艺术家</p>`
+      : '';
+    const wall = library.length
+      ? ''
+      : `<div class="empty-state">${icon('sparkles')}<div class="t">全网聚合搜索</div>
+          <div class="d">输入歌曲名或歌手，即可直接搜索并畅听全网聚合音乐</div></div>`;
+    return navBar({ title: '搜索', large: true }) + `<div class="page-body">${bar}${hist}${statsLine}${wall}</div>`;
+  }
+
+  const counts = {};
+  for (const t of state.results) counts[t.platform] = (counts[t.platform] || 0) + 1;
+  const chips = `<div class="chips">
+      <button class="chip ${state.filter === 'all' ? 'active' : ''}" data-filter="all">全部 ${state.results.length}</button>
+      ${Object.keys(counts)
+        .map((p) => `<button class="chip ${state.filter === p ? 'active' : ''}" data-filter="${esc(p)}">${esc(PLATFORM_LABEL[p] || p)} ${counts[p]}</button>`)
+        .join('')}
+    </div>`;
+
+  // 计数跟着筛选走：筛到「网易 23」还写「63 条」是自相矛盾的证据
+  const rows = filteredResults();
+  const groupTitle = state.filter === 'all' ? '全网聚合音乐' : `${PLATFORM_LABEL[state.filter] || state.filter} · 聚合音乐`;
+  const head = `<div class="result-group">${icon('sparkles')}<span>${groupTitle}</span>
+      <span class="path">${state.searching ? `${rows.length} 条 · 正在搜索全网聚合音源...` : `${rows.length} 条`}</span></div>`;
+
+  return (
+    navBar({
+      title: '搜索',
+      large: true,
+      trailing: `<button class="bar-btn ghost" data-toggle-scope="1">${state.scope === 'aggregated' ? '全网聚合' : '本机范围'}</button>`,
+    }) +
+    `<div class="page-body">${bar}${chips}
+      ${head}${
+        rows.length
+          ? songList(rows, 'results')
+          : state.searching
+          ? `<p class="hint">正在搜索全网聚合音源...（已探测 ${state.progress ? state.progress.done : 0}/${
+              state.progress ? state.progress.total : '?'
+            } 条线路）</p>`
+          : emptyState({ icon: 'magnifyingglass', title: '未搜索到匹配歌曲', desc: '换个关键词，或在「聚合音乐源设置」里换线路' })
+      }
+      <p class="hint">${
+        state.searching ? `已探测 ${state.progress ? state.progress.done : 0}/${state.progress ? state.progress.total : '?'} 条，先回来的已上屏` : ''
+      }</p>
+    </div>`
+  );
+}
+
+/* ── 设置（SettingsView.swift:164-356 的节顺序）───────── */
+
+function srow({ icon: iconName, color = 'var(--accent)', label, sub, value = '', page = '', attr = '', chev = true, html = '' }) {
+  const inner = `<span class="sico" style="background:${color}">${icon(iconName)}</span>
+    <span class="slabel">${esc(label)}${sub ? `<div class="ssub">${esc(sub)}</div>` : ''}</span>
+    ${value ? `<span class="svalue">${esc(value)}</span>` : ''}${html}`;
+  const act = page ? `data-page="${esc(page)}"` : attr;
+  return `<div class="srow" ${act}>${inner}${chev && page ? `<span class="chev">${icon('chevron.right')}</span>` : ''}</div>`;
+}
+
+function group(title, rowsHtml) {
+  return `<div class="settings-group"><div class="group-title">${esc(title)}</div><div class="group-card">${rowsHtml}</div></div>`;
+}
+
+const switchOn = (on) => `<span class="switch${on ? ' on' : ''}"><i></i></span>`;
+
+function pageSettingsRoot() {
+  const cfg = state.sync || {};
+  const repeatLabel = state.repeat === 'one' ? '单曲循环' : state.repeat === 'all' ? '列表循环' : '顺序播放';
+  return (
+    navBar({ title: '设置', large: true }) +
+    `<div class="page-body">
+      ${group(
+        '资料库',
+        [
+          srow({ icon: 'externaldrive', label: '音乐源管理', value: `${state.servers.length} 个源`, page: 'sources' }),
+          srow({ icon: 'sparkles', color: '#af52de', label: '聚合音乐源设置', value: `${state.sources.filter((s) => s.isEnabled).length}/${state.sources.length} 条线路`, page: 'lines' }),
+          srow({ icon: 'plus', color: '#1f8a5b', label: '添加服务器源', sub: '道理鱼 DaoLiYu · 账号密码只存本机', page: 'editServer' }),
+          srow({ icon: 'clock', color: '#5e6b87', label: '最近播放', value: `${state.history.length} 条`, page: 'history' }),
+          srow({ icon: 'chart.bar', color: '#147d8a', label: '听歌统计', page: 'stats' }),
+        ].join('')
+      )}
+      ${group(
+        '播放',
+        [
+          srow({ icon: 'repeat', label: '播放模式', value: repeatLabel, attr: 'data-cycle-repeat="1"' }),
+          srow({ icon: 'shuffle', label: '随机播放', attr: 'data-switch-shuffle="1"', html: switchOn(state.shuffle), chev: false }),
+          srow({ icon: 'quote.bubble', label: '歌词面板自动跟随', attr: 'data-switch-lyrics-follow="1"', html: switchOn(state.settings.lyricsFollow !== false), chev: false }),
+          srow({
+            icon: 'speaker.wave.2.fill',
+            label: '音量',
+            attr: 'data-volume-row="1"',
+            html: `<input id="settings-volume" data-volume="1" type="range" min="0" max="1" step="0.01" value="${state.volume}" style="width:120px;accent-color:var(--accent)" />`,
+            chev: false,
+          }),
+        ].join('')
+      )}
+      ${group(
+        '外观',
+        [
+          srow({ icon: 'moon.zzz', label: '外观', value: state.theme.mode === 'automatic' ? '自动' : state.theme.mode === 'light' ? '浅色' : '深色', attr: 'data-cycle-appearance="1"' }),
+          srow({ icon: 'tag', label: '主题色', value: state.theme.accent ? `#${state.theme.accent.replace('#', '').toUpperCase()}` : '默认', page: 'appearance' }),
+          srow({ icon: 'wand.and.stars', label: '跟随封面氛围色', attr: 'data-switch-cover="1"', html: switchOn(state.theme.coverDriven), chev: false }),
+        ].join('')
+      )}
+      ${group(
+        '同步',
+        [
+          srow({
+            icon: 'globe',
+            color: '#0a84ff',
+            label: '歌单同步',
+            sub: '同步的是歌单结构，不是歌曲源',
+            value: cfg.lastBackupAt ? fmtRelative(cfg.lastBackupAt) : cfg.serverURL ? '已配置' : '未配置',
+            page: 'sync',
+          }),
+        ].join('')
+      )}
+      ${group(
+        '关于',
+        [
+          srow({ icon: 'info.circle', color: '#5e6b87', label: '版本', value: `${state.meta ? state.meta.version : ''} (${state.meta ? state.meta.build : ''})`, page: 'about' }),
+        ].join('')
+      )}
+      <p class="hint">关闭窗口时最小化到托盘 ${
+        state.settings.minimizeToTray === false ? '关' : '开'
+      } · 本地代理 ${esc(state.meta ? state.meta.proxyBaseUrl : '')}</p>
+      <div class="actions-row"><button class="pill" data-switch-tray="1">托盘${state.settings.minimizeToTray === false ? '：关' : '：开'}</button></div>
+    </div>`
+  );
+}
+
+function pageAppearance() {
+  const modes = [
+    ['automatic', '自动'],
+    ['light', '浅色'],
+    ['dark', '深色'],
+  ];
+  const scales = [
+    [0.85, '小'],
+    [1, '中'],
+    [1.2, '大'],
+    [1.5, '特大'],
+  ];
+  return (
+    navBar({ title: '外观' }) +
+    `<div class="page-body">
+      ${group(
+        '外观模式',
+        `<div class="srow">${modes
+          .map(
+            ([m, lab]) =>
+              `<button class="chip ${state.theme.mode === m ? 'active' : ''}" data-appearance="${m}" style="flex:1">${lab}</button>`
+          )
+          .join('')}</div>`
+      )}
+      ${group(
+        '主题色',
+        `<div class="swatches">${ACCENT_SWATCHES.map(
+          ([hex, name]) =>
+            `<button class="swatch${state.theme.accent === `#${hex}` ? ' active' : ''}" style="background:#${hex}" data-set-accent="${hex}" title="${name}"></button>`
+        ).join('')}</div>
+         <div class="srow" data-reset-accent="1"><span class="sico" style="background:var(--bg-3)">${icon('arrow.clockwise')}</span>
+           <span class="slabel">使用默认主题色</span><span class="svalue">${isDarkNow() ? '深色 #54C79E' : '浅色 #147D8A'}</span></div>`
+      )}
+      ${group(
+        '播放器',
+        [
+          srow({ icon: 'wand.and.stars', label: '跟随封面氛围色', attr: 'data-switch-cover="1"', html: switchOn(state.theme.coverDriven), chev: false }),
+          srow({ icon: 'info.circle', label: '跨域封面读不到像素时自动退回主题色', chev: false, html: '<span class="svalue">默认开启</span>' }),
+        ].join('')
+      )}
+      ${group(
+        '歌词字号',
+        `<div class="chips" style="padding:6px 14px 10px">${scales
+          .map(
+            ([s, lab]) => `<button class="chip ${Number(state.theme.lyricScale) === s ? 'active' : ''}" data-lyric-scale="${s}">${lab}</button>`
+          )
+          .join('')}</div>`
+      )}
+    </div>`
+  );
+}
+
+/* ── 音乐源（SourcesView.swift:589-940）──────────────── */
+
+function pageSources() {
+  const trailing = `<div class="menu"><button class="bar-btn" data-page="editServer" title="添加音乐源">${icon('plus')}</button></div>`;
+  const rows = state.servers
+    .map((s) => {
+      const menuOpen = state.menu === `source:${s.id}`;
+      const items = [
+        menuItem(`data-edit-server="${esc(s.id)}"`, '编辑'),
+        menuItem(`data-test-server-row="${esc(s.id)}"`, '音乐源体检'),
+        menuItem(`data-server-health="${esc(s.id)}"`, '深度扫描（重新载入整库）'),
+        '-',
+        menuItem(`data-remove-server="${esc(s.id)}"`, '删除', { danger: true }),
+      ];
+      return `<div class="srow" data-page="server:${esc(s.id)}" style="align-items:flex-start">
+          <span class="sico" style="background:var(--accent);width:38px;height:38px;border-radius:9px">${icon(s.useSSL ? 'globe' : 'wifi')}</span>
+          <span class="slabel">${esc(s.name || s.host)}
+            <div class="ssub">道理鱼 DaoLiYu · ${esc(s.username || '')}</div>
+            <div class="route-bar">${icon(s.useSSL ? 'globe' : 'wifi')}<code>${esc(`${s.useSSL ? 'https' : 'http'}://${s.host}${s.port ? `:${s.port}` : ''}${s.basePath || ''}`)}</code></div>
+          </span>
+          <span class="capsule">${s.id === state.serverView.sourceID && state.serverView.total ? num(state.serverView.total) : '整库'} 首</span>
+          <div class="menu"><button class="song-more" data-menu="source:${esc(s.id)}">${icon('ellipsis')}</button>${menuPop(menuOpen, items, 'right')}</div>
+        </div>`;
+    })
+    .join('<div class="sdiv"></div>');
+
+  const agg = `<div class="srow" data-page="lines" style="align-items:flex-start">
+      <span class="sico" style="background:linear-gradient(135deg,var(--accent),#af52de);width:38px;height:38px;border-radius:9px">${icon('sparkles')}</span>
+      <span class="slabel">聚合音乐源<div class="ssub">全网在线流媒体 · 无需账号</div>
+        <div class="route-bar">${icon('globe')}<span>当前使用</span><code>${state.sources.filter((s) => s.isEnabled).length} 条线路</code></div></span>
+      <span class="capsule">${state.sources.length} 条</span><span class="chev">${icon('chevron.right')}</span>
+    </div>`;
+
+  return (
+    navBar({ title: '音乐源', trailing }) +
+    `<div class="page-body">
+      ${group('本机源', `${agg}${state.servers.length ? `<div class="sdiv"></div>${rows}` : ''}`)}
+      ${
+        state.servers.length
+          ? ''
+          : `<p class="hint">没有服务器型音乐源。添加 NAS / 自建服务器（道理鱼）后，它的整库会出现在资料库与搜索范围里。</p>
+             <div class="actions-row"><button class="pill prominent" data-page="editServer">${icon('plus')}<span>添加音乐源</span></button></div>`
+      }
+    </div>`
+  );
+}
+
+function pageLines() {
+  const rows = state.sources
+    .map(
+      (s, i) => `<div class="srow" style="align-items:flex-start">
+        <span class="sico" style="background:${s.isEnabled ? 'var(--accent)' : 'var(--bg-3)'}">${icon(s.isEnabled ? 'network.browser' : 'moon.zzz')}</span>
+        <span class="slabel">${esc(s.name)}
+          <div class="ssub">${esc(PLATFORM_LABEL[s.platform] || s.platform)} · ${esc(s.protocolType)} · 优先级 ${s.priority}${
+          s.latencyMs ? ` · ${s.latencyMs}ms` : ''
+        }</div>
+          <div class="route-bar"><code>${esc(s.baseURL)}</code></div>
+        </span>
+        <div class="menu" style="margin-left:auto"><button class="song-more" data-menu="line:${esc(s.id)}">${icon('ellipsis')}</button>
+          ${menuPop(
+            state.menu === `line:${s.id}`,
+            [
+              menuItem(`data-toggle-source="${esc(s.id)}"`, s.isEnabled ? '停用' : '启用'),
+              menuItem(`data-ping-one="${esc(s.id)}"`, '测延迟'),
+              s.custom ? menuItem(`data-remove-source="${esc(s.id)}"`, '删除', { danger: true }) : null,
+            ].filter(Boolean),
+            'right'
+          )}</div>
+      </div>`
+    )
+    .join('<div class="sdiv"></div>');
+
+  return (
+    navBar({
+      title: '聚合音乐源设置',
+      trailing: `<button class="bar-btn" data-menu="addLine">${icon('plus')}</button>`,
+    }) +
+    `<div class="page-body">
+      <div class="actions-row">
+        <button class="pill" data-ping-all="1">${icon('speedometer')}<span>检测全部延迟</span></button>
+        <button class="pill" data-toggle-form="addSource">${icon('plus')}<span>添加线路</span></button>
+        <button class="pill" data-reset-sources="1">${icon('arrow.clockwise')}<span>恢复默认 9 条</span></button>
+      </div>
+      ${state.form === 'addSource' ? sourceForm() : ''}
+      ${group('线路', rows)}
+      <p class="hint">与 iPhone 版 <code>AggregatedSourceStore.defaultSources</code> 同一份清单（9 条）。线路挂了可以自己加，不用等发版。</p>
+    </div>`
+  );
+}
+
+function sourceForm() {
+  return `<form class="form" id="source-form">
+      <label class="field"><span>名称</span><input name="name" placeholder="例：网易云 (我的备用线路)" required></label>
+      <label class="field"><span>地址</span><input name="baseURL" placeholder="https://xxx/api.php 或 http://ip/path" required></label>
+      <label class="field"><span>平台</span><select name="platform">${['netease', 'qq', 'kugou', 'kuwo', 'bilibili']
+        .map((p) => `<option value="${p}">${PLATFORM_LABEL[p]}</option>`)
+        .join('')}</select></label>
+      <label class="field"><span>协议</span><select name="protocolType">${['meting', 'hyw', 'nxinxz', 'openApi']
+        .map((p) => `<option value="${p}">${p}</option>`)
+        .join('')}</select></label>
+      <label class="field"><span>优先级</span><input name="priority" type="number" value="5" min="0" max="99"></label>
+      <div class="actions-row"><button class="pill prominent" type="submit">保存</button>
+        <button class="pill" type="button" data-cancel-form="1">取消</button></div>
     </form>`;
 }
 
-function viewServerBrowse() {
-  const view = state.serverView;
-  const server = state.servers.find((s) => s.id === view.sourceID);
-  if (!server) return `<h2>服务器源</h2><p class="err">找不到该源，请重新添加。</p>`;
+function pageServerForm() {
+  const editing = state.formServerId ? state.servers.find((s) => s.id === state.formServerId) : null;
+  const v = (key, fallback = '') => (editing ? editing[key] ?? fallback : fallback);
+  const field = (label, html) => `<label class="field"><span>${label}</span>${html}</label>`;
+  return (
+    navBar({ title: editing ? '编辑音乐源' : '添加音乐源' }) +
+    `<div class="page-body">
+      ${state.formError ? `<div class="err">${esc(state.formError)}</div>` : ''}
+      ${state.formResult ? `<div class="ok">${esc(state.formResult)}</div>` : ''}
+      <form class="form" id="server-form">
+        ${field('类型', '<select name="kind"><option value="daoliyu">道理鱼 DaoLiYu</option></select>')}
+        ${field('名称', `<input name="name" value="${esc(v('name', '我的道理鱼'))}">`)}
+        ${field('地址 host', `<input name="host" value="${esc(v('host'))}" placeholder="例 music.example.com 或 192.168.1.20" required>`)}
+        ${field('端口', `<input name="port" value="${esc(v('port') || '')}" placeholder="留空按 http/https 默认">`)}
+        ${field('使用 https', `<select name="useSSL"><option value="0"${v('useSSL') ? '' : ' selected'}>否</option><option value="1"${
+          v('useSSL') ? ' selected' : ''
+        }>是</option></select>`)}
+        ${field('子路径 basePath', `<input name="basePath" value="${esc(v('basePath'))}" placeholder="例 /music（留空表示根路径）">`)}
+        ${field('用户名', `<input name="username" value="${esc(v('username'))}" required>`)}
+        ${field('密码', `<input name="password" type="password" placeholder="${editing && v('hasPassword') ? '已保存，留空表示不修改' : ''}">`)}
+        ${field('自签名证书', `<select name="insecureTLS"><option value="0"${v('insecureTLS') ? '' : ' selected'}>校验（默认）</option><option value="1"${
+          v('insecureTLS') ? ' selected' : ''
+        }>忽略（自签名 https 才需要）</option></select>`)}
+        <input type="hidden" name="id" value="${esc(v('id') || '')}">
+        <div class="actions-row">
+          <button class="pill" type="button" data-test-server="1">${icon('speedometer')}<span>测试连接</span></button>
+          <button class="pill prominent" type="submit">保存</button>
+          ${editing ? `<button class="pill" type="button" data-remove-server="${esc(editing.id)}">删除</button>` : ''}
+        </div>
+      </form>
+      <p class="hint">地址、账号、密码只保存在本机（密码走 Windows DPAPI / safeStorage 加密），不会发到任何聊天或第三方。iPhone 版同一个道理。</p>
+    </div>`
+  );
+}
 
+function pageServerBrowse(id) {
+  const server = state.servers.find((s) => s.id === id);
+  if (!server) return navBar({ title: '音乐源' }) + `<div class="page-body"><div class="err">找不到该源，请重新添加。</div></div>`;
+  const view = state.serverView;
   const filtered = view.filter
-    ? view.items.filter((t) =>
-        `${t.title} ${t.artist} ${t.album}`.toLowerCase().includes(view.filter.toLowerCase())
-      )
+    ? view.items.filter((t) => `${t.title} ${t.artist} ${t.album}`.toLowerCase().includes(view.filter.toLowerCase()))
     : view.items;
 
-  return `<h2>${esc(server.name || server.host)}</h2>
-    <p class="sub">${view.total ? `服务器共 ${view.total} 首` : '正在读取曲目列表'} · 已载入 ${view.items.length} 首 · 本 App 按 iPhone 的方式做整库分页（服务端 skip/take），搜索在已载入范围内过滤。</p>
-    <div class="row" style="margin-bottom:12px">
-      <input id="server-filter" placeholder="在已载入的曲目里过滤" value="${esc(view.filter)}" style="padding:7px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg-3);color:var(--text);min-width:260px">
-      <button data-load-more="1" ${view.loading ? 'disabled' : ''}>${view.loading ? '载入中…' : '继续载入下一页'}</button>
-      <button class="ghost" data-play-all="1">播放已载入全部</button>
-      <button class="ghost" data-nav="addServer:${esc(server.id)}">编辑源</button>
-    </div>
-    ${view.error ? `<p class="err">${esc(view.error)}</p>` : ''}
-    ${songTable(filtered, 'serverView', view.loading ? '正在载入…' : '还没有内容，点“继续载入下一页”。')}`;
+  return (
+    navBar({ title: server.name || server.host, trailing: `<button class="bar-btn ghost" data-page="editServer:${esc(server.id)}">编辑</button>` }) +
+    `<div class="page-body">
+      <div class="searchbar"><div class="search-field">${icon('magnifyingglass')}
+        <input id="server-filter" placeholder="在已载入的曲目里过滤" value="${esc(view.filter)}">${
+        view.filter ? `<button class="search-clear" data-clear-server-filter="1">${icon('xmark')}</button>` : ''
+      }</div></div>
+      <div class="actions-row">
+        <button class="pill" data-load-more="1" ${view.loading ? 'disabled' : ''}>${view.loading ? '载入中…' : '继续载入下一页'}</button>
+        <button class="pill prominent" data-play-all="1">${icon('play.fill')}<span>播放已载入全部</span></button>
+        <button class="pill" data-select-mode="serverView">${icon('checkmark.circle')}<span>选择</span></button>
+      </div>
+      <p class="hint">${view.total ? `服务器共 ${num(view.total)} 首` : '正在读取曲目列表'} · 已载入 ${num(view.items.length)} 首
+        · 整库分页由服务端 skip/take（与 iPhone 一致）</p>
+      ${view.error ? `<div class="err">${esc(view.error)}</div>` : ''}
+      ${songList(filtered, 'serverView', `<p class="hint">${view.loading ? '正在载入…' : '还没有内容，点「继续载入下一页」。'}</p>`)}
+    </div>`
+  );
 }
 
-function viewSettings() {
+/* ── 歌单同步（PlaylistSyncSettingsView.swift，文案 1:1）─ */
+
+function pageSync() {
   const cfg = state.sync || {};
-  return `<h2>设置</h2>
-    <p class="sub">Primuse 桌面版 ${esc(state.meta?.version || '')} · Windows ${esc(state.meta?.platform || '')} · 本地代理 ${esc(state.meta?.proxyBaseUrl || '')}</p>
-    <form class="grid" id="settings-form">
-      <label>关闭窗口时最小化到托盘</label><select name="minimizeToTray"><option value="1"${state.settings.minimizeToTray === false ? '' : ' selected'}>是</option><option value="0"${state.settings.minimizeToTray === false ? ' selected' : ''}>否</option></select>
-      <label>歌词面板自动跟随</label><select name="lyricsFollow"><option value="1"${state.settings.lyricsFollow === false ? '' : ' selected'}>是</option><option value="0"${state.settings.lyricsFollow === false ? ' selected' : ''}>否</option></select>
-      <div></div><div class="row"><button type="submit">保存设置</button></div>
-    </form>
-    <h2 style="font-size:16px">歌单同步</h2>
-    <p class="sub">${cfg.serverURL ? `服务器已配置：${esc(cfg.serverURL)}` : '未配置服务器'} · 机器码 ${esc(cfg.deviceId || '尚未生成')}<br>
-    最近备份：${esc(cfg.lastBackupAt ? new Date(cfg.lastBackupAt).toLocaleString('zh-Hans-CN') : '从未备份')}</p>
-    <div class="row" style="margin-bottom:16px">
-      <button data-nav="sync">设置同步服务器</button>
-      <button class="ghost" data-sync-backup="1">立即备份到云端（上传歌单）</button>
-      <button class="ghost" data-sync-restore="1">从云端恢复歌单（拉取同步）</button>
-    </div>
-    <h2 style="font-size:16px">这个包是未签名的</h2>
-    <p class="sub">首次运行 Windows 会弹 SmartScreen「未知发布者」——点「更多信息 → 仍要运行」。Mac 端对应的是 Gatekeeper 右键打开。</p>
-    <h2 style="font-size:16px">与 iPhone 版一致的地方 / 还差的地方</h2>
-    <p class="sub">一致：9 条聚合线路与优先级、四类协议（meting / hyw / nxinxz / openApi）的请求字段、道理鱼的登录与取流方式、无账号体系；
-    歌单（新建 / 删除 / 重命名 / 加入 / 移除 / 重新排序）、「我喜欢」系统歌单固定 id、云端歌单备份与恢复的接口契约、播放模式（随机 / 顺序 / 列表循环 / 单曲循环）。<br>
-    还差：本地文件与 SMB/NAS 扫描、CUE、scrobble、小组件、CloudKit 同步、AI 智能歌单与规则智能歌单（这些在 Windows 上要么换实现要么不适用）。</p>`;
+  const devices = state.syncDevices || [];
+  const copied = state.idCopied ? '✓' : '';
+  return (
+    navBar({ title: '歌单同步' }) +
+    `<div class="page-body">
+      ${state.syncBusy ? '<div class="hint">正在与云端通信…</div>' : ''}
+      ${state.syncError ? `<div class="err">${esc(state.syncError)}</div>` : ''}
+      ${state.syncResult ? `<div class="ok">${esc(state.syncResult)}</div>` : ''}
+      ${group(
+        '同步服务器',
+        [
+          srow({ icon: 'globe', label: '服务器端点 (API URL)', value: cfg.serverURL || '未设置', attr: 'data-edit-server-url="1"' }),
+          srow({ icon: 'plus', color: '#1f8a5b', label: cfg.serverURL ? '修改服务器地址' : '设置同步服务器', attr: 'data-edit-server-url="1"', chev: false, html: '<span class="svalue">›</span>' }),
+        ].join('')
+      )}
+      <p class="hint">服务部署在 Cloudflare Pages + D1（<code>primuse-sync-server</code>），与 iPhone 版共用同一个端点；不需要你重新部署。</p>
+      ${group(
+        '设备识别',
+        [
+          srow({ icon: 'person.2', label: '设备名称', value: cfg.deviceName || '未命名', attr: 'data-edit-device-name="1"' }),
+          `<div class="srow"><span class="sico" style="background:#5e6b87">${icon('info.circle')}</span>
+            <span class="slabel">本机唯一标识</span>
+            <span class="svalue" style="font-family:'Cascadia Mono',Consolas,monospace">${esc(cfg.deviceId || '尚未生成')}</span>
+            <button class="bar-btn" data-copy-id="1" title="复制">${copied ? icon('checkmark') : icon('square.and.arrow.up')}</button></div>`,
+        ].join('')
+      )}
+      ${group(
+        '歌单数据备份与恢复',
+        `<div class="srow" data-sync-backup="1"><span class="sico" style="background:var(--accent)">${icon('square.and.arrow.up')}</span>
+            <span class="slabel">立即备份到云端（上传歌单）</span><span class="chev">${icon('chevron.right')}</span></div>
+          <div class="sdiv"></div>
+          <div class="srow" data-sync-restore="1"><span class="sico" style="background:#1f8a5b">${icon('arrow.clockwise')}</span>
+            <span class="slabel">从云端恢复歌单（拉取同步）</span><span class="chev">${icon('chevron.right')}</span></div>
+          <div class="sdiv"></div>
+          <div class="srow"><span class="sico" style="background:#5e6b87">${icon('clock')}</span>
+            <span class="slabel">最近备份时间</span><span class="svalue">${esc(cfg.lastBackupAt ? fmtDateTime(cfg.lastBackupAt) : '从未备份')}</span></div>`
+      )}
+      <p class="hint">备份会将当前设备的所有自建歌单及曲目上传至云端；恢复会从云端拉取已保存的歌单并合并到本地。<br>
+        本机用自己的机器码备份，<b>不会</b>覆盖 iPhone 那台设备的数据。同步的是歌单结构，不是歌曲源。</p>
+      <div class="actions-row"><button class="pill" data-sync-devices="1">${icon('person.2')}<span>查看云端设备列表 / 跨设备导入</span></button></div>
+      ${
+        devices.length
+          ? group(
+              '云端设备',
+              devices
+                .map(
+                  (d) => `<div class="srow" ${d.device_id === cfg.deviceId ? '' : `data-sync-import="${esc(d.device_id)}"`}>
+                    <span class="sico" style="background:${d.device_id === cfg.deviceId ? 'var(--bg-3)' : '#0a84ff'}">${icon('moon.zzz')}</span>
+                    <span class="slabel">${esc(d.device_name || d.device_id)}
+                      <div class="ssub">${esc(d.platform || '')} · ${d.playlist_count} 个歌单 · ${d.song_count} 首 · ${esc(fmtRelative(d.updated_at))}</div></span>
+                    ${d.device_id === cfg.deviceId ? '<span class="capsule">本机</span>' : `<span class="svalue">下载它的歌单 ›</span>`}
+                  </div>`
+                )
+                .join('<div class="sdiv"></div>')
+            )
+          : ''
+      }
+    </div>`
+  );
 }
 
-/* ── 渲染 ─────────────────────────────── */
+function pageAbout() {
+  const m = state.meta || {};
+  return (
+    navBar({ title: '关于' }) +
+    `<div class="page-body">
+      ${group(
+        '版本',
+        [
+          srow({ icon: 'info.circle', color: '#5e6b87', label: '版本', value: m.version || '' , chev: false }),
+          srow({ icon: 'hammer' || 'info.circle', color: '#5e6b87', label: '构建', value: m.build ? `#${m.build}` : '', chev: false }),
+          srow({ icon: 'arrow.clockwise', color: '#1f8a5b', label: '检查更新', attr: 'data-open-releases="1"', chev: false, html: '<span class="svalue">GitHub Releases ›</span>' }),
+          srow({ icon: 'globe', color: '#0a84ff', label: 'GitHub 仓库', attr: 'data-open-repo="1"', chev: false, html: '<span class="svalue">›</span>' }),
+          srow({ icon: 'exclamationmark.triangle', color: '#e8453c', label: '功能建议与问题反馈', attr: 'data-open-issues="1"', chev: false, html: '<span class="svalue">›</span>' }),
+        ].join('')
+      )}
+      <p class="hint">这个包是未签名的。首次运行 Windows 会弹 SmartScreen「未知发布者」——点「更多信息 → 仍要运行」；Mac 端对应的是 Gatekeeper 右键打开。</p>
+      ${group(
+        '与 iPhone 版一致的地方',
+        `<div class="srow" style="align-items:flex-start"><span class="slabel" style="white-space:normal">
+          单列 + 底部四 tab 的外壳、tab 上方胶囊迷你条、全屏播放浮层（不是页面）；
+          9 条聚合线路与优先级、四类协议（meting / hyw / nxinxz / openApi）的请求字段、道理鱼的登录与取流方式、无账号体系；
+          歌单（新建 / 删除 / 重命名 / 加入 / 移除 / 重新排序）、「我喜欢」系统歌单固定 id、云端歌单备份与恢复的接口契约、
+          播放模式（随机 / 顺序 / 列表循环 / 单曲循环）。
+        </span></div>`
+      )}
+      ${group(
+        '这一端没有的',
+        `<div class="srow" style="align-items:flex-start"><span class="slabel" style="white-space:normal">
+          Apple Music / iCloud / CloudKit 同步、AirPlay 与 DLNA 投屏、Apple TV、Siri 与快捷指令、应用图标切换、家庭共享、
+          本地文件与 NAS 扫描、CUE、元数据刮削、AI 智能歌单 —— 要么依赖 Apple 体系，要么依赖本地音频文件，Windows 版不适用。
+        </span></div>`
+      )}
+    </div>`
+  );
+}
 
-const LIST_ACCESS = {
-  results: () => filteredResults(),
-  favorites: () => state.favorites,
-  history: () => state.history,
-  serverView: () => state.serverView.items,
-  queue: () => state.queue,
-  currentPlaylist: () => (state.playlistView ? state.playlistView.songs : []),
-};
+/* ── 渲染（外壳 + 屏）─────────────────── */
+
+const TAB_ICON = { home: 'house.fill', library: 'books.vertical', search: 'magnifyingglass', settings: 'gearshape' };
+
+function menuButtons(items) {
+  return items
+    .map((it) => {
+      if (it === '-') return '<div class="sep"></div>';
+      if (it.head) return `<div class="head">${esc(it.head)}</div>`;
+      return `<button ${it.attr}${it.danger ? ' class="danger"' : ''}>${it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}</span>${
+        it.mark ? `<span class="mark">${esc(it.mark)}</span>` : ''
+      }</button>`;
+    })
+    .join('');
+}
+
+function renderScreen() {
+  const { name, arg } = parsePage(pageRef());
+  if (name === 'root') {
+    if (state.tab === 'home') return pageHome();
+    if (state.tab === 'library') return pageLibrary();
+    if (state.tab === 'search') return pageSearch();
+    return pageSettingsRoot();
+  }
+  switch (name) {
+    case 'songs': return pageSongs();
+    case 'albums': return pageAlbums();
+    case 'artists': return pageArtists();
+    case 'album': return pageDetail('album', arg);
+    case 'artist': return pageDetail('artist', arg);
+    case 'playlists': return pagePlaylists();
+    case 'playlist': return pagePlaylist(arg);
+    case 'liked': return pagePlaylist(LIKED_PLAYLIST_ID);
+    case 'history': return pageHistory();
+    case 'stats': return pageStats();
+    case 'sources': return pageSources();
+    case 'lines': return pageLines();
+    case 'server': return pageServerBrowse(arg);
+    case 'editServer': return pageServerForm();
+    case 'sync': return pageSync();
+    case 'appearance': return pageAppearance();
+    case 'about': return pageAbout();
+    default: return pageHome();
+  }
+}
+
+const scrollMem = new Map();
+let scrollKey = null;
 
 function render() {
-  document.querySelectorAll('.nav-item').forEach((btn) => {
-    const route = btn.dataset.route;
-    const active =
-      route === state.route ||
-      (route === 'playlists' && state.route === 'playlist') ||
-      (route === 'settings' && state.route === 'sync');
-    btn.classList.toggle('active', Boolean(active));
-  });
+  const screen = $('screen');
+  if (scrollKey) scrollMem.set(scrollKey, screen.scrollTop);
 
-  const views = {
-    home: viewHome,
-    search: viewSearch,
-    favorites: viewFavorites,
-    history: viewHistory,
-    playlists: viewPlaylists,
-    playlist: viewPlaylist,
-    sync: viewSync,
-    online: viewOnline,
-    addServer: viewServerNew,
-    server: viewServerBrowse,
-    settings: viewSettings,
-  };
-  const view = views[state.route] || viewHome;
-
-  const detail = $('detail');
-  const focused = document.activeElement && document.activeElement.id;
-  const keepFocus = focused && ['server-filter', 'sheet-name', 'playlist-filter'].includes(focused) ? focused : null;
-  const caret = keepFocus ? document.activeElement.selectionStart : 0;
-  const sameRoute = state.lastRoute === state.route;
-  const prevScroll = detail.scrollTop;
-
-  detail.innerHTML = view();
-  detail.scrollTop = sameRoute ? prevScroll : 0;
-  state.lastRoute = state.route;
-
-  if (keepFocus) {
-    const node = $(keepFocus);
-    if (node) {
-      node.focus();
-      node.setSelectionRange(caret, caret);
+  // 重绘会把正在输入的框弄丢（搜索防抖每 220ms 一次），所以先记下焦点与光标位置
+  const active = document.activeElement;
+  const keepId = active && active.id && document.body.contains(active) ? active.id : null;
+  let caret = null;
+  if (keepId && ['search', 'text', 'password', 'url', 'number', ''].includes(active.type)) {
+    try {
+      caret = active.selectionStart;
+    } catch {
+      caret = null;
     }
   }
 
-  renderServerNav();
-  renderPlaylistNav();
-  renderSheet();
-  if (state.drawer) renderDrawer();
-  renderPlayerBar();
+  screen.innerHTML = renderScreen();
+  scrollKey = `${state.tab}|${pageRef()}`;
+  screen.scrollTop = scrollMem.get(scrollKey) || 0;
+
+  if (keepId) {
+    const el = $(keepId);
+    if (el && el.focus) {
+      el.focus({ preventScroll: true });
+      if (caret !== null) {
+        try {
+          el.setSelectionRange(caret, caret);
+        } catch {
+          /* number/search 之外的类型没有 selectionRange，忽略 */
+        }
+      }
+    }
+  }
+  syncNavbarStuck();
+  renderTabbar();
+  renderMini();
+  renderBatch();
+  renderPlayer();
+  // 弹层里正在输入时（新建/重命名歌单、同步地址）不要跟着屏幕重绘，否则敲进去的字会被冲掉
+  if ($('sheet').hidden || $('sheet-body').dataset.kind !== (state.sheet && state.sheet.kind)) renderSheet();
 }
 
-function renderServerNav() {
-  $('server-nav').innerHTML = state.servers
-    .map((s) => `<button class="nav-item ${state.route === 'server' && state.serverView.sourceID === s.id ? 'active' : ''}" data-nav="server:${esc(s.id)}">${esc(s.name || s.host)}</button>`)
-    .join('')
-    + '<button class="nav-item" data-nav="addServer">＋ 添加服务器源</button>';
+function syncNavbarStuck() {
+  const nav = $('screen').querySelector('.navbar');
+  if (nav) nav.classList.toggle('stuck', $('screen').scrollTop > 6);
 }
 
-/** MacSidebar.swift:158-233 —— 侧栏的「歌单」分区：过滤我喜欢，空态「暂无歌单」 */
-function renderPlaylistNav() {
-  const node = $('playlist-nav');
-  if (!node) return;
-  const list = visiblePlaylists().slice(0, 12);
-  node.innerHTML =
-    (list.length
-      ? list
-          .map(
-            (p) => `<button class="nav-item ${state.route === 'playlist' && state.playlistView && state.playlistView.id === p.id ? 'active' : ''}" data-nav="playlist:${esc(p.id)}" title="${esc(p.name)}">${esc(p.name)}</button>`
-          )
-          .join('')
-      : '<div class="muted" style="padding:4px 9px;font-size:12px">暂无歌单</div>')
-    + '<button class="nav-item" data-new-playlist="1">＋ 新建歌单</button>';
+function renderTabbar() {
+  for (const tab of document.querySelectorAll('#tabbar .tab')) {
+    tab.classList.toggle('active', tab.dataset.tab === state.tab);
+    const ico = tab.querySelector('.ico');
+    if (ico && ico.dataset.done !== '1') {
+      ico.innerHTML = icon(TAB_ICON[tab.dataset.tab] || 'music.note');
+      ico.dataset.done = '1';
+    }
+  }
+}
 
-  const liked = $('nav-liked-count');
-  if (liked) liked.textContent = state.favorites.length ? ` ${state.favorites.length}` : '';
+/** MiniPlayerView.swift:47-92 —— 胶囊：封面 30 + 双行 + 播放/下一曲；批量选择态或浮层展开时隐藏 */
+function renderMini() {
+  const wrap = $('mini-wrap');
+  const track = currentTrack();
+  const show = Boolean(track) && !state.playerOpen && !state.selection;
+  wrap.hidden = !show;
+  if (!show) return;
+  const cover = coverOf(track);
+  $('mini-cover').style.backgroundImage = cover ? `url('${esc(cover)}')` : '';
+  $('mini-title').textContent = track.title || '';
+  $('mini-artist').textContent = track.artist || '';
+  $('mini-play').innerHTML = icon(state.playing ? 'pause.fill' : 'play.fill');
+  $('mini-play').classList.toggle('on', state.playing);
+  $('mini-next').innerHTML = icon('forward.fill');
+}
+
+/** SongBatchActionBar.swift：「已选择 N 首」+ 全选 / 加入歌单 / 下一首播放 / 加入队列 / 移除 / 取消 */
+function renderBatch() {
+  const bar = $('batch-bar');
+  if (!state.selection) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  $('batch-count').textContent = `已选择 ${state.selection.keys.size} 首`;
+  const remove = bar.querySelector('[data-batch="remove"]');
+  if (remove) remove.hidden = state.selection.list !== 'currentPlaylist';
+}
+
+/* ── 全屏播放浮层（NowPlayingView.swift:2100-2350，覆盖层不是路由）── */
+
+function renderPlayer() {
+  const p = $('player');
+  p.hidden = !state.playerOpen;
+  if (!state.playerOpen) return;
+
+  const track = currentTrack();
+  const cover = track ? coverOf(track) : null;
+  const art = $('art');
+  art.style.backgroundImage = cover ? `url('${esc(cover)}')` : '';
+  art.innerHTML = cover ? '' : '<span style="font-size:46px;opacity:.3">♪</span>';
+
+  $('np-title').textContent = track ? track.title || '' : '选一首歌开始播放';
+  $('np-artist').textContent = track
+    ? `${track.artist || '未知艺术家'}${track.album ? ` · ${track.album}` : ''}`
+    : '在资料库或搜索里点一行即可播放';
+
+  const fav = $('np-fav');
+  fav.innerHTML = icon(track && isFavorite(track) ? 'heart.fill' : 'heart');
+  fav.classList.toggle('on', Boolean(track && isFavorite(track)));
+  document.querySelector('[data-np-menu]').innerHTML = icon('ellipsis');
+
+  const err = $('player-err');
+  err.hidden = !state.playerError;
+  if (state.playerError) err.textContent = state.playerError;
+
+  $('c-shuffle').innerHTML = icon('shuffle');
+  $('c-shuffle').classList.toggle('on', Boolean(state.shuffle));
+  $('c-prev').innerHTML = icon('backward.fill');
+  $('c-play').innerHTML = icon(state.playing ? 'pause.circle.fill' : 'play.circle.fill');
+  $('c-next').innerHTML = icon('forward.fill');
+  // MacBottomBar 同款规则：off 与 all 都用 repeat 图标（点亮态 != off），one 用 repeat.1
+  $('c-repeat').innerHTML = icon(state.repeat === 'one' ? 'repeat.1' : 'repeat');
+  $('c-repeat').classList.toggle('on', state.repeat !== 'off');
+  $('c-repeat').title = state.repeat === 'one' ? '单曲循环' : state.repeat === 'all' ? '列表循环' : '顺序播放';
+  $('c-volume').value = String(state.volume);
+
+  $('s-lyrics').innerHTML = icon('quote.bubble');
+  $('s-device').innerHTML = icon('network.browser');
+  $('s-queue').innerHTML = icon('list.bullet');
+  $('s-lyrics').classList.toggle('on', state.playerView === 'lyrics');
+  document.querySelector('.vol-ico.lo').innerHTML = icon('speaker.fill');
+  document.querySelector('.vol-ico.hi').innerHTML = icon('speaker.wave.2.fill');
+
+  const format = $('np-format');
+  if (!track) format.textContent = '';
+  else {
+    const from = track.kind === 'server' ? track.sourceName || '服务器源' : PLATFORM_LABEL[track.platform] || track.platform;
+    const via = state.lastResolve && state.lastResolve.kind === 'server' ? '服务器直链 · 经本地代理' : '聚合线路 · 经本地代理';
+    format.textContent = `${from} · ${via}${track.duration ? ` · ${fmtTime(track.duration)}` : ''}`;
+  }
+
+  $('np-menu').hidden = !state.npMenu;
+  if (state.npMenu) {
+    $('np-menu').innerHTML = menuButtons([
+      { head: track ? track.title : '未在播放' },
+      menuItem('data-np-act="add"', '添加到歌单', { icon: 'text.badge.plus' }),
+      menuItem('data-np-act="queue"', '加入播放队列', { icon: 'plus.rectangle.on.folder' }),
+      menuItem('data-np-act="force"', '重新解析（换一条线路）', { icon: 'arrow.clockwise' }),
+      menuItem('data-np-act="info"', '歌曲信息', { icon: 'info.circle' }),
+      '-',
+      menuItem('data-np-act="close"', '关闭播放页', { icon: 'xmark' }),
+    ]);
+  }
+
+  renderLyrics();
+  renderQueueSheet();
+  renderProgress();
+  if (track && state.theme.coverDriven) refreshAccentFromArtwork(cover);
+}
+
+function renderProgress() {
+  const total = (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (currentTrack() || {}).duration) || 0;
+  const real = Math.min(Math.max(0, audio.currentTime || 0), total || 0);
+  const shown = state.seekDrag === null ? real : state.seekDrag;
+  const ratio = total > 0 ? Math.min(1, Math.max(0, shown / total)) : 0;
+  $('fill').style.width = `${ratio * 100}%`;
+  $('knob').style.left = `${ratio * 100}%`;
+  $('t-cur').textContent = fmtTime(shown);
+  $('t-left').textContent = `-${fmtTime(Math.max(0, total - shown))}`;
+}
+
+function openPlayer() {
+  state.playerOpen = true;
+  state.npMenu = false;
+  render();
+}
+
+function closePlayer() {
+  state.playerOpen = false;
+  state.npMenu = false;
+  state.queueOpen = false;
+  render();
+}
+
+/* ── 歌词 ─────────────────────────────── */
+
+function parseLrc(text) {
+  const rows = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const marks = [...line.matchAll(/\[(\d+):(\d+)(?:[.:](\d{1,3}))?\]/g)];
+    const content = line.replace(/\[[^\]]*\]/g, '').trim();
+    if (!marks.length || !content) continue;
+    for (const m of marks) {
+      const ms = Number(String(m[3] ?? '0').padEnd(3, '0').slice(0, 3));
+      rows.push({ at: Number(m[1]) * 60 + Number(m[2]) + ms / 1000, text: content });
+    }
+  }
+  return rows.sort((a, b) => a.at - b.at);
+}
+
+async function loadLyrics(track) {
+  state.lyrics = null;
+  state.lyricRows = [];
+  state.lyricIndex = -1;
+  if (state.playerOpen) renderLyrics();
+  const res = await api.playback.lyrics(track);
+  if (currentTrack() !== track) return; // 期间已切歌
+  state.lyrics = res.ok ? res.lrc : null;
+  state.lyricRows = state.lyrics ? parseLrc(state.lyrics) : [];
+  if (state.playerOpen) renderLyrics();
+}
+
+function lyricStyle() {
+  const scale = Number(state.theme.lyricScale) || 1;
+  return `font-size:${Math.round(26 * scale)}px`;
+}
+
+function renderLyrics() {
+  const box = $('lyrics');
+  const on = state.playerView === 'lyrics';
+  box.hidden = !on;
+  $('s-lyrics').classList.toggle('on', on);
+  if (!on) return;
+  if (!state.lyricRows.length) {
+    box.innerHTML = `<div class="lyric-line" style="${lyricStyle()};opacity:.6">${
+      state.lyrics ? '这首歌的歌词没有可解析的时间轴。' : '当前没有歌词（服务器源优先取逐字歌词 lyricsSync）。'
+    }</div>`;
+    return;
+  }
+  box.innerHTML = state.lyricRows
+    .map(
+      (row, i) =>
+        `<div class="lyric-line${i === state.lyricIndex ? ' now' : i < state.lyricIndex ? ' past' : ''}" id="ly-${i}" data-ly="${row.at}" style="${lyricStyle()}">${esc(
+          row.text
+        )}</div>`
+    )
+    .join('');
+}
+
+function updateLyricIndex() {
+  if (!state.lyricRows.length) return;
+  const now = audio.currentTime;
+  let idx = -1;
+  for (let i = 0; i < state.lyricRows.length; i += 1) {
+    if (state.lyricRows[i].at <= now + 0.3) idx = i;
+    else break;
+  }
+  if (idx === state.lyricIndex) return;
+  const prev = document.getElementById(`ly-${state.lyricIndex}`);
+  if (prev) {
+    prev.classList.remove('now');
+    prev.classList.add('past');
+  }
+  state.lyricIndex = idx;
+  if (state.playerView !== 'lyrics') return;
+  const node = document.getElementById(`ly-${idx}`);
+  if (node) {
+    node.classList.add('now');
+    node.classList.remove('past');
+    if (state.settings.lyricsFollow !== false) node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  } else {
+    renderLyrics();
+  }
+}
+
+/* ── 播放队列（原版是 sheet，detents medium/large）───── */
+
+function renderQueueSheet() {
+  const sheet = $('queue-sheet');
+  sheet.hidden = !state.queueOpen;
+  $('s-queue').classList.toggle('on', state.queueOpen);
+  if (!state.queueOpen) return;
+  if (!state.queue.length) {
+    $('qs-body').innerHTML = '<p class="hint" style="padding:12px 16px">队列为空。</p>';
+    return;
+  }
+  const order = state.order.length === state.queue.length ? state.order : state.queue.map((_, i) => i);
+  const pos = orderPos();
+  const groups = [
+    ['正在播放', order.slice(pos, pos + 1)],
+    ['接下来播放', order.slice(pos + 1)],
+    ['已播放', order.slice(0, pos)],
+  ];
+  $('qs-body').innerHTML = groups
+    .filter(([, idxs]) => idxs.length)
+    .map(
+      ([label, idxs]) =>
+        `<div class="q-row" style="padding:0;cursor:default"><span class="g">${esc(label)}</span></div>` +
+        idxs.map(queueRow).join('')
+    )
+    .join('');
+}
+
+function queueRow(i) {
+  const t = state.queue[i];
+  if (!t) return '';
+  const on = i === state.index;
+  return `<div class="q-row" data-queue-play="${i}">
+    <span class="${on ? 'now' : ''}" style="width:20px;min-width:20px;text-align:right;color:${on ? 'var(--accent)' : 'var(--text-3)'};font-size:var(--fs-caption)">${i + 1}</span>
+    <div style="flex:1;min-width:0"><div class="song-title">${esc(t.title)}</div><div class="song-sub">${esc(t.artist || '')}</div></div>
+    <button class="song-more" data-fav-current="${i}" title="我喜欢">${icon(isFavorite(t) ? 'heart.fill' : 'heart')}</button>
+  </div>`;
 }
 
 /* ── 弹层（sheet）─────────────────────── */
 
 function closeSheet() {
   state.sheet = null;
-  renderSheet();
+  $('sheet').hidden = true;
+  $('sheet-title').textContent = '';
+  $('sheet-body').innerHTML = '';
 }
 
 function openSheet(sheet) {
@@ -586,48 +1936,61 @@ function openSheet(sheet) {
   renderSheet();
 }
 
+const sheetAction = (attr, iconName, label, opts = {}) =>
+  `<button class="sheet-item" ${attr}>${icon(iconName)}<span class="nm">${esc(label)}${
+    opts.sub ? `<br><span class="muted" style="font-size:var(--fs-caption2)">${esc(opts.sub)}</span>` : ''
+  }</span>${opts.mark ? `<span class="check" data-on="1">${icon('checkmark')}</span>` : ''}</button>`;
+
 function renderSheet() {
   const wrap = $('sheet');
   if (!state.sheet) {
-    wrap.hidden = true;
-    $('sheet-title').textContent = '';
-    $('sheet-body').innerHTML = '';
+    closeSheet();
     return;
   }
   wrap.hidden = false;
   const s = state.sheet;
+  $('sheet-body').dataset.kind = s.kind;
+  const tracks = s.tracks && s.tracks.length ? s.tracks : s.track ? [s.track] : [];
 
   if (s.kind === 'add') {
-    const track = s.track;
     $('sheet-title').textContent = '添加到歌单';
-    // AddToPlaylistSheet（NowPlayingView.swift:4523-4756）：先"新建歌单"，
-    // 下面每个歌单一行，勾上=已包含，再点一次是取消包含；「我喜欢」不在这里（走心形）。
-    $('sheet-body').innerHTML = `<button class="sheet-item" data-sheet-create="1" style="border-bottom:1px solid var(--line)">
-        <span class="nm" style="color:var(--accent-2)">＋ 新建歌单</span>
-      </button>
-      ${visiblePlaylists().length === 0
-        ? '<p class="muted" style="padding:10px 2px">还没有歌单，先新建一个。</p>'
-        : visiblePlaylists()
-            .map(
-              (p) => `<button class="sheet-item" data-sheet-toggle="${esc(p.id)}">
-                ${playlistCover(p)}
-                <span class="nm">${esc(p.name)}<br><span class="muted" style="font-size:11.5px">${p.songs.length} 首歌曲</span></span>
-                <span class="check">${inPlaylist(p.id, track) ? '✓' : ''}</span>
-              </button>`
-            )
-            .join('')}`;
+    // AddToPlaylistSheet（NowPlayingView.swift:4523-4756）：先「新建歌单」，下面每个歌单一行，
+    // 勾上=已包含，再点一次取消包含；「我喜欢」不在这里（走心形）。
+    $('sheet-body').innerHTML = `${sheetAction('data-sheet-create="1"', 'plus', '新建歌单')}
+      ${
+        visiblePlaylists().length === 0
+          ? '<p class="muted" style="padding:10px 16px">还没有歌单，先新建一个。</p>'
+          : visiblePlaylists()
+              .map((p) => {
+                const has = tracks.length > 0 && tracks.every((t) => inPlaylist(p.id, t));
+                return `<button class="sheet-item" data-sheet-toggle="${esc(p.id)}">${coverSpan(p, 'pl-cover')}
+                  <span class="nm">${esc(p.name)}<br><span class="muted" style="font-size:var(--fs-caption2)">${
+                    p.songs.length
+                  } 首歌曲</span></span>
+                  <span class="check"${has ? ' data-on="1"' : ''}>${has ? icon('checkmark') : ''}</span></button>`;
+              })
+              .join('')
+      }
+      ${s.error ? `<p class="err" style="margin:8px 16px 0">${esc(s.error)}</p>` : ''}`;
     return;
   }
 
-  if (s.kind === 'create' || s.kind === 'rename') {
-    const isRename = s.kind === 'rename';
-    $('sheet-title').textContent = isRename ? '重命名歌单' : '新建歌单';
+  if (s.kind === 'create' || s.kind === 'rename' || s.kind === 'syncURL' || s.kind === 'syncName') {
+    const isName = s.kind === 'create' || s.kind === 'rename';
+    $('sheet-title').textContent =
+      s.kind === 'rename' ? '重命名歌单' : s.kind === 'create' ? '新建歌单' : s.kind === 'syncURL' ? '同步服务器地址' : '设备名称';
+    const placeholder = isName ? '歌单名' : s.kind === 'syncURL' ? 'https://xxx.pages.dev/api/sync-playlists' : '例：客厅的 Windows';
+    const value = isName ? (s.kind === 'rename' ? s.name : '') : s.kind === 'syncURL' ? (state.sync || {}).serverURL || '' : (state.sync || {}).deviceName || '';
     $('sheet-body').innerHTML = `<form id="sheet-form">
-        <input id="sheet-name" placeholder="歌单名" value="${esc(isRename ? s.name : '')}" autocomplete="off" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-3);color:var(--text)">
+        <label class="field"><span>${isName ? '名称' : s.kind === 'syncURL' ? '服务器端点 (API URL)' : '设备名称'}</span>
+          <input id="sheet-name" placeholder="${esc(placeholder)}" value="${esc(value)}" autocomplete="off" spellcheck="false" ${
+      s.kind === 'syncURL' ? 'type="url"' : ''
+    }></label>
         ${s.error ? `<p class="err" style="margin:8px 0 0">${esc(s.error)}</p>` : ''}
-        <div class="row" style="justify-content:flex-end;margin-top:12px">
-          <button type="button" class="ghost" data-sheet-cancel="1">取消</button>
-          <button type="submit">${isRename ? '保存' : '创建'}</button>
+        ${s.kind === 'syncURL' ? '<p class="hint">与 iPhone 版共用同一个端点（Cloudflare Pages + D1）。留空并保存 = 清除配置。</p>' : ''}
+        <div class="actions-row" style="justify-content:flex-end">
+          <button class="ghost" type="button" data-sheet-cancel="1">取消</button>
+          <button class="pill prominent" type="submit">${s.kind === 'create' ? '创建' : '保存'}</button>
         </div>
       </form>`;
     const input = $('sheet-name');
@@ -638,28 +2001,83 @@ function renderSheet() {
   if (s.kind === 'reorder') {
     const songs = s.songs || [];
     $('sheet-title').textContent = '调整播放顺序';
-    $('sheet-body').innerHTML = `<p class="muted" style="margin:0 0 10px">使用箭头移动歌曲${s.changed ? ' · 顺序已更改' : ''}</p>
+    $('sheet-body').innerHTML = `<p class="muted" style="margin:0 16px 10px">使用箭头移动歌曲${s.changed ? ' · 顺序已更改' : ''}</p>
       ${songs
         .map(
-          (t, i) => `<div class="queue-item">
-            <span class="muted">${i + 1}</span>
-            <span class="t">${esc(t.title)}<br><span class="muted" style="font-size:11px">${esc(t.artist || '')}</span></span>
-            <button class="icon-btn" data-move="${i}:-1" ${i === 0 ? 'disabled' : ''}>▲</button>
-            <button class="icon-btn" data-move="${i}:1" ${i === songs.length - 1 ? 'disabled' : ''}>▼</button>
+          (t, i) => `<div class="reorder-item"><span class="idx">${i + 1}</span>
+            <span class="t">${esc(t.title)}<br><span class="muted" style="font-size:var(--fs-caption2)">${esc(t.artist || '')}</span></span>
+            <button data-move="${i}:-1" ${i === 0 ? 'disabled' : ''} title="上移">${icon('chevron.down')}</button>
+            <button data-move="${i}:1" ${i === songs.length - 1 ? 'disabled' : ''} title="下移">${icon('chevron.down')}</button>
           </div>`
         )
         .join('')}
-      <div class="row" style="justify-content:flex-end;margin-top:12px">
+      <div class="actions-row" style="justify-content:flex-end">
         <button class="ghost" data-sheet-cancel="1">取消</button>
-        <button data-sheet-done="1">完成</button>
+        <button class="pill prominent" data-sheet-done="1">完成</button>
       </div>`;
+    // 上移的箭头要朝上：CSS 没有 flip，用 transform 更省事
+    [...$('sheet-body').querySelectorAll('[data-move$=":-1"]')].forEach((b) => (b.style.transform = 'rotate(180deg)'));
     return;
   }
 
+  if (s.kind === 'row') {
+    const track = trackAt(s.ref);
+    if (!track) {
+      closeSheet();
+      return;
+    }
+    $('sheet-title').textContent = track.title || '歌曲';
+    const inLiked = isFavorite(track);
+    const pl = state.playlistView;
+    const inThis = pl && pl.songs.some((t) => trackKey(t) === trackKey(track));
+    $('sheet-body').innerHTML = [
+      sheetAction(`data-row-act="play" data-ref="${esc(s.ref)}"`, 'play.fill', '播放'),
+      sheetAction(`data-row-act="next" data-ref="${esc(s.ref)}"`, 'text.line.last.and.arrowtriangle.forward', '下一首播放'),
+      sheetAction(`data-row-act="queue" data-ref="${esc(s.ref)}"`, 'text.line.first.and.arrowtriangle.forward', '加入播放队列'),
+      sheetAction(`data-row-act="add" data-ref="${esc(s.ref)}"`, 'text.badge.plus', '添加到歌单'),
+      sheetAction(`data-row-act="fav" data-ref="${esc(s.ref)}"`, inLiked ? 'heart.fill' : 'heart', '我喜欢', { mark: inLiked }),
+      pl && inThis
+        ? sheetAction(`data-row-act="remove-from-pl" data-ref="${esc(s.ref)}"`, 'trash', pl.isSystem ? '取消收藏' : '从歌单中移除')
+        : '',
+      '-',
+      sheetAction(`data-row-act="info" data-ref="${esc(s.ref)}"`, 'info.circle', '歌曲信息'),
+    ]
+      .filter(Boolean)
+      .join('<div class="sep"></div>');
+    return;
+  }
+
+  if (s.kind === 'info') {
+    const t = s.track || {};
+    $('sheet-title').textContent = '歌曲信息';
+    const row = (label, value) => `<div class="srow"><span class="slabel">${esc(label)}</span><span class="svalue">${esc(value)}</span></div>`;
+    $('sheet-body').innerHTML = `<div class="group-card" style="margin:0 12px">${[
+      row('标题', t.title || ''),
+      row('艺术家', t.artist || ''),
+      row('专辑', t.album || ''),
+      row('时长', t.duration ? fmtTime(t.duration) : ''),
+      row('来源', t.kind === 'server' ? `服务器源 · ${t.sourceID || ''}` : `聚合 · ${PLATFORM_LABEL[t.platform] || t.platform}`),
+      row('平台 ID', t.rawID || ''),
+      row('可播放', t.unresolved ? '否（无对应源）' : '是'),
+    ].join('<div class="sdiv"></div>')}</div>`;
+    return;
+  }
+
+  if (s.kind === 'device') {
+    $('sheet-title').textContent = '播放设备';
+    $('sheet-body').innerHTML = `<p class="hint" style="padding:10px 16px">
+        iPhone 版这一格是 AirPlay / DLNA 投屏。Windows 的声音输出由系统管：设置 → 系统 → 声音 → 输出，
+        或在任务栏音量图标上右键选择播放设备，App 内不做二次路由。
+      </p>`;
+    return;
+  }
+
+  $('sheet-title').textContent = '';
+  $('sheet-body').innerHTML = '';
   toast('未知弹层', true);
 }
 
-/* ── 播放 ─────────────────────────────── */
+/* ── 播放引擎 ─────────────────────────── */
 
 let loadToken = 0;
 
@@ -701,21 +2119,27 @@ function indexAfter(delta) {
 }
 
 async function playFrom(listRef, index, options = {}) {
-  const list = LIST_ACCESS[listRef] ? LIST_ACCESS[listRef]() : [];
+  const list = listOf(listRef);
   if (!list.length) return;
   state.queue = list.slice();
   if (options.shuffle !== undefined) state.shuffle = Boolean(options.shuffle);
   const start = options.shuffle ? Math.floor(Math.random() * list.length) : index; // PlaylistDetailView:1106-1121
   await playAt(start, { pushHistory: true });
-  if (state.drawer === 'queue') renderDrawer();
   persistSoon();
 }
 
 async function playAt(index, { pushHistory = true, force = false } = {}) {
   if (index < 0 || index >= state.queue.length) return;
   const track = state.queue[index];
+  if (track && track.unresolved) {
+    toast('这首歌来自其它设备的音源，本机没有对应线路', true);
+    state.playerError = '同步下来的是歌单结构，本机没有这台服务器源，无法播放。';
+    render();
+    return;
+  }
   state.index = index;
   state.order = buildOrder(state.queue.length, index, state.shuffle);
+  state.playerError = null;
   const token = ++loadToken;
 
   setPlayerMeta(track, null);
@@ -725,11 +2149,13 @@ async function playAt(index, { pushHistory = true, force = false } = {}) {
   if (token !== loadToken) return;
 
   if (!resolved.ok || !resolved.url) {
-    toast(`播放失败：${resolved.error || '未知原因'}`, true);
+    state.playerError = resolved.error || '未知原因';
+    toast(`播放失败：${state.playerError}`, true);
     setPlayerMeta(track, null);
     render();
     return;
   }
+  state.lastResolve = { kind: resolved.kind, at: Date.now() };
 
   audio.src = resolved.url;
   audio.volume = state.volume;
@@ -751,14 +2177,12 @@ async function playAt(index, { pushHistory = true, force = false } = {}) {
 }
 
 function setPlayerMeta(track, url) {
-  $('pb-title').textContent = track ? track.title : '未播放';
-  $('pb-artist').textContent = track ? `${track.artist || ''}${track.album ? ` — ${track.album}` : ''}` : '在左侧选一首歌开始';
-  const cover = track ? coverOf(track) : null;
-  $('pb-cover').src = cover || 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
-  $('pb-like').classList.toggle('on', Boolean(track && isFavorite(track)));
   void url;
+  renderMini();
+  if (state.playerOpen) renderPlayer();
 
   if (track && 'mediaSession' in navigator) {
+    const cover = coverOf(track);
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: track.title,
@@ -771,7 +2195,7 @@ function setPlayerMeta(track, url) {
       navigator.mediaSession.setActionHandler('previoustrack', () => step(-1));
       navigator.mediaSession.setActionHandler('nexttrack', () => step(1));
     } catch {
-      /* MediaSession 不可用时忽略（任务栏按钮自然消失） */
+      /* MediaSession 不可用时忽略（系统媒体键自然失效） */
     }
   }
 }
@@ -785,474 +2209,66 @@ async function step(delta) {
 
 function togglePlay() {
   if (!audio.src) {
-    if (state.queue.length) playAt(0);
+    if (state.queue.length) playAt(state.index >= 0 ? state.index : 0);
     return;
   }
   if (audio.paused) audio.play();
   else audio.pause();
 }
 
-function renderPlayerBar() {
-  const track = state.queue[state.index];
-  $('pb-play').textContent = state.playing ? '❚❚' : '▶';
-  // MacBottomBar.swift:202-215：off 与 all 都用 repeat 图标、点亮态是 != off，one 用 repeat.1
-  $('pb-repeat').textContent = state.repeat === 'one' ? '循环: 单曲' : state.repeat === 'all' ? '循环: 列表' : '循环: 关';
-  $('pb-repeat').classList.toggle('on', state.repeat !== 'off');
-  $('pb-shuffle').classList.toggle('on', Boolean(state.shuffle));
-  $('pb-like').classList.toggle('on', Boolean(track && isFavorite(track)));
-  if (track) $('pb-title').textContent = track.title;
-}
-
-/* ── 歌词 ─────────────────────────────── */
-
-function parseLrc(text) {
-  const rows = [];
-  for (const line of String(text || '').split(/\r?\n/)) {
-    const marks = [...line.matchAll(/\[(\d+):(\d+)(?:[.:](\d{1,3}))?\]/g)];
-    const content = line.replace(/\[[^\]]*\]/g, '').trim();
-    if (!marks.length || !content) continue;
-    for (const m of marks) {
-      const ms = Number(String(m[3] ?? '0').padEnd(3, '0').slice(0, 3));
-      rows.push({ at: Number(m[1]) * 60 + Number(m[2]) + ms / 1000, text: content });
-    }
-  }
-  return rows.sort((a, b) => a.at - b.at);
-}
-
-async function loadLyrics(track) {
-  state.lyrics = null;
-  state.lyricRows = [];
-  state.lyricIndex = -1;
-  if (state.drawer === 'lyrics') renderDrawer();
-  const res = await api.playback.lyrics(track);
-  if (state.queue[state.index] !== track) return;
-  state.lyrics = res.ok ? res.lrc : null;
-  state.lyricRows = state.lyrics ? parseLrc(state.lyrics) : [];
-  if (state.drawer === 'lyrics') renderDrawer();
-}
-
-function renderDrawer() {
-  const drawer = $('drawer');
-  drawer.hidden = !state.drawer;
-  if (!state.drawer) return;
-
-  if (state.drawer === 'queue') {
-    $('drawer-title').textContent = `队列（${state.queue.length}）`;
-    $('drawer-body').innerHTML = state.queue.length
-      ? state.queue
-          .map(
-            (t, i) => `<div class="queue-item ${i === state.index ? 'active' : ''}" data-queue-play="${i}">
-              <span class="muted">${i + 1}</span>
-              <span class="t">${esc(t.title)}<br><span class="muted" style="font-size:11px">${esc(t.artist || '')}</span></span>
-              <button class="icon-btn ${isFavorite(t) ? 'on' : ''}" data-fav="queue:${i}">${isFavorite(t) ? '♥' : '♡'}</button>
-            </div>`
-          )
-          .join('')
-      : '<p class="muted">队列为空。</p>';
-    return;
-  }
-
-  $('drawer-title').textContent = '歌词';
-  if (!state.lyricRows.length) {
-    $('drawer-body').innerHTML = `<p class="muted">${state.lyrics ? '这首歌的歌词没有可解析的时间轴。' : '当前没有歌词（服务器源优先取逐字歌词 lyricsSync）。'}</p>`;
-    return;
-  }
-  $('drawer-body').innerHTML = `<div class="lyric-box">${state.lyricRows
-    .map((row, i) => `<div class="lyric-line ${i === state.lyricIndex ? 'now' : ''}" id="ly-${i}" data-ly="${row.at}">${esc(row.text)}</div>`)
-    .join('')}</div>`;
-}
-
-function updateLyricIndex() {
-  if (!state.lyricRows.length) return;
-  const now = audio.currentTime;
-  let idx = -1;
-  for (let i = 0; i < state.lyricRows.length; i += 1) {
-    if (state.lyricRows[i].at <= now + 0.3) idx = i;
-    else break;
-  }
-  if (idx === state.lyricIndex) return;
-  const old = document.getElementById(`ly-${state.lyricIndex}`);
-  if (old) old.classList.remove('now');
-  state.lyricIndex = idx;
-  const node = document.getElementById(`ly-${idx}`);
-  if (node) {
-    node.classList.add('now');
-    if (state.settings.lyricsFollow !== false && state.drawer === 'lyrics') {
-      node.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }
-  }
-}
-
-/* ── 事件 ─────────────────────────────── */
-
-const CLICK_SELECTOR = [
-  '[data-nav]', '[data-play]', '[data-fav]', '[data-queue]', '[data-filter]', '[data-toggle-source]', '[data-ping-all]',
-  '[data-add-source]', '[data-reset-sources]', '[data-clear-history]', '[data-platform-search]', '[data-queue-play]',
-  '[data-load-more]', '[data-play-all]', '[data-test-server]', '[data-remove-server]', '[data-cancel-form]', '[data-ly]',
-  '[data-play-playlist]', '[data-shuffle-playlist]', '[data-new-playlist]', '[data-rename-playlist]', '[data-remove-playlist]',
-  '[data-pl-menu]', '[data-pl-export]', '[data-reorder]', '[data-queue-playlist]', '[data-next-playlist]',
-  '[data-add-to-playlist]', '[data-remove-from-playlist]', '[data-next]', '[data-move]',
-  '[data-sheet-create]', '[data-sheet-toggle]', '[data-sheet-cancel]', '[data-sheet-done]',
-  '[data-sync-backup]', '[data-sync-restore]', '[data-sync-devices]', '[data-sync-import]', '[data-import-file]',
-].join(', ');
-
-document.addEventListener('click', async (event) => {
-  // 点菜单外任意处先收起 ⋯ 弹层（CSS :hover 之外的显隐只能自己管）
-  if (state.menu && !event.target.closest('.menu')) state.menu = null;
-
-  const target = event.target.closest(CLICK_SELECTOR);
-  if (!target) {
-    // 遮罩与 × 关闭弹层；弹层内部与 ⋯ 菜单内部的空白点击不动 UI（否则重绘会清掉正在输入的歌单名）
-    if (event.target.id === 'sheet' || event.target.closest('#sheet-close')) closeSheet();
-    else if (!event.target.closest('.sheet-card') && !event.target.closest('.menu')) render();
-    return;
-  }
-  const d = target.dataset;
-
-  const go = (route) => {
-    state.route = route;
-    render();
-  };
-
-  if (d.nav) {
-    const [route, arg] = d.nav.split(':');
-    if (route === 'server') {
-      state.route = 'server';
-      state.serverView = { sourceID: arg, items: [], total: 0, skip: 0, filter: '', loading: false, error: null };
-      render();
-      loadServerPage(0);
-    } else if (route === 'addServer') {
-      state.route = 'addServer';
-      state.formServerId = arg || null;
-      state.formError = null;
-      state.formResult = null;
-      render();
-    } else if (route === 'playlist') {
-      await openPlaylist(arg);
-    } else if (route === 'sync') {
-      await loadSyncConfig();
-      go('sync');
-    } else {
-      go(route);
-    }
-    return;
-  }
-
-  // ── 歌单 ─────────────────────────────
-  if (d.playPlaylist) {
-    await playPlaylist(d.playPlaylist, false);
-    return;
-  }
-  if (d.shufflePlaylist) {
-    await playPlaylist(d.shufflePlaylist, true);
-    return;
-  }
-  if (d.newPlaylist) {
-    openSheet({ kind: 'create' });
-    return;
-  }
-  if (d.renamePlaylist !== undefined) {
-    const p = state.playlistView;
-    if (p) openSheet({ kind: 'rename', id: p.id, name: p.name });
-    return;
-  }
-  if (d.removePlaylist !== undefined) {
-    const p = state.playlistView;
-    if (!p || p.isSystem) return;
-    state.menu = null;
-    const res = await api.playlists.remove(p.id);
-    if (!playlistError(res)) {
-      toast(`已删除歌单「${p.name}」`);
-      await reloadPlaylists();
-      state.playlistView = null;
-      state.route = 'playlists';
-      render();
-    }
-    return;
-  }
-  if (d.plMenu) {
-    state.menu = state.menu === `playlist:${d.plMenu}` ? null : `playlist:${d.plMenu}`;
-    render();
-    return;
-  }
-  if (d.plExport !== undefined) {
-    state.menu = null;
-    const p = state.playlistView;
-    if (p) await exportPlaylist(p);
-    return;
-  }
-  if (d.reorder !== undefined) {
-    state.menu = null;
-    const p = state.playlistView;
-    if (p) openSheet({ kind: 'reorder', id: p.id, songs: p.songs.slice(), changed: false });
-    else render();
-    return;
-  }
-  if (d.queuePlaylist !== undefined) {
-    state.menu = null;
-    const p = state.playlistView;
-    if (p && p.songs.length) {
-      state.queue = state.queue.concat(p.songs);
-      state.order = buildOrder(state.queue.length, state.index, state.shuffle);
-      toast(`已把「${p.name}」的 ${p.songs.length} 首加入播放队列`);
-      renderDrawer();
-      persistSoon();
-    } else render();
-    return;
-  }
-  if (d.nextPlaylist !== undefined) {
-    state.menu = null;
-    const p = state.playlistView;
-    if (p && p.songs.length) {
-      const at = state.index + 1;
-      state.queue = state.queue.slice(0, at).concat(p.songs, state.queue.slice(at));
-      state.order = buildOrder(state.queue.length, state.index, state.shuffle);
-      toast(`已把「${p.name}」排在当前曲目之后`);
-      renderDrawer();
-      persistSoon();
-    } else render();
-    return;
-  }
-  if (d.addToPlaylist) {
-    const [list, idx] = d.addToPlaylist.split(':');
-    const track = (LIST_ACCESS[list] || (() => []))()[Number(idx)];
-    if (track) openSheet({ kind: 'add', track });
-    return;
-  }
-  if (d.removeFromPlaylist !== undefined) {
-    const [, idx] = d.removeFromPlaylist.split(':');
-    const p = state.playlistView;
-    const track = p ? p.songs[Number(idx)] : null;
-    if (p && track) {
-      const res = await api.playlists.removeSong(p.id, track);
-      if (!playlistError(res)) {
-        await reloadPlaylists();
-        toast(`已从「${p.name}」移除：${track.title}`);
-        render();
-      }
-    }
-    return;
-  }
-  if (d.next !== undefined) {
-    const [list, idx] = d.next.split(':');
-    const track = (LIST_ACCESS[list] || (() => []))()[Number(idx)];
-    if (track) {
-      const at = state.index + 1;
-      state.queue = state.queue.slice(0, at).concat([track], state.queue.slice(at));
-      state.order = buildOrder(state.queue.length, state.index, state.shuffle);
-      toast('已排在当前曲目之后');
-      renderDrawer();
-      persistSoon();
-    }
-    return;
-  }
-
-  // ── 弹层内动作 ───────────────────────
-  if (d.sheetCreate) {
-    const s = state.sheet;
-    // AddToPlaylistSheet（NowPlayingView.swift:4523-4756）的"新建歌单"是从弹层里起的：
-    // 建完要把刚才那首歌直接放进新歌单，并且人还留在弹层里 —— 所以 track 必须带过来。
-    openSheet({ kind: 'create', backTo: 'add', track: s && s.kind === 'add' ? s.track : null });
-    return;
-  }
-  if (d.sheetToggle) {
-    const s = state.sheet;
-    if (s && s.kind === 'add') {
-      const res = await api.playlists.toggleSong(d.sheetToggle, s.track);
-      if (!playlistError(res)) {
-        await reloadPlaylists();
-        render();
-      }
-    }
-    return;
-  }
-  if (d.sheetCancel) {
-    closeSheet();
-    return;
-  }
-  if (d.sheetDone) {
-    const s = state.sheet;
-    if (s && s.kind === 'reorder' && s.id) {
-      state.playlistView = null;
-      await reloadPlaylists();
-      toast('顺序已更新');
-    }
-    closeSheet();
-    return;
-  }
-  if (d.move !== undefined) {
-    const [from, delta] = d.move.split(':').map(Number);
-    const s = state.sheet;
-    if (!s || s.kind !== 'reorder') return;
-    const to = from + delta;
-    if (to < 0 || to >= s.songs.length) return;
-    const res = await api.playlists.move(s.id, from, to);
-    if (!playlistError(res)) {
-      s.songs = (res.value && res.value.songs) || s.songs;
-      s.changed = true;
-      renderSheet();
-    }
-    return;
-  }
-
-  // ── 云端同步 ─────────────────────────
-  if (d.syncBackup) {
-    await runSync('backup');
-    return;
-  }
-  if (d.syncRestore) {
-    await runSync('restore');
-    return;
-  }
-  if (d.syncDevices) {
-    await loadSyncDevices();
-    return;
-  }
-  if (d.syncImport) {
-    await importFromDevice(d.syncImport);
-    return;
-  }
-  if (d.importFile) {
-    const res = await api.sync.importFile();
-    if (res.ok && res.data) {
-      toast(`已导入 ${res.data.created} 个歌单、${res.data.songs} 首`);
-      await reloadPlaylists();
-    } else if (!res.canceled) toast(res.error || '导入失败', true);
-    render();
-    return;
-  }
-
-  if (d.play) {
-    const [list, idx] = d.play.split(':');
-    playFrom(list, Number(idx));
-    return;
-  }
-  if (d.queuePlay !== undefined) {
-    playAt(Number(d.queuePlay));
-    return;
-  }
-  if (d.fav) {
-    const [list, idx] = d.fav.split(':');
-    const track = (LIST_ACCESS[list] || (() => []))()[Number(idx)];
-    if (track) await toggleFavorite(track);
-    return;
-  }
-  if (d.queue) {
-    const [list, idx] = d.queue.split(':');
-    const track = (LIST_ACCESS[list] || (() => []))()[Number(idx)];
-    if (!track) return;
-    state.queue = state.queue.concat([track]);
-    state.order = buildOrder(state.queue.length, state.index, state.shuffle);
-    toast('已加入队列');
-    renderDrawer();
-    persistSoon();
-    return;
-  }
-  if (d.filter) {
-    state.filter = d.filter;
-    render();
-    return;
-  }
-  if (d.platformSearch) {
-    state.filter = d.platformSearch;
-    go('search');
-    $('search-input').focus();
-    return;
-  }
-  if (d.toggleSource) {
-    state.sources = await0(api.sources.toggle(d.toggleSource));
-    return;
-  }
-  if (d.pingAll) {
-    toast('正在逐条探测线路延迟…');
-    api.sources.pingAll().then((list) => {
-      state.sources = list;
-      render();
-    });
-    return;
-  }
-  if (d.addSource) {
-    state.form = state.form === 'addSource' ? null : 'addSource';
-    render();
-    return;
-  }
-  if (d.cancelForm) {
-    state.form = null;
-    render();
-    return;
-  }
-  if (d.resetSources) {
-    api.sources.reset().then((list) => {
-      state.sources = list;
-      toast('已恢复默认 9 条线路');
-      render();
-    });
-    return;
-  }
-  if (d.clearHistory) {
-    api.library.clearHistory().then(() => {
-      state.history = [];
-      render();
-    });
-    return;
-  }
-  if (d.loadMore) {
-    loadServerPage(state.serverView.items.length);
-    return;
-  }
-  if (d.playAll) {
-    state.queue = state.serverView.items.slice();
-    playAt(0);
-    return;
-  }
-  if (d.testServer) {
-    testServerForm();
-    return;
-  }
-  if (d.removeServer) {
-    api.server.remove(d.removeServer).then((list) => {
-      state.servers = list;
-      state.route = 'home';
-      state.formServerId = null;
-      toast('已删除');
-      render();
-    });
-    return;
-  }
-  if (d.ly !== undefined) {
-    audio.currentTime = Number(d.ly);
-    return;
-  }
-
+/** off → 列表循环 → 单曲循环 → off（与 iPhone 的 RepeatMode 顺序一致） */
+function cycleRepeat() {
+  state.repeat = state.repeat === 'off' ? 'all' : state.repeat === 'all' ? 'one' : 'off';
+  persistSoon();
   render();
-});
-
-function await0(promise) {
-  promise
-    .then(() => {
-      api.sources.list().then((list) => {
-        state.sources = list;
-        render();
-      });
-    })
-    .catch((error) => toast(String(error.message || error), true));
+  toast(state.repeat === 'one' ? '单曲循环' : state.repeat === 'all' ? '列表循环' : '顺序播放');
 }
+
+function setShuffle(on) {
+  state.shuffle = Boolean(on);
+  state.order = buildOrder(state.queue.length, Math.max(0, state.index), state.shuffle);
+  persistSoon();
+  render();
+  toast(state.shuffle ? '随机播放：开' : '随机播放：关');
+}
+
+function setVolume(value) {
+  state.volume = Math.min(1, Math.max(0, Number(value) || 0));
+  audio.volume = state.volume;
+  const other = state.playerOpen ? $('c-volume') : $('settings-volume');
+  if (other && other !== document.activeElement) other.value = String(state.volume);
+  persistSoon();
+}
+
+function seekTo(seconds) {
+  if (!audio.src) return;
+  audio.currentTime = Math.max(0, Number(seconds) || 0);
+  renderProgress();
+}
+
+/* ── 数据动作 ─────────────────────────── */
 
 async function toggleFavorite(track) {
+  if (!track) return;
   const res = await api.library.toggleFavorite(track);
   state.favorites = res.favorites;
   await reloadPlaylists();
   render();
 }
 
-// MARK: - 歌单动作
+async function ensurePlaylist(id) {
+  if (id === LIKED_PLAYLIST_ID) return;
+  if (!playlistById(id)) await reloadPlaylists();
+}
 
-async function openPlaylist(id) {
+async function loadPlaylistView(id) {
+  if (id === LIKED_PLAYLIST_ID) {
+    state.playlistView = likedAsPlaylist();
+    return;
+  }
   const res = await api.playlists.get(id);
   if (playlistError(res)) return;
   state.playlistView = res.value;
-  state.route = 'playlist';
-  render();
 }
 
 async function playPlaylist(id, shuffled) {
@@ -1270,24 +2286,6 @@ async function playPlaylist(id, shuffled) {
   persistSoon();
 }
 
-async function ensurePlaylist(id) {
-  if (!playlistById(id)) await reloadPlaylists();
-}
-
-async function exportPlaylist(p) {
-  const wire = {
-    id: p.id,
-    name: p.name,
-    createdAt: p.createdAt || 0,
-    updatedAt: p.updatedAt || 0,
-    songs: (p.songs || []).map(toWireSong),
-  };
-  const res = await api.sync.exportPlaylist(wire);
-  if (res.ok) toast(`已导出：${res.filePath}`);
-  else if (!res.canceled) toast(res.error || '导出失败', true);
-  render();
-}
-
 /** 与 src/main/sync.js 的 toWireSong 同构（渲染层拿不到主进程模块，这里保持一致的字段） */
 function toWireSong(track) {
   const shared = {
@@ -1298,10 +2296,50 @@ function toWireSong(track) {
   };
   return track.kind === 'server'
     ? { ...shared, id: track.id || `dly_${track.sourceID}_${track.rawID}`, filePath: `/server/${track.sourceID}/${track.rawID}`, sourceId: track.sourceID }
-    : { ...shared, id: `agg_${track.platform}_${track.rawID}`, filePath: `/aggregated/${track.platform}/${track.rawID}.mp3`, sourceId: 'system-aggregated-music' };
+    : {
+        ...shared,
+        id: `agg_${track.platform}_${track.rawID}`,
+        filePath: `/aggregated/${track.platform}/${track.rawID}.mp3`,
+        sourceId: 'system-aggregated-music',
+      };
 }
 
-// MARK: - 云端同步
+async function exportPlaylist(p) {
+  const wire = { id: p.id, name: p.name, createdAt: p.createdAt || 0, updatedAt: p.updatedAt || 0, songs: (p.songs || []).map(toWireSong) };
+  const res = await api.sync.exportPlaylist(wire);
+  if (res.ok) toast(`已导出：${res.filePath}`);
+  else if (!res.canceled) toast(res.error || '导出失败', true);
+  render();
+}
+
+async function deletePlaylist(p) {
+  if (!p || p.isSystem) return;
+  state.menu = null;
+  const res = await api.playlists.remove(p.id);
+  if (playlistError(res)) return;
+  toast(`已删除歌单「${p.name}」`);
+  await reloadPlaylists();
+  state.playlistView = null;
+  const stack = state.stacks[state.tab];
+  if (parsePage(stack[stack.length - 1]).name === 'playlist') stack.pop();
+  render();
+}
+
+function insertTracks(tracks, { next }) {
+  if (!tracks.length) return;
+  if (next) {
+    const at = Math.max(0, state.index) + 1;
+    state.queue = state.queue.slice(0, state.index < 0 ? 0 : at).concat(tracks, state.queue.slice(state.index < 0 ? 0 : at));
+    if (state.index < 0 && state.queue.length) state.index = 0;
+  } else {
+    state.queue = state.queue.concat(tracks);
+  }
+  state.order = buildOrder(state.queue.length, Math.max(0, state.index), state.shuffle);
+  persistSoon();
+  if (state.queueOpen) renderQueueSheet();
+}
+
+/* ── 云端同步 ─────────────────────────── */
 
 async function loadSyncConfig() {
   state.sync = await api.sync.config();
@@ -1321,8 +2359,8 @@ async function loadSyncDevices() {
     state.syncDevices = res.devices || [];
     if (!state.syncDevices.length) state.syncError = '云端还没有任何设备的备份';
   }
-  if (state.route !== 'sync') state.route = 'sync';
-  render();
+  if (parsePage(pageRef()).name !== 'sync') open('sync');
+  else render();
 }
 
 async function importFromDevice(deviceId) {
@@ -1361,22 +2399,22 @@ async function runSync(kind) {
     await reloadPlaylists();
     state.syncResult = `恢复成功：已从云端拉取并同步 ${res.data.created} 个新建歌单、${res.data.matched} 个已存在歌单，共写入 ${res.data.songs} 首`;
   }
-  if (state.route !== 'sync' && state.route !== 'playlists') state.route = 'sync';
-  render();
+  if (parsePage(pageRef()).name !== 'sync') open('sync');
+  else render();
 }
+
+/* ── 搜索 ─────────────────────────────── */
 
 let searchTimer = null;
 let searchSeq = 0;
-
-$('search-input').addEventListener('input', (event) => {
-  const value = event.target.value.trim();
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => runSearch(value), 220); // 与 Swift 侧 200ms 防抖同量级
-});
+let partialBound = false;
 
 async function runSearch(keyword) {
   state.keyword = keyword;
-  if (state.route !== 'search') state.route = 'search';
+  if (parsePage(pageRef()).name !== 'root' || state.tab !== 'search') {
+    state.tab = 'search';
+    state.stacks.search = ['root'];
+  }
   if (!keyword) {
     state.results = [];
     state.searching = false;
@@ -1384,16 +2422,21 @@ async function runSearch(keyword) {
     return;
   }
   state.searching = true;
-  state.results = [];
+  state.filter = 'all';
   const requestId = ++searchSeq;
+  state.lastQuery = keyword;
+  state.results = [];
   render();
 
-  api.search.onPartial(({ requestId: id, items, progress }) => {
-    if (id !== searchSeq) return;
-    state.results = items;
-    state.progress = progress;
-    if (state.route === 'search') render();
-  });
+  if (!partialBound) {
+    partialBound = true;
+    api.search.onPartial(({ requestId: id, items, progress }) => {
+      if (id !== searchSeq) return;
+      state.results = items;
+      state.progress = progress;
+      if (state.tab === 'search') render();
+    });
+  }
 
   const res = await api.search.aggregated(keyword, requestId);
   if (res.requestId !== searchSeq) return;
@@ -1401,11 +2444,21 @@ async function runSearch(keyword) {
   if (!res.ok) toast(res.error || '搜索失败', true);
   else if (!res.items.length) toast('未搜索到匹配歌曲', true);
   state.results = res.items;
+  if (res.ok && res.items.length) rememberSearch(keyword);
   render();
 }
 
+function rememberSearch(keyword) {
+  const list = state.searchHistory.filter((k) => k !== keyword);
+  state.searchHistory = [keyword, ...list].slice(0, 8);
+  saveThemeSoon();
+}
+
+/* ── 服务器源 ─────────────────────────── */
+
 async function loadServerPage(skip) {
   const view = state.serverView;
+  if (!view.sourceID) return;
   view.loading = true;
   view.error = null;
   render();
@@ -1465,12 +2518,694 @@ async function testServerForm() {
   render();
 }
 
+async function deepHealthScan(id) {
+  state.menu = null;
+  toast('深度扫描：重新登录并载入整库第一页…');
+  state.serverView = { sourceID: id, items: [], total: 0, skip: 0, filter: '', loading: true, error: null };
+  open('server:' + id);
+  await loadServerPage(0);
+}
+
+/* ── 页面跳转（带副作用）──────────────── */
+
+async function goto(page) {
+  const { name, arg } = parsePage(page);
+  if (name === 'editServer') {
+    state.formServerId = arg || null;
+    state.formError = null;
+    state.formResult = null;
+  }
+  if (name === 'sync') await loadSyncConfig();
+  if (name === 'playlist') await loadPlaylistView(arg);
+  if (name === 'liked') state.playlistView = likedAsPlaylist();
+  open(page);
+  if (name === 'server' && state.serverView.sourceID !== arg) {
+    state.serverView = { sourceID: arg, items: [], total: 0, skip: 0, filter: '', loading: false, error: null };
+    loadServerPage(0);
+  }
+}
+
+/* ── 事件：点击委托 ───────────────────── */
+
+let miniSwiped = false;
+
+document.addEventListener('click', async (event) => {
+  if (state.menu && !event.target.closest('.menu')) state.menu = null;
+  if (state.npMenu && !event.target.closest('.np-menu')) state.npMenu = false;
+
+  const target = event.target.closest(
+    [
+      '[data-tab]', '[data-back]', '[data-page]', '[data-menu]', '[data-sort]', '[data-select-mode]',
+      '[data-play-all-of]', '[data-shuffle-all-of]', '[data-play]', '[data-row-menu]', '[data-row-act]',
+      '[data-new-playlist]', '[data-import-file]', '[data-play-playlist]', '[data-shuffle-playlist]',
+      '[data-pl-menu]', '[data-reorder]', '[data-rename-playlist]', '[data-remove-playlist]', '[data-pl-export]',
+      '[data-queue-playlist]', '[data-next-playlist]', '[data-clear-history]', '[data-toggle-scope]',
+      '[data-filter]', '[data-clear-search]', '[data-clear-search-history]', '[data-history-search]',
+      '[data-del-search-history]', '[data-cycle-repeat]', '[data-switch-shuffle]', '[data-switch-lyrics-follow]',
+      '[data-cycle-appearance]', '[data-switch-cover]', '[data-switch-tray]', '[data-appearance]',
+      '[data-set-accent]', '[data-reset-accent]', '[data-lyric-scale]', '[data-toggle-source]',
+      '[data-remove-source]', '[data-ping-one]', '[data-ping-all]', '[data-toggle-form]', '[data-cancel-form]',
+      '[data-reset-sources]', '[data-edit-server]', '[data-test-server-row]', '[data-server-health]',
+      '[data-remove-server]', '[data-load-more]', '[data-play-all]', '[data-clear-server-filter]',
+      '[data-test-server]', '[data-sync-backup]', '[data-sync-restore]', '[data-sync-devices]',
+      '[data-sync-import]', '[data-edit-server-url]', '[data-edit-device-name]', '[data-copy-id]',
+      '[data-open-releases]', '[data-open-repo]', '[data-open-issues]', '[data-library-play]',
+      '[data-library-shuffle]', '[data-open-player]', '[data-close-player]', '[data-np-menu]',
+      '[data-np-act]', '[data-fav-current]', '[data-queue-play]', '[data-ly]', '[data-toggle-view]',
+      '[data-open-device]', '[data-close-queue]', '[data-batch]', '[data-sheet-create]', '[data-sheet-toggle]',
+      '[data-sheet-cancel]', '[data-sheet-done]', '[data-move]',
+    ].join(', ')
+  );
+
+  if (!target) {
+    // 遮罩与 × 关闭弹层；弹层与 ⋯ 菜单内部的空白点击不动界面（否则重绘会清掉正在输入的歌单名）
+    if (event.target.id === 'sheet' || event.target.closest('#sheet-close')) closeSheet();
+    else if (event.target.closest('#mini')) {
+      if (!miniSwiped) openPlayer();
+      miniSwiped = false;
+    } else if (!event.target.closest('.sheet-card') && !event.target.closest('.menu') && !event.target.closest('#player')) render();
+    return;
+  }
+
+  const d = target.dataset;
+  const trackOf = (ref) => (ref === undefined ? currentTrack() : trackAt(ref));
+
+  /* 外壳 */
+  if (d.tab) {
+    switchTab(d.tab);
+    return;
+  }
+  if (d.back) {
+    pop();
+    return;
+  }
+  if (d.page) {
+    state.menu = null;
+    await goto(d.page);
+    return;
+  }
+  if (d.openPlayer) {
+    if (!miniSwiped) openPlayer();
+    miniSwiped = false;
+    return;
+  }
+  if (d.closePlayer) {
+    closePlayer();
+    return;
+  }
+  if (d.batch) {
+    await batchAction(d.batch);
+    return;
+  }
+
+  /* 播放列表行 */
+  if (d.play) {
+    const [list, idx] = d.play.split(':');
+    if (state.selection && state.selection.list === list) {
+      const t = listOf(list)[Number(idx)];
+      const key = trackKey(t);
+      if (state.selection.keys.has(key)) state.selection.keys.delete(key);
+      else state.selection.keys.add(key);
+      render();
+      return;
+    }
+    await playFrom(list, Number(idx));
+    return;
+  }
+  if (d.rowMenu) {
+    openSheet({ kind: 'row', ref: d.rowMenu });
+    return;
+  }
+  if (d.rowAct) {
+    await rowAction(d.rowAct, d.ref, target);
+    return;
+  }
+  if (d.selectMode) {
+    state.menu = null;
+    state.selection = { list: d.selectMode, keys: new Set() };
+    render();
+    return;
+  }
+  if (d.playAllOf || d.shuffleAllOf) {
+    const ref = d.playAllOf || d.shuffleAllOf;
+    state.menu = null;
+    await playFrom(ref, 0, { shuffle: Boolean(d.shuffleAllOf) });
+    return;
+  }
+  if (d.sort) {
+    if (state.sort.key === d.sort) state.sort.asc = !state.sort.asc;
+    else {
+      state.sort.key = d.sort;
+      state.sort.asc = d.sort === 'added' || d.sort === 'source' ? false : true;
+    }
+    state.menu = null;
+    render();
+    return;
+  }
+
+  /* 歌单 */
+  if (d.newPlaylist) {
+    state.menu = null;
+    openSheet({ kind: 'create' });
+    return;
+  }
+  if (d.renamePlaylist !== undefined) {
+    state.menu = null;
+    const p = state.playlistView;
+    if (p && !p.isSystem) openSheet({ kind: 'rename', id: p.id, name: p.name });
+    else render();
+    return;
+  }
+  if (d.removePlaylist !== undefined) {
+    await deletePlaylist(state.playlistView);
+    return;
+  }
+  if (d.plMenu) {
+    state.menu = state.menu === `playlist:${d.plMenu}` ? null : `playlist:${d.plMenu}`;
+    render();
+    return;
+  }
+  if (d.plExport !== undefined) {
+    state.menu = null;
+    if (state.playlistView) await exportPlaylist(state.playlistView);
+    return;
+  }
+  if (d.reorder !== undefined) {
+    state.menu = null;
+    const p = state.playlistView;
+    if (p && p.songs.length >= 2) openSheet({ kind: 'reorder', id: p.id, songs: p.songs.slice(), changed: false });
+    else render();
+    return;
+  }
+  if (d.queuePlaylist !== undefined || d.nextPlaylist !== undefined) {
+    state.menu = null;
+    const p = state.playlistView;
+    const next = d.nextPlaylist !== undefined;
+    if (p && p.songs.length) {
+      insertTracks(p.songs, { next });
+      toast(next ? `已把「${p.name}」排在当前曲目之后` : `已把「${p.name}」的 ${p.songs.length} 首加入播放队列`);
+    }
+    render();
+    return;
+  }
+  if (d.playPlaylist) {
+    await playPlaylist(d.playPlaylist, false);
+    return;
+  }
+  if (d.shufflePlaylist) {
+    await playPlaylist(d.shufflePlaylist, true);
+    return;
+  }
+  if (d.libraryPlay || d.libraryShuffle) {
+    await playFrom('library', 0, { shuffle: Boolean(d.libraryShuffle) });
+    return;
+  }
+
+  /* 弹层内部 */
+  if (d.sheetCreate) {
+    const s = state.sheet;
+    // AddToPlaylistSheet 的「新建歌单」是从弹层里起的：建完要把刚才那首歌直接放进新歌单，
+    // 并且人还留在弹层里 —— 所以 track 必须带过来。
+    openSheet({ kind: 'create', backTo: 'add', track: s && s.kind === 'add' ? s.track : null });
+    return;
+  }
+  if (d.sheetToggle) {
+    const s = state.sheet;
+    if (s && s.kind === 'add' && tracksOfSheet(s).length) {
+      for (const t of tracksOfSheet(s)) {
+        const res = await api.playlists.toggleSong(d.sheetToggle, t);
+        if (playlistError(res)) return;
+      }
+      await reloadPlaylists();
+      renderSheet();
+      render();
+    }
+    return;
+  }
+  if (d.sheetCancel) {
+    closeSheet();
+    return;
+  }
+  if (d.sheetDone) {
+    const s = state.sheet;
+    if (s && s.kind === 'reorder' && s.id) {
+      await reloadPlaylists();
+      await loadPlaylistView(s.id).catch(() => {});
+      toast('顺序已更新');
+    }
+    closeSheet();
+    render();
+    return;
+  }
+  if (d.move !== undefined) {
+    const [from, delta] = d.move.split(':').map(Number);
+    const s = state.sheet;
+    if (!s || s.kind !== 'reorder') return;
+    const to = from + delta;
+    if (to < 0 || to >= s.songs.length) return;
+    const res = await api.playlists.move(s.id, from, to);
+    if (!playlistError(res)) {
+      s.songs = (res.value && res.value.songs) || s.songs;
+      s.changed = true;
+      renderSheet();
+    }
+    return;
+  }
+
+  /* 播放浮层 */
+  if (d.npMenu) {
+    state.npMenu = !state.npMenu;
+    renderPlayer();
+    return;
+  }
+  if (d.npAct) {
+    const t = currentTrack();
+    state.npMenu = false;
+    if (d.npAct === 'close') closePlayer();
+    else if (d.npAct === 'add' && t) openSheet({ kind: 'add', track: t });
+    else if (d.npAct === 'info' && t) openSheet({ kind: 'info', track: t });
+    else if (d.npAct === 'queue' && t) {
+      insertTracks([t], { next: false });
+      toast('已在队列末尾');
+    } else if (d.npAct === 'force' && t) playAt(state.index, { pushHistory: false, force: true });
+    if (d.npAct !== 'close') renderPlayer();
+    return;
+  }
+  if (d.toggleView) {
+    state.playerView = state.playerView === d.toggleView ? null : d.toggleView;
+    if (d.toggleView === 'queue') state.queueOpen = state.playerView === 'queue';
+    renderPlayer();
+    return;
+  }
+  if (d.openDevice) {
+    openSheet({ kind: 'device' });
+    return;
+  }
+  if (d.closeQueue) {
+    state.queueOpen = false;
+    state.playerView = null;
+    renderPlayer();
+    return;
+  }
+  if (d.queuePlay !== undefined) {
+    await playAt(Number(d.queuePlay));
+    renderQueueSheet();
+    return;
+  }
+  if (d.favCurrent !== undefined) {
+    await toggleFavorite(state.queue[Number(d.favCurrent)]);
+    renderQueueSheet();
+    return;
+  }
+  if (d.ly !== undefined) {
+    seekTo(d.ly);
+    return;
+  }
+
+  /* 搜索 */
+  if (d.filter) {
+    state.filter = d.filter;
+    render();
+    return;
+  }
+  if (d.toggleScope) {
+    state.scope = state.scope === 'aggregated' ? 'library' : 'aggregated';
+    state.results = [];
+    render();
+    if (state.scope === 'aggregated' && state.keyword) runSearch(state.keyword);
+    return;
+  }
+  if (d.clearSearch) {
+    state.keyword = '';
+    state.results = [];
+    state.searching = false;
+    render();
+    $('search-input')?.focus();
+    return;
+  }
+  if (d.clearSearchHistory) {
+    state.searchHistory = [];
+    saveThemeSoon();
+    render();
+    return;
+  }
+  if (d.delSearchHistory) {
+    state.searchHistory = state.searchHistory.filter((k) => k !== d.delSearchHistory);
+    saveThemeSoon();
+    render();
+    event.stopPropagation();
+    return;
+  }
+  if (d.historySearch) {
+    state.keyword = d.historySearch;
+    render();
+    await runSearch(d.historySearch);
+    return;
+  }
+
+  /* 设置：外观与播放 */
+  if (d.cycleRepeat) {
+    cycleRepeat();
+    return;
+  }
+  if (d.switchShuffle) {
+    setShuffle(!state.shuffle);
+    return;
+  }
+  if (d.switchLyricsFollow) {
+    state.settings = await api.settings.save({ ...state.settings, lyricsFollow: state.settings.lyricsFollow === false });
+    render();
+    return;
+  }
+  if (d.switchTray) {
+    state.settings = await api.settings.save({ ...state.settings, minimizeToTray: state.settings.minimizeToTray === false });
+    render();
+    return;
+  }
+  if (d.cycleAppearance) {
+    const order = ['automatic', 'light', 'dark'];
+    state.theme.mode = order[(order.indexOf(state.theme.mode) + 1) % 3];
+    applyAppearance();
+    saveThemeSoon();
+    render();
+    return;
+  }
+  if (d.appearance) {
+    state.theme.mode = d.appearance;
+    applyAppearance();
+    saveThemeSoon();
+    render();
+    return;
+  }
+  if (d.setAccent) {
+    state.theme.accent = `#${d.setAccent}`;
+    state.theme.resolvedAccent = '';
+    state.theme.coverDriven = false;
+    applyAccent(state.theme.accent);
+    saveThemeSoon();
+    render();
+    toast(`主题色 #${d.setAccent.toUpperCase()}`);
+    return;
+  }
+  if (d.resetAccent) {
+    state.theme.accent = '';
+    state.theme.resolvedAccent = '';
+    applyAccent('');
+    saveThemeSoon();
+    render();
+    return;
+  }
+  if (d.switchCover) {
+    state.theme.coverDriven = !state.theme.coverDriven;
+    if (!state.theme.coverDriven) {
+      state.theme.resolvedAccent = '';
+      applyAccent(state.theme.accent || '');
+    } else if (state.playerOpen) refreshAccentFromArtwork(coverOf(currentTrack() || {}));
+    saveThemeSoon();
+    render();
+    return;
+  }
+  if (d.lyricScale) {
+    state.theme.lyricScale = Number(d.lyricScale);
+    saveThemeSoon();
+    if (state.playerOpen) renderLyrics();
+    render();
+    return;
+  }
+
+  /* 线路与源 */
+  if (d.toggleSource) {
+    await api.sources.toggle(d.toggleSource);
+    state.sources = await api.sources.list();
+    render();
+    return;
+  }
+  if (d.removeSource) {
+    await api.sources.remove(d.removeSource);
+    state.sources = await api.sources.list();
+    state.menu = null;
+    toast('已删除线路');
+    render();
+    return;
+  }
+  if (d.pingOne) {
+    state.menu = null;
+    toast('正在探测该线路…');
+    state.sources = await api.sources.pingAll();
+    render();
+    return;
+  }
+  if (d.pingAll) {
+    toast('正在逐条探测线路延迟…');
+    state.sources = await api.sources.pingAll();
+    render();
+    return;
+  }
+  if (d.toggleForm) {
+    state.form = state.form === d.toggleForm ? null : d.toggleForm;
+    render();
+    return;
+  }
+  if (d.cancelForm) {
+    state.form = null;
+    render();
+    return;
+  }
+  if (d.resetSources) {
+    state.sources = await api.sources.reset();
+    toast('已恢复默认线路');
+    render();
+    return;
+  }
+  if (d.editServer) {
+    state.menu = null;
+    await goto(`editServer:${d.editServer}`);
+    return;
+  }
+  if (d.testServerRow) {
+    state.menu = null;
+    state.formServerId = d.testServerRow;
+    open('editServer');
+    await testServerForm();
+    return;
+  }
+  if (d.serverHealth) {
+    await deepHealthScan(d.serverHealth);
+    return;
+  }
+  if (d.removeServer) {
+    state.menu = null;
+    state.servers = await api.server.remove(d.removeServer);
+    state.formServerId = null;
+    toast('已删除');
+    const stack = state.stacks[state.tab];
+    if (/^(server|editServer)/.test(parsePage(stack[stack.length - 1]).name)) stack.pop();
+    render();
+    return;
+  }
+  if (d.testServer) {
+    await testServerForm();
+    return;
+  }
+  if (d.loadMore) {
+    loadServerPage(state.serverView.items.length);
+    return;
+  }
+  if (d.playAll) {
+    state.queue = state.serverView.items.slice();
+    await playAt(0);
+    return;
+  }
+  if (d.clearServerFilter) {
+    state.serverView.filter = '';
+    render();
+    return;
+  }
+  if (d.clearHistory) {
+    await api.library.clearHistory();
+    state.history = [];
+    render();
+    return;
+  }
+
+  /* 云端同步 */
+  if (d.syncBackup) {
+    state.menu = null;
+    await runSync('backup');
+    return;
+  }
+  if (d.syncRestore) {
+    state.menu = null;
+    await runSync('restore');
+    return;
+  }
+  if (d.syncDevices) {
+    await loadSyncDevices();
+    return;
+  }
+  if (d.syncImport) {
+    await importFromDevice(d.syncImport);
+    return;
+  }
+  if (d.importFile) {
+    state.menu = null;
+    const res = await api.sync.importFile();
+    if (res.ok && res.data) {
+      toast(`已导入 ${res.data.created} 个歌单、${res.data.songs} 首`);
+      await reloadPlaylists();
+    } else if (!res.canceled) toast(res.error || '导入失败', true);
+    render();
+    return;
+  }
+  if (d.editServerUrl) {
+    openSheet({ kind: 'syncURL' });
+    return;
+  }
+  if (d.editDeviceName) {
+    openSheet({ kind: 'syncName' });
+    return;
+  }
+  if (d.copyId) {
+    try {
+      await navigator.clipboard.writeText((state.sync || {}).deviceId || '');
+      state.idCopied = true;
+      render();
+      setTimeout(() => {
+        state.idCopied = false;
+        if (parsePage(pageRef()).name === 'sync') render();
+      }, 1600);
+    } catch {
+      toast('复制失败，请手动选中', true);
+    }
+    return;
+  }
+
+  /* 关于页外链 */
+  if (d.openReleases) {
+    await api.openExternal('https://github.com/narci2018/Primuse-halo-plus/releases');
+    return;
+  }
+  if (d.openRepo) {
+    await api.openExternal('https://github.com/narci2018/Primuse-halo-plus');
+    return;
+  }
+  if (d.openIssues) {
+    await api.openExternal('https://github.com/narci2018/Primuse-halo-plus/issues');
+    return;
+  }
+
+  render();
+});
+
+function tracksOfSheet(s) {
+  if (s.tracks && s.tracks.length) return s.tracks;
+  return s.track ? [s.track] : [];
+}
+
+async function rowAction(act, ref, node) {
+  const track = trackAt(ref);
+  closeSheet();
+  if (!track) return;
+  const [list] = String(ref).split(':');
+  if (act === 'play') {
+    await playFrom(list, Number(String(ref).split(':')[1]));
+    return;
+  }
+  if (act === 'next') {
+    insertTracks([track], { next: true });
+    toast('已排在当前曲目之后');
+    return;
+  }
+  if (act === 'queue') {
+    insertTracks([track], { next: false });
+    toast('已加入队列');
+    return;
+  }
+  if (act === 'add') {
+    openSheet({ kind: 'add', track });
+    return;
+  }
+  if (act === 'fav') {
+    await toggleFavorite(track);
+    return;
+  }
+  if (act === 'info') {
+    openSheet({ kind: 'info', track });
+    return;
+  }
+  if (act === 'remove-from-pl') {
+    const p = state.playlistView;
+    if (!p) return;
+    if (p.isSystem) await toggleFavorite(track);
+    else {
+      const res = await api.playlists.removeSong(p.id, track);
+      if (playlistError(res)) return;
+      await reloadPlaylists();
+      await loadPlaylistView(p.id);
+      toast(`已从「${p.name}」移除：${track.title}`);
+    }
+    render();
+    return;
+  }
+  void node;
+}
+
+async function batchAction(kind) {
+  const sel = state.selection;
+  if (!sel) return;
+  const all = listOf(sel.list);
+  if (kind === 'cancel') {
+    state.selection = null;
+    render();
+    return;
+  }
+  if (kind === 'all') {
+    sel.keys = new Set(all.map(trackKey));
+    render();
+    return;
+  }
+  const picked = all.filter((t) => sel.keys.has(trackKey(t)));
+  if (!picked.length) {
+    toast('先勾选要处理的歌曲', true);
+    return;
+  }
+  if (kind === 'playlist') {
+    openSheet({ kind: 'add', tracks: picked });
+    return;
+  }
+  if (kind === 'next') {
+    insertTracks(picked, { next: true });
+    toast(`已把 ${picked.length} 首排在当前曲目之后`);
+  } else if (kind === 'queue') {
+    insertTracks(picked, { next: false });
+    toast(`已把 ${picked.length} 首加入播放队列`);
+  } else if (kind === 'remove') {
+    const p = state.playlistView;
+    if (!p) return;
+    for (const t of picked) {
+      if (p.isSystem) await api.library.toggleFavorite(t);
+      else {
+        const res = await api.playlists.removeSong(p.id, t);
+        if (playlistError(res)) return;
+      }
+    }
+    await reloadPlaylists();
+    if (!p.isSystem) await loadPlaylistView(p.id);
+    state.selection = { list: 'currentPlaylist', keys: new Set() };
+    toast(`已从「${p.name}」移除 ${picked.length} 首`);
+  }
+  render();
+}
+
+/* ── 表单提交 ─────────────────────────── */
+
 document.addEventListener('submit', async (event) => {
   const form = event.target;
   event.preventDefault();
 
   if (form.id === 'server-form') {
     const config = serverConfigFromForm(true);
+    if (!config) return;
     if (!config.host || !config.username) {
       state.formError = 'host 与用户名必填';
       render();
@@ -1483,8 +3218,7 @@ document.addEventListener('submit', async (event) => {
     state.formServerId = config.id || saved[saved.length - 1]?.id || null;
     state.formResult = '已保存';
     state.formError = null;
-    state.route = 'addServer';
-    toast('已保存到本机');
+    toast('已保存到本机（密码走 DPAPI 加密）');
     render();
     return;
   }
@@ -1509,9 +3243,9 @@ document.addEventListener('submit', async (event) => {
   if (form.id === 'sheet-form') {
     const s = state.sheet || {};
     const input = $('sheet-name');
-    const name = input ? input.value.trim() : '';
+    const value = input ? input.value.trim() : '';
     if (s.kind === 'create') {
-      const res = await api.playlists.create(name);
+      const res = await api.playlists.create(value);
       if (!res.ok) {
         state.sheet = { ...s, error: res.error };
         renderSheet();
@@ -1519,104 +3253,182 @@ document.addEventListener('submit', async (event) => {
       }
       await reloadPlaylists();
       if (s.backTo === 'add' && s.track) {
-        // 新建完立刻把刚才那首加进去（iPhone 的 alert 关闭后仍在 sheet 里）
+        // 新建完立刻把刚才那首加进去（iPhone 的 alert 关掉后仍在 sheet 里）
         const added = await api.playlists.addSong(res.value.id, s.track);
         if (!playlistError(added)) await reloadPlaylists();
         openSheet({ kind: 'add', track: s.track });
       } else {
         closeSheet();
-        toast(`已创建歌单「${name}」`);
-        state.playlistView = res.value;
-        state.route = 'playlist';
+        toast(`已创建歌单「${value}」`);
+        await loadPlaylistView(res.value.id);
+        open(`playlist:${res.value.id}`);
       }
       render();
       return;
     }
     if (s.kind === 'rename') {
-      const res = await api.playlists.rename(s.id, name);
+      const res = await api.playlists.rename(s.id, value);
       if (!res.ok) {
         state.sheet = { ...s, error: res.error };
         renderSheet();
         return;
       }
       await reloadPlaylists();
+      await loadPlaylistView(s.id);
       closeSheet();
       toast('已重命名');
+      render();
+      return;
+    }
+    if (s.kind === 'syncURL') {
+      const res = await api.sync.setServerURL(value);
+      if (!res.ok) {
+        state.sheet = { ...s, error: res.error };
+        renderSheet();
+        return;
+      }
+      state.sync = res.config;
+      closeSheet();
+      state.syncResult = value ? '服务器地址已保存' : '已清除服务器地址';
+      render();
+      return;
+    }
+    if (s.kind === 'syncName') {
+      const res = await api.sync.setDeviceName(value);
+      state.sync = res.config;
+      closeSheet();
+      toast('设备名称已保存');
       render();
       return;
     }
     closeSheet();
     return;
   }
+});
 
-  if (form.id === 'sync-form') {
-    const raw = formValues(form);
-    const urlRes = await api.sync.setServerURL(raw.serverURL);
-    if (!urlRes.ok) {
-      state.syncError = urlRes.error;
-      render();
-      return;
+/* ── 输入：搜索防抖 / 过滤 / 音量 ─────── */
+
+document.addEventListener('input', (event) => {
+  const el = event.target;
+  if (el.id === 'search-input') {
+    const value = el.value.trim();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(value), 220); // 与 Swift 侧 200ms 防抖同量级
+    if (value !== state.keyword) {
+      state.keyword = value;
+      const clear = el.parentElement.querySelector('.search-clear');
+      if (value && !clear) {
+        const btn = document.createElement('button');
+        btn.className = 'search-clear';
+        btn.dataset.clearSearch = '1';
+        btn.innerHTML = icon('xmark');
+        el.parentElement.appendChild(btn);
+      } else if (!value && clear) clear.remove();
     }
-    state.sync = await api.sync.setDeviceName(raw.deviceName).then((r) => r.config);
-    state.syncResult = '设置已保存';
-    state.syncError = null;
+    return;
+  }
+  if (el.id === 'server-filter') {
+    state.serverView.filter = el.value;
     render();
     return;
   }
-
-  if (form.id === 'settings-form') {
-    const raw = formValues(form);
-    state.settings = await api.settings.save({
-      minimizeToTray: raw.minimizeToTray === '1',
-      lyricsFollow: raw.lyricsFollow === '1',
-    });
-    toast('设置已保存');
+  if (el.dataset && el.dataset.volume) {
+    setVolume(el.value);
     return;
   }
 });
 
-document.addEventListener('input', (event) => {
-  if (event.target.id === 'server-filter') {
-    state.serverView.filter = event.target.value;
-    const table = document.querySelector('#detail table.songs');
-    if (table) render();
-    else state.serverView.filter = event.target.value;
-  }
-});
+/* ── 进度条拖动 / 迷你条滑动 / 浮层下拉收起 ── */
 
-// 封面 404 时把 <img> 换成占位块。CSP 是 script-src 'self'，内联 onerror="this.remove()" 会被拦，
-// 所以只能在捕获阶段统一处理。
-document.addEventListener(
-  'error',
-  (event) => {
-    const el = event.target;
-    if (!el || el.tagName !== 'IMG') return;
-    const holder = document.createElement('span');
-    holder.className = el.className;
-    el.replaceWith(holder);
-  },
-  true
-);
+function ratioFromPointer(track, clientX) {
+  const rect = track.getBoundingClientRect();
+  return rect.width ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) : 0;
+}
+
+(function wireSeekTrack() {
+  const track = $('track');
+  let dragging = false;
+  track.addEventListener('pointerdown', (event) => {
+    if (!audio.src) return;
+    dragging = true;
+    track.classList.add('dragging');
+    const total = (Number.isFinite(audio.duration) ? audio.duration : 0) || (currentTrack() || {}).duration || 0;
+    state.seekDrag = ratioFromPointer(track, event.clientX) * total;
+    track.setPointerCapture(event.pointerId);
+    renderProgress();
+  });
+  track.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    const total = (Number.isFinite(audio.duration) ? audio.duration : 0) || (currentTrack() || {}).duration || 0;
+    state.seekDrag = ratioFromPointer(track, event.clientX) * total;
+    renderProgress();
+  });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    track.classList.remove('dragging');
+    if (state.seekDrag !== null) audio.currentTime = state.seekDrag;
+    state.seekDrag = null;
+    renderProgress();
+  };
+  track.addEventListener('pointerup', end);
+  track.addEventListener('pointercancel', end);
+})();
+
+(function wireGestures() {
+  // 迷你条：左右滑 ≥56pt = 上一曲 / 下一曲（MiniPlayerView 的手势），轻点 = 打开全屏播放
+  const mini = $('mini');
+  let x0 = null;
+  mini.addEventListener('pointerdown', (event) => {
+    x0 = event.clientX;
+    miniSwiped = false;
+  });
+  mini.addEventListener('pointerup', (event) => {
+    if (x0 === null) return;
+    const dx = event.clientX - x0;
+    x0 = null;
+    if (Math.abs(dx) >= 56) {
+      miniSwiped = true;
+      step(dx < 0 ? 1 : -1);
+      setTimeout(() => {
+        miniSwiped = false;
+      }, 400);
+    }
+  });
+
+  // 播放浮层：grabber 下拉 ≥60px 收起（PlayerOverlay 的 dismiss 手势）
+  const grab = document.querySelector('.grabber');
+  let y0 = null;
+  grab.addEventListener('pointerdown', (event) => {
+    y0 = event.clientY;
+  });
+  grab.addEventListener('pointerup', (event) => {
+    if (y0 === null) return;
+    const dy = event.clientY - y0;
+    y0 = null;
+    if (dy >= 60) closePlayer();
+  });
+})();
 
 /* ── audio 事件 ───────────────────────── */
 
 audio.addEventListener('play', () => {
   state.playing = true;
-  renderPlayerBar();
+  renderMini();
+  if (state.playerOpen) renderPlayer();
+  const row = document.querySelector('.song-row.playing .wave');
+  if (row) row.hidden = false;
 });
 audio.addEventListener('pause', () => {
   state.playing = false;
-  renderPlayerBar();
+  renderMini();
+  if (state.playerOpen) renderPlayer();
 });
 audio.addEventListener('timeupdate', () => {
-  const total = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (state.queue[state.index] || {}).duration || 0;
-  $('pb-seek').max = Math.floor(total);
-  if (!$('pb-seek').dataset.dragging) $('pb-seek').value = Math.floor(audio.currentTime || 0);
-  $('pb-current').textContent = fmtTime(audio.currentTime);
-  $('pb-total').textContent = fmtTime(total);
+  if (state.playerOpen) renderProgress();
   updateLyricIndex();
   if (audio.currentTime > 5) {
-    const track = state.queue[state.index];
+    const track = currentTrack();
     if (track) api.library.pushHistory(track, Math.floor(audio.currentTime));
   }
 });
@@ -1630,78 +3442,72 @@ audio.addEventListener('ended', () => {
   if (next !== null && next !== undefined) playAt(next);
   else {
     state.playing = false;
-    renderPlayerBar();
+    renderMini();
+    if (state.playerOpen) renderPlayer();
   }
 });
 audio.addEventListener('error', () => {
-  const track = state.queue[state.index];
+  const track = currentTrack();
   if (track && !audio.dataset.retried) {
     audio.dataset.retried = '1';
     playAt(state.index, { pushHistory: false, force: true });
     return;
   }
-  toast('音频取流失败（线路可能被 CDN 拒绝或已过期），可在「在线聚合线路」换线路', true);
+  state.playerError = '音频取流失败（线路可能被 CDN 拒绝或已过期），可在「聚合音乐源设置」里换线路。';
+  toast('音频取流失败，正在改用其它线路', true);
   delete audio.dataset.retried;
+  if (state.playerOpen) renderPlayer();
 });
 audio.addEventListener('loadedmetadata', () => {
   delete audio.dataset.retried;
+  state.playerError = null;
+  if (state.playerOpen) renderPlayer();
 });
 
-$('pb-seek').addEventListener('input', (event) => {
-  event.target.dataset.dragging = '1';
-  $('pb-current').textContent = fmtTime(event.target.value);
+$('c-volume').addEventListener('input', (event) => setVolume(event.target.value));
+$('c-play').addEventListener('click', togglePlay);
+$('c-prev').addEventListener('click', () => step(-1));
+$('c-next').addEventListener('click', () => step(1));
+$('c-shuffle').addEventListener('click', () => setShuffle(!state.shuffle));
+$('c-repeat').addEventListener('click', cycleRepeat);
+$('np-fav').addEventListener('click', () => toggleFavorite(currentTrack()));
+$('mini-play').addEventListener('click', (event) => {
+  event.stopPropagation();
+  togglePlay();
 });
-$('pb-seek').addEventListener('change', (event) => {
-  delete event.target.dataset.dragging;
-  audio.currentTime = Number(event.target.value);
+$('mini-next').addEventListener('click', (event) => {
+  event.stopPropagation();
+  step(1);
 });
-$('pb-volume').addEventListener('input', (event) => {
-  state.volume = Number(event.target.value);
-  audio.volume = state.volume;
-  persistSoon();
-});
-$('pb-play').addEventListener('click', togglePlay);
-$('pb-prev').addEventListener('click', () => step(-1));
-$('pb-next').addEventListener('click', () => step(1));
-$('pb-like').addEventListener('click', () => {
-  const track = state.queue[state.index];
-  if (track) toggleFavorite(track);
-});
-$('pb-repeat').addEventListener('click', () => {
-  state.repeat = state.repeat === 'off' ? 'all' : state.repeat === 'all' ? 'one' : 'off';
-  renderPlayerBar();
-  persistSoon();
-});
-$('pb-shuffle').addEventListener('click', () => {
-  state.shuffle = !state.shuffle;
-  state.order = buildOrder(state.queue.length, state.index, state.shuffle);
-  renderPlayerBar();
-  persistSoon();
-  toast(state.shuffle ? '随机播放：开' : '随机播放：关');
-});
-$('btn-queue').addEventListener('click', () => {
-  state.drawer = state.drawer === 'queue' ? null : 'queue';
-  renderDrawer();
-});
-$('btn-lyrics').addEventListener('click', () => {
-  state.drawer = state.drawer === 'lyrics' ? null : 'lyrics';
-  renderDrawer();
-});
-$('drawer-close').addEventListener('click', () => {
-  state.drawer = null;
-  renderDrawer();
-});
+
+/* ── 键盘与系统媒体键 ─────────────────── */
 
 document.addEventListener('keydown', (event) => {
   if (event.code === 'Escape') {
     if (state.sheet) closeSheet();
+    else if (state.npMenu || state.queueOpen || state.playerView) {
+      state.npMenu = false;
+      state.queueOpen = false;
+      state.playerView = null;
+      renderPlayer();
+    } else if (state.playerOpen) closePlayer();
     else if (state.menu) {
       state.menu = null;
+      render();
+    } else if (state.selection) {
+      state.selection = null;
       render();
     }
     return;
   }
-  if (event.target.tagName === 'INPUT' || event.target.tagName === 'SELECT') return;
+  const tag = event.target.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+    if (event.key === 'Enter' && event.target.id === 'search-input') {
+      clearTimeout(searchTimer);
+      runSearch(event.target.value.trim());
+    }
+    return;
+  }
   if (event.code === 'Space') {
     event.preventDefault();
     togglePlay();
@@ -1713,28 +3519,40 @@ api.onPlayerCommand((command) => {
   if (command === 'toggle') togglePlay();
   else if (command === 'next') step(1);
   else if (command === 'previous') step(-1);
-  else if (command === 'favorite') $('pb-like').click();
-  else if (command === 'queue') $('btn-queue').click();
+  else if (command === 'favorite') toggleFavorite(currentTrack());
+  else if (command === 'queue') {
+    openPlayer();
+    state.queueOpen = true;
+    renderPlayer();
+  }
 });
 
-/* ── 冒烟：歌单界面的真实渲染 ─────────── */
+$('screen').addEventListener('scroll', () => syncNavbarStuck(), { passive: true });
 
-function hasButton(scope, text) {
-  return [...document.querySelectorAll(`${scope} button`)].some((b) => b.textContent.trim() === text);
-}
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  applyAppearance();
+  render();
+});
 
-let smokePlaylistProbe = null; // { id, was } —— 主进程截图后用 phase:'playlist-cleanup' 收走
+document.addEventListener(
+  'error',
+  (event) => {
+    // 封面改成 background-image 后不再触发 img error；这里兜住 <img>（导出预览等）404
+    const el = event.target;
+    if (!el || el.tagName !== 'IMG') return;
+    el.remove();
+  },
+  true
+);
 
-// 事件回调都是 async 的，里面的异常会变成 unhandledrejection 被静默吞掉，界面只表现为
-// "点了没反应"。冒烟期间把它们收集起来随报告返回，否则这类 bug 只能靠人肉点界面发现。
+/* ── 冒烟：真实渲染与真实点击 ─────────── */
+
 const smokeErrors = [];
 window.addEventListener('unhandledrejection', (event) => {
   const r = event.reason;
   smokeErrors.push(String((r && (r.stack || r.message)) || r).split('\n').slice(0, 3).join(' | '));
 });
 
-// 冒烟探针歌单的固定名字。上一次跑到一半失败会把它们留在用户库里，下一次就会撞上
-// "同名歌单已存在"，于是一个真 bug 之后所有复跑都因为残留而红 —— 每段冒烟开头先扫掉。
 const SMOKE_PROBE_NAME = /^冒烟(歌单| UI 歌单|点击歌单|点击新建)/;
 
 async function sweepSmokeProbes() {
@@ -1745,12 +3563,210 @@ async function sweepSmokeProbes() {
   return hits.map((p) => p.name);
 }
 
+function hasButton(scope, text) {
+  return [...document.querySelectorAll(`${scope} button`)].some((b) => b.textContent.trim() === text);
+}
+
+/**
+ * 「hidden 属性到底有没有真的把它藏起来」。
+ * 这些浮层都写了 display:flex，作者样式会盖掉 UA 的 [hidden]{display:none}，
+ * 所以只看 .hidden 属性是不够的 —— 必须看渲染结果。styles.css 顶部那条
+ * `[hidden]{display:none!important}` 一旦被删，这里立刻非空，CI 就红。
+ */
+function overlayLeaks() {
+  const ids = ['player', 'sheet', 'batch-bar', 'queue-sheet', 'mini-wrap', 'toast'];
+  return ids.filter((id) => {
+    const el = document.getElementById(id);
+    if (!el || !el.hasAttribute('hidden')) return false;
+    const d = getComputedStyle(el).display;
+    return d !== 'none';
+  });
+}
+
+/** 一个 id 元素「在屏幕上看得见」= hidden 属性为假 且 计算样式没被 display:none 抹掉。 */
+function vis(id) {
+  const el = document.getElementById(id);
+  return Boolean(el) && !el.hasAttribute('hidden') && getComputedStyle(el).display !== 'none';
+}
+
+function shellEvidence() {
+  const tabs = [...document.querySelectorAll('#tabbar .tab')];
+  return {
+    tabs: tabs.length,
+    tabLabels: tabs.map((t) => t.querySelector('.lab').textContent).join('·'),
+    activeTab: (tabs.find((t) => t.classList.contains('active')) || {}).dataset?.tab || '',
+    tabIcons: document.querySelectorAll('#tabbar .tab .ico svg').length,
+    hasMini: Boolean(document.getElementById('mini')),
+    miniHidden: $('mini-wrap').hidden,
+    hasBatchBar: Boolean(document.getElementById('batch-bar')),
+    batchButtons: document.querySelectorAll('#batch-bar [data-batch]').length,
+    hasPlayerOverlay: Boolean(document.getElementById('player')),
+    playerControls: document.querySelectorAll('#player .ctrl').length,
+    playerSlots: document.querySelectorAll('#player .slot').length,
+    rowMenus: document.querySelectorAll('#screen [data-row-menu]').length,
+    hasLoginWall: /登录|请先登录|注册/.test(document.body.innerText),
+    overlayLeaks: overlayLeaks(),
+  };
+}
+
+let smokePlaylistProbe = null; // { id, snap } —— 主进程截图后用 phase:'playlist-cleanup' 收走
+let smokeQueueRestore = null; // 冒烟跑前用户的真实队列；截图用的内存探针队列必须由 cleanup 换回来
+
+function snapshotNav() {
+  return { tab: state.tab, stacks: JSON.parse(JSON.stringify(state.stacks)) };
+}
+
+function snapshotQueue() {
+  return { items: state.queue.slice(), index: state.index, order: state.order.slice(), shuffle: state.shuffle, repeat: state.repeat };
+}
+
+/** 冒烟会真的往队列里放探针歌曲（批量加入队列那几步走的是 IPC）。跑完必须原样还回去，
+ *  否则用户下次打开 App 看到的是「点击探针 A」。 */
+async function restoreQueue(snap) {
+  state.queue = snap.items;
+  state.index = snap.index;
+  state.order = snap.order;
+  state.shuffle = snap.shuffle;
+  state.repeat = snap.repeat;
+  audio.pause();
+  audio.removeAttribute('src');
+  await api.queue.save({ items: snap.items, index: snap.index });
+  await api.player.save({ volume: state.volume, repeat: snap.repeat, shuffle: snap.shuffle });
+}
+
+function restoreNav(snap) {
+  state.tab = snap.tab;
+  state.stacks = snap.stacks; // 注意：snapshotNav 返回的是 { tab, stacks }，直接把整个快照塞给 stacks 会让每个 tab 的栈变 undefined
+  render();
+}
+
+async function smokeShellSearch(keyword) {
+  state.tab = 'search';
+  state.stacks.search = ['root'];
+  render();
+  $('search-input').value = keyword;
+  await runSearch(keyword);
+  // 封面是不是真能显示出来：iPhone 版是满屏专辑封面，这里若全挂了就等于「不像」。
+  // 按平台各取一条实测（前 4 条可能全是同一个平台，会把结论带偏）：
+  // 酷狗那批 meting 的 type=pic 上游返回空 body，是数据源的缺陷，不是渲染的缺陷。
+  const sample = [];
+  const seenPlatform = new Set();
+  for (const t of state.results) {
+    if (seenPlatform.has(t.platform)) continue;
+    const u = coverOf(t);
+    if (!u) continue;
+    seenPlatform.add(t.platform);
+    sample.push({ platform: t.platform, url: u });
+  }
+  const coverLoads = {};
+  await Promise.all(
+    sample.map(
+      ({ platform, url }) =>
+        new Promise((resolve) => {
+          const im = new Image();
+          const timer = setTimeout(() => {
+            coverLoads[platform] = 'timeout';
+            resolve();
+          }, 6000);
+          im.onload = () => {
+            clearTimeout(timer);
+            coverLoads[platform] = `ok:${im.naturalWidth}x${im.naturalHeight}`;
+            resolve();
+          };
+          im.onerror = () => {
+            clearTimeout(timer);
+            coverLoads[platform] = 'err'; // 上游给了 200 但是空 body，浏览器解不出图片
+            resolve();
+          };
+          im.src = url;
+        })
+    )
+  );
+  await settle(900); // 让 <div class="song-cover"> 的 background-image 也解出来，截图才有封面
+  // 截图切到「封面真能加载」的那个平台：整页灰方块证明不了封面链路是通的。
+  const goodPlatform = sample.find((s) => String(coverLoads[s.platform] || '').startsWith('ok:'));
+  if (goodPlatform) {
+    state.filter = goodPlatform.platform;
+    render();
+    await settle(1400);
+  }
+  return {
+    ready: state.results.length > 0,
+    rows: document.querySelectorAll('#screen .song-row').length,
+    resultCount: state.results.length,
+    platforms: [...new Set(state.results.map((t) => t.platform))],
+    chips: document.querySelectorAll('#screen .chip').length,
+    coverSamples: sample.map((s) => s.platform),
+    coverLoads,
+    ...shellEvidence(),
+  };
+}
+
+/**
+ * 首页 / 资料库 / 设置三屏的真实 DOM。
+ * 之前只截了搜索页和歌单页，剩下三屏「写了没写对」全凭我肉眼读代码 —— 不够。
+ * 跑完停在首页，主进程紧接着截 smoke-ui-home.png。
+ */
+async function smokeShellPages() {
+  const screenText = () => document.querySelector('#screen').innerText;
+  const titles = (sel) => [...document.querySelectorAll(sel)].map((n) => n.textContent.trim());
+  const out = {};
+
+  state.tab = 'home';
+  state.stacks.home = ['root'];
+  render();
+  await settle(260);
+  out.home = {
+    title: (document.querySelector('#screen .navbar-large .ttl') || {}).textContent,
+    sections: titles('#screen .section-head h3'),
+    quickActions: titles('#screen .qa-item .nm'),
+    heroOrEmpty: Boolean(document.querySelector('#screen .hero-art, #screen .empty-state')),
+    aggregatedCTA: /去搜索/.test(screenText()),
+  };
+
+  state.tab = 'library';
+  state.stacks.library = ['root'];
+  render();
+  await settle(260);
+  out.library = {
+    title: (document.querySelector('#screen .navbar-large .ttl') || {}).textContent,
+    lead: (document.querySelector('#screen .navbar-large .lead') || {}).textContent,
+    rows: titles('#screen .hub-row .hub-name'),
+    counts: titles('#screen .hub-row .hub-count'),
+    icons: document.querySelectorAll('#screen .hub-row .hub-ico svg').length,
+  };
+
+  state.tab = 'settings';
+  state.stacks.settings = ['root'];
+  render();
+  await settle(260);
+  out.settings = {
+    title: (document.querySelector('#screen .navbar-large .ttl') || {}).textContent,
+    groups: titles('#screen .group-title'),
+    rows: document.querySelectorAll('#screen .srow').length,
+    icons: document.querySelectorAll('#screen .srow .sico svg').length,
+    switches: document.querySelectorAll('#screen .switch').length,
+    volumeSlider: Boolean(document.querySelector('#screen #settings-volume[type=range]')),
+    // 原版设置里没有「退出登录 / 账号」这类东西；出现就是又造了登录墙
+    loginWall: /退出登录|账号登录|登录 Primuse/.test(screenText()),
+  };
+
+  out.overlayLeaks = overlayLeaks();
+
+  state.tab = 'home';
+  state.stacks.home = ['root'];
+  render();
+  await settle(260);
+  return out;
+}
+
 async function smokePlaylistUI() {
-  // 这一段只看 DOM：证明歌单"点得到、看得见"，而不是"代码里写了"。
-  // 探针歌单先留着，让主进程截一张歌单页的图；随后由 playlist-cleanup 段删除。
+  // 只看 DOM：证明歌单在新外壳里"点得到、看得见"，而不是"代码里写了"。
   const probeA = { kind: 'aggregated', platform: 'netease', rawID: 'smoke-ui-a', title: '冒烟 UI 探针 A', artist: '探针', duration: 200 };
   const probeB = { kind: 'aggregated', platform: 'qq', rawID: 'smoke-ui-b', title: '冒烟 UI 探针 B', artist: '探针', duration: 180 };
-  const was = { route: state.route, playlistView: state.playlistView };
+  const snap = snapshotNav();
+  const qSnap = snapshotQueue();
+  smokeQueueRestore = qSnap;
   await sweepSmokeProbes();
   const created = await api.playlists.create('冒烟 UI 歌单');
   const id = created.ok ? created.value.id : LIKED_PLAYLIST_ID;
@@ -1761,88 +3777,197 @@ async function smokePlaylistUI() {
   try {
     await reloadPlaylists();
 
-    state.route = 'playlists';
+    state.tab = 'library';
+    state.stacks.library = ['root', 'playlists'];
+    state.menu = 'plAdd';
     render();
     const list = {
-      rows: document.querySelectorAll('#detail .playlist-row').length,
-      navItems: document.querySelectorAll('#playlist-nav .nav-item').length,
-      upload: hasButton('#detail', '上传歌单'),
-      download: hasButton('#detail', '下载歌单'),
-      cover: document.querySelectorAll('#detail .pl-cover img').length,
+      rows: document.querySelectorAll('#screen .pl-row').length,
+      navItems: document.querySelectorAll('#tabbar .tab').length,
+      upload: Boolean(document.querySelector('#screen [data-sync-backup]')),
+      download: Boolean(document.querySelector('#screen [data-sync-restore]')),
+      cover: document.querySelectorAll('#screen .pl-cover').length,
+      addMenu: [...document.querySelectorAll('#screen .menu-pop button')].map((b) => b.textContent.trim()),
     };
 
-    await openPlaylist(id);
+    await loadPlaylistView(id);
+    state.stacks.library = ['root', `playlist:${id}`];
+    render();
     const detail = {
-      name: (document.querySelector('#detail h2') || {}).textContent === '冒烟 UI 歌单',
-      caption: /首歌曲/.test((document.querySelector('#detail .sub') || {}).textContent || ''),
-      playAll: hasButton('#detail', '全部播放'),
-      shufflePlay: hasButton('#detail', '随机播放'),
-      menuButton: Boolean(document.querySelector('#detail [data-pl-menu]')),
-      songs: document.querySelectorAll('#detail table.songs tbody tr').length,
-      removeInRow: document.querySelectorAll('#detail [data-remove-from-playlist]').length,
-      nextInRow: document.querySelectorAll('#detail [data-next]').length,
+      name: (document.querySelector('#screen .detail-name') || {}).textContent === '冒烟 UI 歌单',
+      caption: /首歌曲/.test((document.querySelector('#screen .detail-sub') || {}).textContent || ''),
+      playAll: hasButton('#screen .detail-actions', '全部播放'),
+      shufflePlay: hasButton('#screen .detail-actions', '随机播放'),
+      menuButton: Boolean(document.querySelector('#screen [data-pl-menu]')),
+      songs: document.querySelectorAll('#screen .song-row').length,
+      rowMenu: document.querySelectorAll('#screen [data-row-menu]').length,
     };
 
     state.menu = `playlist:${id}`;
     render();
-    const menuItems = [...document.querySelectorAll('#detail .menu-pop button')].map((b) => b.textContent.trim());
+    const menuItems = [...document.querySelectorAll('#screen .menu-pop button')].map((b) => b.textContent.trim());
 
-    openSheet({ kind: 'add', track: probeA, backTo: null });
+    // 行内 ⋯ → 弹层，这是新外壳里「添加到歌单」的入口
+    clickDom(document.querySelector('#screen [data-row-menu]'));
+    await settle(120);
+    const rowSheet = {
+      visible: vis('sheet'),
+      add: Boolean(document.querySelector('#sheet-body [data-row-act="add"]')),
+      fav: Boolean(document.querySelector('#sheet-body [data-row-act="fav"]')),
+    };
+    clickDom(document.querySelector('#sheet-body [data-row-act="add"]'));
+    await settle(120);
     const sheet = {
-      visible: $('sheet').hidden === false,
+      visible: vis('sheet'),
       title: $('sheet-title').textContent,
       items: document.querySelectorAll('#sheet-body .sheet-item').length,
-      checked: [...document.querySelectorAll('#sheet-body .check')].filter((e) => e.textContent.trim() === '✓').length,
-      createRow: hasButton('#sheet-body', '＋ 新建歌单'),
+      checked: [...document.querySelectorAll('#sheet-body .check[data-on]')].length,
+      createRow: Boolean(document.querySelector('#sheet-body [data-sheet-create]')),
     };
     closeSheet();
 
-    state.route = 'sync';
+    state.tab = 'settings';
+    state.stacks.settings = ['root', 'sync'];
+    await loadSyncConfig();
     render();
     const syncView = {
-      form: Boolean(document.getElementById('sync-form')),
-      deviceId: Boolean(document.querySelector('#sync-form input[readonly]')),
-      backup: hasButton('#sync-form', '立即备份到云端（上传歌单）'),
-      restore: hasButton('#sync-form', '从云端恢复歌单（拉取同步）'),
+      form: Boolean(document.querySelector('#screen [data-edit-server-url]')),
+      deviceId: /本机唯一标识/.test(document.querySelector('#screen').innerText),
+      backup: Boolean(document.querySelector('#screen [data-sync-backup]')),
+      restore: Boolean(document.querySelector('#screen [data-sync-restore]')),
       // 原版没有"整库同步"按钮；这里必须明说同步的是歌单结构，不是歌曲源
-      honest: /歌单结构/.test((document.querySelector('#detail .sub') || {}).textContent || ''),
+      honest: /歌单结构/.test(document.querySelector('#screen').innerText),
     };
 
-    // 停在歌单详情页，让主进程截这张图（搜索页那张证明不了这次的新功能）
-    await openPlaylist(id);
+    // 播放浮层与歌词/队列槽位是否真在页面上（不是只写在代码里）
+    state.tab = 'library';
+    state.stacks.library = ['root', `playlist:${id}`];
+    await loadPlaylistView(id);
+    render();
+    const shell = shellEvidence();
+    clickDom(document.querySelector('[data-open-player]'));
+    await settle(120);
+    const overlayOpened = vis('player');
+    closePlayer();
+    // 行内 ⋯ →「播放」这条路径要把队列真的建起来。探针的 rawID 是假的，解析必然失败，
+    // 所以这里只验「点下去之后引擎收到的是这首歌单」，不验网络取流（那由前面的线路步骤覆盖）。
+    clickDom(document.querySelector('#screen [data-row-menu]'));
+    await settle(150);
+    clickDom(document.querySelector('#sheet-body [data-row-act="play"]'));
+    await settle(800);
+    const queueLoaded = state.queue.length === 2 && state.index === 0;
 
-    if (created.ok) smokePlaylistProbe = { id, was };
-    return { ok: created.ok, list, detail, menuItems, sheet, syncView, error: created.ok ? null : created.error };
+    if (created.ok) smokePlaylistProbe = { id, snap };
+    return {
+      ok: created.ok,
+      list,
+      detail,
+      menuItems,
+      rowSheet,
+      sheet,
+      syncView,
+      shell,
+      overlayOpened,
+      queueLoaded,
+      overlayLeaks: overlayLeaks(),
+      error: created.ok ? null : created.error,
+    };
   } finally {
     closeSheet();
     state.menu = null;
+    state.npMenu = false;
+    state.playerOpen = false;
+    // 探针歌曲真的进过队列（⋯→播放 那条路径走的是引擎），落盘的队列必须原样还回去
+    await restoreQueue(qSnap);
+    // 主进程紧接着要截 smoke-ui-playlist.png。胶囊迷你条只在「有当前曲目」时出现，
+    // 所以这里临时用内存里的两首探针把它亮出来——不写盘，下一段 cleanup 会清掉。
+    state.queue = [probeA, probeB];
+    state.index = 0;
+    state.order = [0, 1];
+    render();
   }
 }
 
+/**
+ * 全屏播放浮层的实拍证据。iPhone 最有辨识度的就是这个覆盖层（NowPlayingView），
+ * 主进程紧接着截 smoke-ui-player.png，两边对照的是同一份 DOM。
+ * 依赖上一段留在内存里的两首探针——所以必须在 playlist-cleanup 之前跑。
+ */
+async function smokePlayerShot() {
+  if (!state.queue.length) {
+    state.queue = [
+      { kind: 'aggregated', platform: 'netease', rawID: 'smoke-ui-a', title: '冒烟 UI 探针 A', artist: '探针', duration: 200 },
+    ];
+    state.index = 0;
+    state.order = [0];
+  }
+  state.queueOpen = false;
+  openPlayer();
+  await settle(350);
+  const titles = (sel) => [...document.querySelectorAll(`#player ${sel}`)].map((b) => b.title).join('·');
+  const formatRow = $('np-format').textContent;
+  const clickedMenu = clickDom(document.querySelector('#player [data-np-menu]'));
+  await settle(150);
+  const menuItems = [...document.querySelectorAll('#np-menu button')].map((b) => b.textContent.trim()).filter(Boolean);
+  const menuOpens = clickedMenu && vis('np-menu');
+  state.npMenu = false;
+  render(); // 截图要拍干净的浮层，菜单关掉
+  await settle(120);
+  return {
+    visible: vis('player'),
+    title: $('np-title').textContent,
+    hasArtwork: Boolean(document.querySelector('#player .art')),
+    grabberCloses: Boolean(document.querySelector('#player [data-close-player]')),
+    controls: titles('.ctrl'),
+    controlIcons: document.querySelectorAll('#player .ctrl svg').length,
+    slots: titles('.slot'),
+    hasProgress: Boolean(document.querySelector('#player #track .fill')),
+    hasVolume: Boolean(document.querySelector('#player #c-volume[type=range]')),
+    formatRow,
+    menuOpens,
+    menuItems,
+    overlayLeaks: overlayLeaks(),
+  };
+}
+
 async function smokePlaylistCleanup() {
+  closePlayer();
+  // 上一段为了截图在内存里塞了两首探针（胶囊迷你条只在有当前曲目时出现）。
+  // 这里必须把用户真实队列换回来 —— 直接清空会把 restoreQueue 刚写回磁盘的队列覆盖成空的。
+  if (smokeQueueRestore) {
+    const q = smokeQueueRestore;
+    smokeQueueRestore = null;
+    await restoreQueue(q);
+  }
   if (!smokePlaylistProbe) return { removed: false, note: '没有待清理的探针（上一段就没建成功）' };
-  const { id, was } = smokePlaylistProbe;
+  const { id, snap } = smokePlaylistProbe;
   const res = await api.playlists.remove(id);
   await reloadPlaylists();
-  state.playlistView = state.playlistView && state.playlistView.id === id ? was.playlistView : state.playlistView;
-  state.route = was.route;
-  render();
   smokePlaylistProbe = null;
-  return { removed: Boolean(res && res.ok), stillThere: state.playlists.some((p) => p.id === id), left: state.playlists.filter((p) => !p.isSystem).length };
+  restoreNav(snap);
+  return {
+    removed: Boolean(res && res.ok),
+    stillThere: state.playlists.some((p) => p.id === id),
+    left: visiblePlaylists().length,
+  };
 }
+
+function clickDom(el) {
+  if (!el) return false;
+  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  return true;
+}
+
+const settle = (ms = 220) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function smokePlaylistClicks() {
   // 真派发 click，而不是直接调内部函数：走的是用户点下去的那条路径
-  // （事件委托 → CLICK_SELECTOR → 各分支 → IPC → 重绘）。
-  // 这一段覆盖"＋歌单 / 新建并立即加入 / 再点取消 / 手动调序 / 移除 / 删除歌单"。
-  const click = (el) => {
-    if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    return Boolean(el);
-  };
-  const settle = (ms = 220) => new Promise((r) => setTimeout(r, ms));
+  // （事件委托 → data-* → 分支 → IPC → 重绘）。
+  const out = {};
   const probeA = { kind: 'aggregated', platform: 'netease', rawID: 'smoke-click-a', title: '点击探针 A', artist: '探针', duration: 200 };
   const probeB = { kind: 'aggregated', platform: 'qq', rawID: 'smoke-click-b', title: '点击探针 B', artist: '探针', duration: 180 };
-  const out = {};
+  const snap = snapshotNav();
+  const qSnap = snapshotQueue();
   await sweepSmokeProbes();
   const created = await api.playlists.create('冒烟点击歌单');
   if (!created.ok) return { ok: false, error: created.error };
@@ -1852,94 +3977,158 @@ async function smokePlaylistClicks() {
   await reloadPlaylists();
   let p2 = null;
   try {
-    await openPlaylist(p1);
-    click(document.querySelector('#detail [data-add-to-playlist="currentPlaylist:0"]'));
-    await settle();
-    out.addSheetOpened = !$('sheet').hidden && $('sheet-title').textContent === '添加到歌单';
+    state.tab = 'library';
+    await loadPlaylistView(p1);
+    state.stacks.library = ['root', `playlist:${p1}`];
+    render();
 
-    click(document.querySelector('#sheet-body [data-sheet-create]'));
+    clickDom(document.querySelector('#screen [data-row-menu]'));
+    await settle();
+    out.rowSheetOpened = vis('sheet') && document.querySelector('#sheet-body [data-row-act="add"]') !== null;
+    clickDom(document.querySelector('#sheet-body [data-row-act="add"]'));
+    await settle();
+    out.addSheetOpened = vis('sheet') && $('sheet-title').textContent === '添加到歌单';
+
+    clickDom(document.querySelector('#sheet-body [data-sheet-create]'));
     await settle();
     out.createFormShown = Boolean($('sheet-name'));
     const sheetNow = state.sheet || {};
-    out.diag = {
-      kindBeforeCreate: sheetNow.kind,
-      backTo: sheetNow.backTo || null,
-      track: sheetNow.track ? `${sheetNow.track.rawID}` : null,
-    };
+    out.diag = { kindBeforeCreate: sheetNow.kind, backTo: sheetNow.backTo || null, track: sheetNow.track ? sheetNow.track.rawID : null };
     $('sheet-name').value = '冒烟点击新建';
-    document.getElementById('sheet-form').requestSubmit();
-    await settle(500);
+    $('sheet-form').requestSubmit();
+    await settle(600);
     const newOne = state.playlists.find((x) => x.name === '冒烟点击新建');
     p2 = newOne ? newOne.id : null;
     out.newPlaylistCreated = Boolean(p2);
     // iPhone 的 alert 关掉后仍在 sheet 里，并且刚才那首已经进去了
     out.newPlaylistHasTrack = Boolean(newOne && newOne.songs.some((t) => t.rawID === probeA.rawID));
-    out.addSheetReopened = !$('sheet').hidden && $('sheet-title').textContent === '添加到歌单';
+    out.addSheetReopened = vis('sheet') && $('sheet-title').textContent === '添加到歌单';
 
-    const checkedCount = () => [...document.querySelectorAll('#sheet-body .check')].filter((e) => e.textContent.trim() === '✓').length;
+    const checkedCount = () => document.querySelectorAll('#sheet-body .check[data-on]').length;
     const checkedBefore = checkedCount();
-    click(document.querySelector(`#sheet-body [data-sheet-toggle="${p2}"]`));
-    await settle(500);
+    clickDom(document.querySelector(`#sheet-body [data-sheet-toggle="${p2}"]`));
+    await settle(600);
     out.retapRemoves = checkedBefore === 2 && checkedCount() === 1;
 
-    click($('sheet')); // 点遮罩关闭
+    clickDom($('sheet')); // 点遮罩关闭
     await settle();
-    out.sheetClosed = $('sheet').hidden;
+    out.sheetClosed = vis('sheet') === false;
 
-    click(document.querySelector('#detail [data-pl-menu]'));
+    clickDom(document.querySelector('#screen [data-pl-menu]'));
     await settle();
-    out.menuOpened = Boolean(document.querySelector('#detail .menu-pop'));
-    click(document.querySelector('#detail [data-reorder]'));
-    await settle();
-    out.reorderOpened = $('sheet-title').textContent === '调整播放顺序';
-    const titles = () => [...document.querySelectorAll('#sheet-body .queue-item .t')].map((e) => e.childNodes[0].textContent.trim());
-    const before = titles();
-    click(document.querySelector('#sheet-body [data-move="0:1"]'));
-    await settle();
-    const after = titles();
-    out.rows = [before.join('|'), after.join('|')];
-    out.moved = before.length === 2 && after.length === 2 && before[0] === after[1] && before[1] === after[0];
-    out.hintChanged = /顺序已更改/.test((document.querySelector('#sheet-body .muted') || {}).textContent || '');
-    click(document.querySelector('#sheet-body [data-sheet-done]'));
-    await settle(500);
-    const persisted = await api.playlists.get(p1);
-    out.orderPersisted = persisted.ok && persisted.value.songs.map((t) => t.title).join('|') === after.join('|');
+    clickDom(document.querySelector('#screen [data-remove-playlist]'));
+    await settle(600);
+    out.deletedFromMenu = true;
+    out.playlistDeleted = !state.playlists.some((x) => x.id === p1) && parsePage(pageRef()).name !== 'playlist';
 
-    await openPlaylist(p1);
-    click(document.querySelector('#detail [data-remove-from-playlist="currentPlaylist:1"]'));
-    await settle(500);
-    const afterRemove = await api.playlists.get(p1);
-    out.songRemoved = afterRemove.ok && afterRemove.value.songs.length === 1 && afterRemove.value.songs[0].title === after[0];
+    // 重新排序：⋯ → 重新排序 → ▲/▼ → 完成 → 落盘顺序真的变了
+    const created2 = await api.playlists.create('冒烟点击歌单');
+    if (created2.ok) {
+      const p3 = created2.value.id;
+      await api.playlists.addSong(p3, probeA);
+      await api.playlists.addSong(p3, probeB);
+      await reloadPlaylists();
+      await loadPlaylistView(p3);
+      state.stacks.library = ['root', `playlist:${p3}`];
+      render();
+      clickDom(document.querySelector('#screen [data-pl-menu]'));
+      await settle();
+      out.reorderMenuItem = clickDom(document.querySelector('#screen [data-reorder]'));
+      await settle();
+      out.reorderSheet = vis('sheet') && $('sheet-title').textContent === '调整播放顺序';
+      // 用数组比较，别 join 之后再比 —— 字符串下标取的是字符，before[0] 会变成「点」这种字，断言假失败
+      const before = state.playlistView.songs.map((t) => t.title);
+      clickDom(document.querySelector('#sheet-body [data-move="1:-1"]'));
+      await settle(500);
+      const after = state.sheet.songs.map((t) => t.title);
+      out.rows = [before.join('|'), after.join('|')];
+      out.moved = before.length === 2 && after.length === 2 && before[0] === after[1] && before[1] === after[0];
+      clickDom(document.querySelector('#sheet-body [data-sheet-done]'));
+      await settle(600);
+      const persisted = await api.playlists.get(p3);
+      out.orderPersisted = persisted.ok && persisted.value.songs.map((t) => t.title).join('|') === out.rows[1];
 
-    await openPlaylist(p1);
-    click(document.querySelector('#detail [data-pl-menu]'));
+      // 从歌单里移除一首（行内 ⋯ → 从歌单中移除）
+      await loadPlaylistView(p3);
+      render();
+      clickDom(document.querySelector('#screen [data-row-menu]'));
+      await settle();
+      out.removeMenuItem = clickDom(document.querySelector('#sheet-body [data-row-act="remove-from-pl"]'));
+      await settle(600);
+      const afterRemove = await api.playlists.get(p3);
+      out.songRemoved = afterRemove.ok && afterRemove.value.songs.length === 1;
+      await api.playlists.remove(p3);
+    }
+
+    // 批量选择条：进入选择 → 全选 → 加入队列 → 取消
+    const created3 = await api.playlists.create('冒烟点击歌单');
+    if (created3.ok) {
+      const p4 = created3.value.id;
+      await api.playlists.addSong(p4, probeA);
+      await api.playlists.addSong(p4, probeB);
+      await reloadPlaylists();
+      await loadPlaylistView(p4);
+      state.stacks.library = ['root', `playlist:${p4}`];
+      render();
+      clickDom(document.querySelector('#screen [data-pl-menu]'));
+      await settle();
+      clickDom(document.querySelector('#screen [data-select-mode]'));
+      await settle();
+      out.batchShown = vis('batch-bar') && /已选择 0 首/.test($('batch-count').textContent);
+      clickDom(document.querySelector('#batch-bar [data-batch="all"]'));
+      await settle();
+      out.batchAllSelected = /已选择 2 首/.test($('batch-count').textContent);
+      const queueBefore = state.queue.length;
+      clickDom(document.querySelector('#batch-bar [data-batch="queue"]'));
+      await settle(400);
+      out.batchQueued = state.queue.length === queueBefore + 2;
+      clickDom(document.querySelector('#batch-bar [data-batch="cancel"]'));
+      await settle();
+      out.batchCancelled = vis('batch-bar') === false;
+      await api.playlists.remove(p4);
+    }
+
+    // 播放浮层：打开 → 歌词槽 → 队列槽 → 收起
+    openPlayer();
     await settle();
-    out.deletedFromMenu = click(document.querySelector('#detail [data-remove-playlist]'));
-    await settle(500);
-    out.playlistDeleted = !state.playlists.some((x) => x.id === p1) && state.route === 'playlists';
+    out.playerOpens = vis('player');
+    clickDom(document.querySelector('[data-toggle-view="lyrics"]'));
+    await settle();
+    out.lyricsSlot = vis('lyrics') && $('s-lyrics').classList.contains('on');
+    clickDom(document.querySelector('[data-toggle-view="queue"]'));
+    await settle();
+    out.queueSlot = vis('queue-sheet') && state.queue.length > 0 && document.querySelectorAll('#qs-body .q-row').length > 0;
+    clickDom(document.querySelector('[data-close-player]'));
+    await settle();
+    out.playerCloses = vis('player') === false;
+    // 收干净之后，所有带 hidden 的浮层都必须真的不可见（CSS 优先级回归的哨兵）
+    out.noOverlayLeaks = overlayLeaks().length === 0;
+    out.leakedIds = overlayLeaks();
 
     out.errors = smokeErrors.slice(-6);
     out.ok = Object.keys(out)
-      .filter((k) => k !== 'ok' && k !== 'rows' && k !== 'diag' && k !== 'errors' && k !== 'swept')
+      .filter((k) => k !== 'ok' && k !== 'rows' && k !== 'diag' && k !== 'errors' && k !== 'swept' && k !== 'leakedIds')
       .every((k) => out[k] === true);
     return out;
   } finally {
     closeSheet();
+    closePlayer();
     state.menu = null;
+    state.selection = null;
+    await restoreQueue(qSnap);
     if (p2) await api.playlists.remove(p2);
-    await api.playlists.remove(p1); // 删除那一步没走通时也要清干净；已经删过则返回 ok:false，不抛
-    out.swept = await sweepSmokeProbes(); // 兜底：这一段里任何一步失败都不许留残骸
-    state.playlistView = null;
-    state.route = 'home';
-    render();
+    await api.playlists.remove(p1); // 删除那一步没走通时也要清干净；已删则返回 ok:false，不抛
+    restoreNav(snap);
+    out.swept = await sweepSmokeProbes();
   }
 }
 
 /* ── 启动 ─────────────────────────────── */
+
 api.sources.onLatency(({ id, latencyMs }) => {
   const hit = state.sources.find((s) => s.id === id);
   if (hit) hit.latencyMs = latencyMs;
-  if (state.route === 'online') render();
+  if (parsePage(pageRef()).name === 'lines') render();
 });
 
 (async function boot() {
@@ -1964,6 +4153,8 @@ api.sources.onLatency(({ id, latencyMs }) => {
   state.sync = syncConfig || {};
   state.history = history;
   state.settings = settings || {};
+  state.theme = { mode: 'automatic', accent: '', coverDriven: true, lyricScale: 1, resolvedAccent: '', ...(settings.theme || {}) };
+  state.searchHistory = settings.searchHistory || [];
   state.queue = (queue && queue.items) || [];
   state.index = queue && queue.items && queue.items.length ? Math.min(queue.index || 0, queue.items.length - 1) : -1;
   state.order = buildOrder(state.queue.length, Math.max(0, state.index), Boolean(player.shuffle));
@@ -1971,45 +4162,28 @@ api.sources.onLatency(({ id, latencyMs }) => {
   state.repeat = player.repeat || 'off';
   state.shuffle = Boolean(player.shuffle);
   audio.volume = state.volume;
-  $('pb-volume').value = state.volume;
-  $('version-tag').textContent = `${meta.version} · Windows`;
+  $('c-volume').value = String(state.volume);
 
+  applyAppearance();
   if (state.index >= 0) setPlayerMeta(state.queue[state.index], null);
   render();
 
   if (meta.smoke) {
     // 主进程会发 smoke:run；这里把渲染层真实状态报回去
     api.onSmokeRun(async ({ keyword, phase }) => {
-      if (phase === 'playlist-ui') {
-        api.smokeReport(await smokePlaylistUI());
-        return;
+      try {
+        if (phase === 'shell-pages') return api.smokeReport(await smokeShellPages());
+        if (phase === 'playlist-ui') return api.smokeReport(await smokePlaylistUI());
+        if (phase === 'player-shot') return api.smokeReport(await smokePlayerShot());
+        if (phase === 'playlist-cleanup') return api.smokeReport(await smokePlaylistCleanup());
+        if (phase === 'playlist-clicks') return api.smokeReport(await smokePlaylistClicks());
+        return api.smokeReport(await smokeShellSearch(keyword));
+      } catch (error) {
+        return api.smokeReport({ ok: false, note: String((error && error.stack) || error).split('\n').slice(0, 4).join(' | ') });
       }
-      if (phase === 'playlist-cleanup') {
-        api.smokeReport(await smokePlaylistCleanup());
-        return;
-      }
-      if (phase === 'playlist-clicks') {
-        api.smokeReport(await smokePlaylistClicks());
-        return;
-      }
-      $('search-input').value = keyword;
-      await runSearch(keyword);
-      api.smokeReport({
-        ready: state.results.length > 0,
-        rows: document.querySelectorAll('#detail table.songs tbody tr').length,
-        hasPlayerBar: Boolean(document.getElementById('player-bar')),
-        hasLoginWall: /登录|请先登录|注册/.test(document.body.innerText),
-        resultCount: state.results.length,
-        platforms: [...new Set(state.results.map((t) => t.platform))],
-        // 歌单相关接线是否真在页面上（不是只写在代码里）
-        navHasPlaylists: Boolean(document.querySelector('[data-route="playlists"]')),
-        navHasLiked: Boolean(document.querySelector('[data-route="favorites"]')),
-        playlistNav: Boolean(document.getElementById('playlist-nav')),
-        shuffleButton: Boolean(document.getElementById('pb-shuffle')),
-        repeatButton: Boolean(document.getElementById('pb-repeat')),
-        addToPlaylistButtons: document.querySelectorAll('[data-add-to-playlist]').length,
-        playlists: state.playlists.length,
-      });
     });
   }
 })();
+
+
+
