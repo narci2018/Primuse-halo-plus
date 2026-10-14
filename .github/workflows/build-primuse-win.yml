@@ -115,6 +115,13 @@ jobs:
         # 测试自带假 electron + 临时 userData，绝不碰 %APPDATA%\Primuse。
         run: node scripts/cloud-sources-contract-test.js
 
+      - name: Playability criteria parity across the three implementations (static)
+        # 「能不能出声」这一条判据现在有三份抄本：服务端 protocols.js、Windows cloud-sources.js、
+        # iPhone/macOS AudioSniff.swift。抄本之间飘一个字节阈值 / 少一个魔数 / 换一条正则，
+        # 表现是"同一条线路在两个屏幕上结论相反"，而且两边都不报错。
+        # Swift 那份是在没有 Xcode 的机器上写的，它自己跑不了测试 —— 所以这一条静态断言替它盯着。
+        run: node scripts/criteria-parity-check.js
+
       - name: Preload API surface check (offline)
         # 渲染层调了 preload 没暴露的方法 = 运行时一句被 async 回调吞掉的 TypeError，
         # 界面只表现为"点了没反应"。v1.9.10 的"在加入歌单弹层里新建歌单"就是这么坏的

@@ -1307,8 +1307,36 @@ meting 词是 `mguo`、hyw 词是 `mg`），`AggregatedMusicService` 与网关�
   Swift 侧 DTO 逐字段对着它写，包括 `protocol` 这个关键字撞名（CodingKeys 必须映射回 `protocol`，否则整份清单解出来全是 nil）。
 
 **还没验的**：真机上「检测全部可用」跑出来的名单是否与服务端那 14 条对得上（iOS 需要签名、macOS 那份未签名 DMG 本机装不了，
-这是 §5 一直挂着的那件事）。Swift 侧也没有等价于 `cloud-sources-contract-test.js` 的离线契约测试 ——
-这是下一节该补的位置：判据已经写了五遍，第五遍没有测试撑着就一定会飘。
+这是 §5 一直挂着的那件事）。
+
+### 24.8 判据的三份抄本从此有一个静态看守：`criteria-parity-check.js`
+
+§24.1 把同一句判据写到第三份抄本（服务端 / Windows / Swift）时留了一句话：抄本之间飘一个字节阈值、
+少一个魔数、换一条正则，表现是"同一条线路在两个屏幕上结论相反"，而**两边都不会报错**。
+Swift 那份又是在这台没有 Xcode 的机器上写的 —— 给它配一份跑不起来的 XCTest 是自欺。
+所以补的是 `primuse-win/scripts/criteria-parity-check.js`：**读三份源码的文本做静态断言**，
+不联网、不起服务、不开 Electron，`node` 就能跑，已经挂在 `build-primuse-win.yml` 的测试段里（每次 push 到 main 都过）。
+
+38 项，钉的是这些：
+
+- 阈值与窗口：`8192` / `65536`（服务端是 Range 末位 `65535`，脚本按 `+1` 对齐）、魔数比对至少要 12 字节；
+- 判据公式：Swift 与 Windows 都得是 `bytes > 下限 && !文本 && (魔数 || content-type 是音频)`，**没有任何一处看 HTTP 状态码**；
+- 魔数表按 `偏移:字面` 抽出来比集合 —— 位置比名字更容易写错，`ftyp` 必须在偏移 4，ADTS 那条得同时有 `0xff` 和 `& 0xe0`；
+- 两条正则（文本特征、content-type 白名单）三处**逐字**相同，Swift 的 `(?i)` 前缀单独剥掉再比；
+- Swift 用 `String(decoding:as:UTF8.self)` 而不是 `String(data:encoding:)`（后者在二进制上回 nil，一票否决项会恒为 false）；
+- UA：Swift 与服务端逐字相同；Windows 取流用桌面 UA 是既成事实，脚本把它记成一条"不许顺手统一"的断言而不是漂移；
+- **清单字段名**：服务端 `publicSource()` 那 16 个 key、`check` 的 5 个、清单顶层的字段、`settings`/`gateway` 的子字段，
+  逐个要求在 Swift 的 DTO 里有同名属性 —— 对不上就是"整份清单解出来全是 nil、界面上线路凭空没了"；
+  `protocol` 那个关键字撞名单独钉一条；
+- 契约号与默认清单地址三端同一个（Pages，不是 workers.dev）；
+- 盲区名单：Swift 与 Windows 那五份完全相同，服务端那份是它的子集且不含 `error`（`error` 走 `ERROR_GRACE = 3` 的宽限）；
+- App 侧只读：`checkAllAvailable` 里不许出现停用；传输层失败必须 `throws` 并落 `error`；
+- 需求 5 的三态：服务端确实回 `device/global/default`，而 Swift 把 `default` 当"没设置"、回落到本地化键 `home_title`。
+
+这个脚本自己也做过反向验证：把 `audioMinBytes` 改成 4096、把 `ftyp` 的偏移改成 0，它回 3 项失败；
+改回来 38/0。**只会绿的测试不算测试**，这条也一并记在这儿。
+它管不到的是运行期行为（304 复用缓存、契约不符整份拒收、拉不到清单不清空线路）——
+那些在 Windows 侧由 `cloud-sources-contract-test.js` 的假服务器覆盖，Swift 侧只能等真机（§5 那件事）。
 
 
 
