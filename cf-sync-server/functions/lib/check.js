@@ -153,13 +153,9 @@ async function checkLxSource(env, source, keyword) {
   let runnerMissing = false;
   let brokenScript = "";
   for (const id of ids.slice(0, 3)) {
+    let r;
     try {
-      const r = await lxMusicUrl(env, { hash: rec.hash, platform: source.platform, rawID: id, quality: source.quality });
-      const a = await probeAudio(r.url);
-      if (a.playable) {
-        return { status: "ok", detail: `${meta.name} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}`, bytes: a.bytes, host: a.finalHost };
-      }
-      tried.push(`${id}: 直链不可播 ${a.status} ${a.contentType} ${a.bytes}B`);
+      r = await lxMusicUrl(env, { hash: rec.hash, platform: source.platform, rawID: id, quality: source.quality });
     } catch (e) {
       const msg = String(e && e.message ? e.message : e);
       // runner 侧的基础设施问题（未部署 / 够不到）不是音源本身的错，绝不能因此停用音源。
@@ -168,7 +164,19 @@ async function checkLxSource(env, source, keyword) {
       // 停用 + 建议删除才是符合"能播才有价值"的处理。错误文本原样带出来，好判断是谁的锅。
       if (e && e.runnerError === "script_uncompilable") brokenScript = msg;
       tried.push(`${id}: ${msg.slice(0, 140)}`);
+      continue;
     }
+    // **取字节这一跳不放进 try**：probeAudio 抛异常（15 秒没回数据、连接被重置、DNS 挂了）
+    // 是"我们这次没测成"，不是"这条源给的东西不能播"。让它一路抛到 checkSource 的 catch，
+    // 结论落成 error —— 也就是 HTTP 线路一直在走的那条路（error 有连续 3 次宽限，见 verdictEffect）。
+    // 之前它被 catch 进 tried，于是 lxjs 线路的超时被判成 audio_fail 直接停用：
+    // 20-10-14 现网「墨澜聚合音源 (网易云音乐)」三条样本全是 "The operation was aborted"，
+    // 上一次体检还是 ok，这一次就成了"建议删除"——那是我们够不到 m701 的那 15 秒，不是它的锅。
+    const a = await probeAudio(r.url);
+    if (a.playable) {
+      return { status: "ok", detail: `${meta.name} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}`, bytes: a.bytes, host: a.finalHost };
+    }
+    tried.push(`${id}: 直链不可播 ${a.status} ${a.contentType} ${a.bytes}B`);
   }
   if (runnerMissing) {
     return { status: "runner_missing", detail: `${meta.name} · runner Worker 尚未部署该脚本或不可达（后台点"部署 runner"后重试）`, bytes: 0 };

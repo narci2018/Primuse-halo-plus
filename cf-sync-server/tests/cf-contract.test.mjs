@@ -646,8 +646,29 @@ async function main() {
     const MP3 = Buffer.concat([Buffer.from("ID3\x03\x00\x00\x00\x00\x00\x00"), Buffer.alloc(20000, 0x7f)]);
     const HTML = Buffer.concat([Buffer.from("<html><body>404 Not Found</body></html>"), Buffer.alloc(20000, 0x41)]);
     const httpMod = await import("node:http");
+    // 计数是这条用例的"真跑到了"证据：workerd 要是连不上 127.0.0.1，下面那两条断言
+    // 会因为"搜索请求就抛异常"而照样落 error —— 结论对，但那不是我们要测的那一跳。
+    const stallHits = { search: 0, url: 0, stall: 0 };
     const sniffServer = httpMod.createServer((rq, rs) => {
-      const q = new URL(rq.url, "http://127.0.0.1").searchParams;
+      const u = new URL(rq.url, "http://127.0.0.1");
+      const q = u.searchParams;
+      // 合成线路的 meting 接口：搜索给两条真条目，解析把播放地址指向 /stall（永远不返回正文）。
+      if (u.pathname === "/api.php") {
+        if (q.get("types") === "search") {
+          stallHits.search += 1;
+          rs.writeHead(200, { "content-type": "application/json" });
+          return rs.end(JSON.stringify([{ id: "1", name: "晴天", artist: "周杰伦", duration: 269 }, { id: "2", name: "搁浅", artist: "周杰伦", duration: 254 }]));
+        }
+        stallHits.url += 1;
+        rs.writeHead(200, { "content-type": "application/json" });
+        return rs.end(JSON.stringify({ url: `http://127.0.0.1:${sniffServer.address().port}/stall` }));
+      }
+      if (u.pathname === "/stall") {
+        // 只回头部、永不结束：probeAudio 的 15 秒预算会把它掐掉，抛 AbortError。
+        stallHits.stall += 1;
+        rs.writeHead(200, { "content-type": "audio/mpeg" });
+        return undefined;
+      }
       const kind = q.get("kind") || "mp3-audio-ct";
       const body = kind === "html-lied-as-audio" || kind === "html" ? HTML : MP3;
       const ct =
@@ -671,6 +692,41 @@ async function main() {
       record("取字节判据：挂着 audio/mpeg 的 HTML 报错页 → 判不可播（旧延迟检测就是在这被骗绿的）", liar.playable === false && liar.looksText === true && liar.magic === false, JSON.stringify({ ct: liar.contentType, magic: liar.magic, looksText: liar.looksText, playable: liar.playable }));
       const ranged = await probeAudio(`${sniffBase}mp3-audio-ct`);
       record("取字节判据：只取前 64KB，不为了体检下载整首歌", ranged.bytes <= 65536, `${ranged.bytes}B`);
+
+      // ── 7f. 「我们这边取字节超时」不许算成源坏了（checkSource 的异常通路，走真 workerd）
+      // 现网真事故：2026-10-14 体检里「墨澜聚合音源 (网易云音乐)」三条样本全回
+      // "The operation was aborted"（我们自己的 15 秒 fetch 预算），上一次体检它还是 ok，
+      // 这一次就成了"建议删除"。根因是 checkLxSource 把 probeAudio 的异常一起 catch 进了
+      // audio_fail —— HTTP 线路反而是对的（异常一路抛到 checkSource 的 catch，落成 error，有 3 次宽限）。
+      // 现在两条协议同路：取字节这一跳抛异常 → error → 不停用、不建议删除。
+      // 这里用本机 /stall（只回头部、永不结束）造出这个超时，不依赖任何第三方站点。
+      const stallId = "contract-stall-line";
+      const mkStall = await ADMIN_POST("music-sources", {
+        action: "upsert", id: stallId, name: "〔用例〕取字节超时的线路",
+        platform: "netease", protocol: "meting", baseURL: `http://127.0.0.1:${sniffServer.address().port}/api.php`, priority: 1,
+      });
+      record("建好「取字节超时」用例线路", mkStall.json?.code === 0, JSON.stringify(mkStall.json?.error || stallId));
+      const stalled = await ADMIN_POST("music-sources", { action: "check-one", id: stallId }, CHECK);
+      const stallSrc = stalled.json?.data?.source;
+      record(
+        "取字节超时落成 error（我们没测成），不是 audio_fail/resolve_fail",
+        stallSrc && stallSrc.check.status === "error",
+        JSON.stringify({ status: stallSrc?.check?.status, detail: String(stallSrc?.check?.detail || "").slice(0, 140) })
+      );
+      record(
+        "这种结论不停用、不建议删除，只记一次失败（连续 3 次才动手）",
+        stallSrc && stallSrc.enabled === true && stallSrc.suggestDelete === false && Number(stallSrc.check.failStreak) === 1,
+        JSON.stringify({ enabled: stallSrc?.enabled, suggestDelete: stallSrc?.suggestDelete, failStreak: stallSrc?.check?.failStreak })
+      );
+      record(
+        "这条用例真的走到了「取字节」那一跳（不是 workerd 连不上本机导致的假绿）",
+        stallHits.search >= 1 && stallHits.url >= 1 && stallHits.stall >= 1,
+        JSON.stringify(stallHits)
+      );
+      // 收尾用 delete（服务端只有 upsert/toggle/delete/check/check-one 这几个动作，
+      // 写错动作名的话这条用例会留下一具尸体线路，污染下一次体检的名单）。
+      const delStall = await ADMIN_POST("music-sources", { action: "delete", id: stallId }, ADMIN);
+      record("用例线路收尾删除（动作名必须是 delete）", delStall.json?.code === 0, JSON.stringify(delStall.json?.error || delStall.json));
     } finally {
       sniffServer.close();
     }

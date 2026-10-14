@@ -13,6 +13,17 @@ function trimBase(u) {
   return String(u || "").replace(/\/+$/g, "");
 }
 
+/**
+ * 拼查询串的分隔符。
+ * 清单里的 baseURL 自己就可能带查询串（`https://x/api.php?key=abc` 这类），
+ * 这时再拼一个 `?` 就得到 `...?key=abc?types=search...` —— 第二个 `?` 落进上一个参数的值里，
+ * 搜索/解析/歌词一律拿不到东西，一条好线路就被判成死的。
+ * 与客户端 primuse-win/src/main/aggregated.js 的 sep() 同一条规则（两边判据要能对齐）。
+ */
+function sep(base) {
+  return String(base).includes("?") ? "&" : "?";
+}
+
 function plat(platform) {
   return PLATFORMS[platform] || PLATFORMS.custom;
 }
@@ -117,8 +128,8 @@ export function searchURLFor(source, keyword) {
   switch (source.protocol) {
     case "meting":
       return base.includes("api.php")
-        ? `${base}?types=search&count=20&source=${server}&pages=1&name=${kw}`
-        : `${base}?type=search&id=${kw}&server=${server}&limit=20`;
+        ? `${base}${sep(base)}types=search&count=20&source=${server}&pages=1&name=${kw}`
+        : `${base}${sep(base)}type=search&id=${kw}&server=${server}&limit=20`;
     case "hyw": {
       const p = source.platform;
       if (p === "qq") return `https://api.qijieya.cn/meting?type=search&id=${kw}&server=tencent&limit=20`;
@@ -130,7 +141,7 @@ export function searchURLFor(source, keyword) {
     case "nxinxz":
       return `https://music-api.gdstudio.xyz/api.php?types=search&count=20&source=kuwo&name=${kw}`;
     case "openApi":
-      return `${base}?msg=${kw}&type=json`;
+      return `${base}${sep(base)}msg=${kw}&type=json`;
     default:
       return null;
   }
@@ -162,8 +173,8 @@ export async function resolveURL(source, rawID) {
     switch (source.protocol) {
       case "meting": {
         const url = base.includes("api.php")
-          ? `${base}?types=url&source=${server}&id=${id}&br=320`
-          : `${base}?server=${server}&type=url&id=${id}&br=320`;
+          ? `${base}${sep(base)}types=url&source=${server}&id=${id}&br=320`
+          : `${base}${sep(base)}server=${server}&type=url&id=${id}&br=320`;
         const res = await fetchText(url, { timeoutMs: 9000 });
         if (res.redirected && res.finalUrl.indexOf("type=url") < 0 && res.finalUrl.indexOf("types=url") < 0) return res.finalUrl;
         const j = jsonOf(res.text);
@@ -173,7 +184,7 @@ export async function resolveURL(source, rawID) {
       }
       case "hyw": {
         const key = plat(source.platform).hyw;
-        const res = await fetchText(`${base}?source=${key}&songId=${id}&quality=320k`, { timeoutMs: 9000 });
+        const res = await fetchText(`${base}${sep(base)}source=${key}&songId=${id}&quality=320k`, { timeoutMs: 9000 });
         const j = jsonOf(res.text);
         if (j && typeof j.url === "string" && j.url) return j.url;
         if (j && j.data && typeof j.data.url === "string" && j.data.url) return j.data.url;
@@ -181,10 +192,10 @@ export async function resolveURL(source, rawID) {
       }
       case "nxinxz": {
         const key = plat(source.platform).hyw;
-        return `${base}?id=${id}&level=320k&type=mp3&source=${key}`;
+        return `${base}${sep(base)}id=${id}&level=320k&type=mp3&source=${key}`;
       }
       case "openApi": {
-        const res = await fetchText(`${base}?msg=${id}&type=url`, { timeoutMs: 9000 });
+        const res = await fetchText(`${base}${sep(base)}msg=${id}&type=url`, { timeoutMs: 9000 });
         const j = jsonOf(res.text);
         if (j && typeof j.url === "string" && j.url) return j.url;
         if (j && typeof j.data === "string" && /^https?:\/\//i.test(j.data)) return j.data;
@@ -204,11 +215,11 @@ export async function lyric(source, rawID) {
   const id = encodeURIComponent(rawID);
   let url = null;
   if (source.protocol === "meting") {
-    url = base.includes("api.php") ? `${base}?types=lyric&source=${server}&id=${id}` : `${base}?server=${server}&type=lrc&id=${id}`;
+    url = base.includes("api.php") ? `${base}${sep(base)}types=lyric&source=${server}&id=${id}` : `${base}${sep(base)}server=${server}&type=lrc&id=${id}`;
   } else if (source.protocol === "hyw" || source.protocol === "nxinxz") {
     url = `https://api.qijieya.cn/meting?server=${server}&type=lrc&id=${id}`;
   } else if (source.protocol === "openApi") {
-    url = `${base}?msg=${id}&type=lrc`;
+    url = `${base}${sep(base)}msg=${id}&type=lrc`;
   }
   if (!url) return "";
   try {
