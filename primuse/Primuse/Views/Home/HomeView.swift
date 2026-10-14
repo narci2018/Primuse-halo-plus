@@ -252,6 +252,9 @@ struct HomeView: View {
     /// 首页当前处在音乐态还是电台态。持久化 —— 常听电台的人不该每次回首页
     /// 都手动切一次。
     @AppStorage("primuse.home.mode") private var homeModeRawValue = HomeMode.music.rawValue
+    /// 需求 5：首页 header 的文案由云端清单按「本机唯一标识」下发（`settings.homeTitle`），
+    /// 走 `@AppStorage` 是为了服务端一改文案，这里就立刻重绘，而不是等下一次无关的刷新。
+    @AppStorage(HomeTitle.defaultsKey) private var remoteHomeTitle = ""
     @AppStorage("primuse.home.showRadio") private var showRadioOnHome = true
     @State private var showRadioBatchAdd = false
     @State private var discoveryModel = HomeDiscoveryModel()
@@ -343,7 +346,7 @@ struct HomeView: View {
             .onDisappear {
                 refreshCoordinator.cancelAll()
             }
-            .navigationTitle("home_title")
+            .navigationTitle(HomeTitle.text(remoteHomeTitle))
             .toolbarTitleDisplayMode(.inlineLarge)
             #if os(iOS)
             .minimalNavigationRoot()

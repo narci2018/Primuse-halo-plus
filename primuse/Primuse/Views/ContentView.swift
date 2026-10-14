@@ -434,6 +434,13 @@ private enum SidebarItem: String, Hashable, Identifiable, CaseIterable {
         }
     }
 
+    /// 需求 5：首页那一行的文案由云端按 deviceId 下发（清单 `settings.homeTitle`），
+    /// 其余项仍是本地化文案。
+    var displayTitle: String {
+        if self == .home { return HomeTitle.current }
+        return String(localized: titleKey)
+    }
+
     var titleKey: String.LocalizationValue {
         switch self {
         case .home: return "home_title"
@@ -498,6 +505,9 @@ struct ContentView: View {
     @AppStorage(AppNavigationMode.storageKey)
     private var navigationModeRawValue = AppNavigationMode.standard.rawValue
     @AppStorage("primuse.navigation.selectedTab.v1") private var selectedTab = 0
+    /// 需求 5：首页文案由云端清单下发到这份键（`CloudMusicSources.publishHomeTitle`）。
+    /// 用 `@AppStorage` 而不是直接读单例，服务端一改文案，首页/侧栏这一行就自己重绘。
+    @AppStorage(HomeTitle.defaultsKey) private var remoteHomeTitle = ""
     /// iPad sidebar 当前选中项。iPhone 不用,sidebar 隐藏。值跟 selectedTab
     /// 保持联动 (sidebar 改 → selectedTab 也改; selectedTab 改 → sidebar
     /// 跟到对应顶级项, 但子项不自动猜测)。
@@ -577,7 +587,7 @@ struct ContentView: View {
     @ViewBuilder
     private var tabRoot: some View {
         TabView(selection: searchAwareTabSelection) {
-            Tab(String(localized: "home_title"), systemImage: "house.fill", value: 0) {
+            Tab(HomeTitle.text(remoteHomeTitle), systemImage: "house.fill", value: 0) {
                 HomeView(
                     switchToSettingsTab: { selectedTab = 3 },
                     openLibrarySongs: { openLibraryDeepLink(.section(.songs)) }
@@ -745,13 +755,13 @@ struct ContentView: View {
                     // 列子项,让 iPad 用户少一层点击直达。
                     Section {
                         ForEach(SidebarItem.topLevel) { item in
-                            Label(String(localized: item.titleKey), systemImage: item.icon)
+                            Label(item.displayTitle, systemImage: item.icon)
                                 .tag(item as SidebarItem?)
                         }
                     }
                     Section(String(localized: "library_title")) {
                         ForEach(librarySidebarItems) { item in
-                            Label(String(localized: item.titleKey), systemImage: item.icon)
+                            Label(item.displayTitle, systemImage: item.icon)
                                 .tag(item as SidebarItem?)
                         }
                     }

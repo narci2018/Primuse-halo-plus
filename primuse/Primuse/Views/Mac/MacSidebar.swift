@@ -20,6 +20,8 @@ struct MacSidebar: View {
     private var librarySectionOrderRawValue = ""
     @AppStorage(LibraryDisplayConfiguration.hiddenSectionsKey)
     private var hiddenLibrarySectionsRawValue = ""
+    /// 需求 5：首页那一行的文案由云端清单按 deviceId 下发（`settings.homeTitle`）。
+    @AppStorage(HomeTitle.defaultsKey) private var remoteHomeTitle = ""
 
     private var visibleLibrarySections: [LibrarySection] {
         LibraryDisplayConfiguration.visibleSections(
@@ -70,7 +72,7 @@ struct MacSidebar: View {
 
     private var primaryItems: some View {
         VStack(alignment: .leading, spacing: 1) {
-            item(route: .home,    icon: "house.fill",                       title: "home_title")
+            item(route: .home,    icon: "house.fill",                       title: "home_title", titleOverride: HomeTitle.text(remoteHomeTitle))
             if visibleLibrarySections.contains(.statistics) {
                 item(route: .stats, icon: "chart.bar.xaxis", title: "stats_title")
             }
@@ -349,8 +351,11 @@ struct MacSidebar: View {
 
     @ViewBuilder
     private func item(route: MacRoute, icon: String, title: LocalizedStringKey,
+                      titleOverride: String? = nil,
                       trailing: AnyView? = nil) -> some View {
         let selected = isSelected(route)
+        // 需求 5：首页那一行的文案由云端下发（原样显示，不再过本地化表），其余照旧。
+        let titleText: Text = titleOverride.map { Text($0) } ?? Text(title)
         Button {
             select(route)
         } label: {
@@ -360,7 +365,7 @@ struct MacSidebar: View {
                     .foregroundStyle(selected ? PMColor.brand : PMColor.text.opacity(0.78))
                     .frame(width: 18, height: 18)
 
-                Text(title)
+                titleText
                     .font(selected ? .system(size: 13, weight: .medium) : .system(size: 13))
                     .foregroundStyle(selected ? PMColor.text : PMColor.text.opacity(0.85))
                     .lineLimit(1)

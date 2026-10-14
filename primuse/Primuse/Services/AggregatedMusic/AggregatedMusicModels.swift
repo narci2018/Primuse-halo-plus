@@ -6,8 +6,18 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
     case netease = "netease"
     case kugou = "kugou"
     case kuwo = "kuwo"
+    case migu = "migu"
     case bilibili = "bilibili"
     case custom = "custom"
+
+    /// 云端清单里出现过的平台名（含 migu）：认不得的一律按 `custom` 处理，
+    /// 但原始字符串要留着 —— 走音乐网关时发给服务端的必须是清单里那个词，不是本机的 rawValue。
+    public static func from(_ raw: String?) -> AggregatedPlatform {
+        guard let raw, let hit = AggregatedPlatform(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return .custom
+        }
+        return hit
+    }
 
     public var displayName: String {
         switch self {
@@ -15,6 +25,7 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
         case .netease: return "网易云音乐"
         case .kugou: return "酷狗音乐"
         case .kuwo: return "酷我音乐"
+        case .migu: return "咪咕音乐"
         case .bilibili: return "哔哩哔哩"
         case .custom: return "自定义源"
         }
@@ -26,6 +37,7 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
         case .netease: return "163"
         case .kugou: return "KG"
         case .kuwo: return "KW"
+        case .migu: return "MG"
         case .bilibili: return "Bili"
         case .custom: return "Custom"
         }
@@ -37,6 +49,7 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
         case .netease: return "netease"
         case .kugou: return "kugou"
         case .kuwo: return "kuwo"
+        case .migu: return "mguo"
         case .bilibili: return "bilibili"
         case .custom: return "netease"
         }
@@ -48,6 +61,7 @@ public enum AggregatedPlatform: String, Codable, Sendable, CaseIterable {
         case .netease: return "wy"
         case .kugou: return "kg"
         case .kuwo: return "kw"
+        case .migu: return "mg"
         case .bilibili: return "bili"
         case .custom: return "tx"
         }
@@ -60,6 +74,24 @@ public enum AggregatedProtocolType: String, Codable, Sendable, CaseIterable {
     case nxinxz = "nxinxz"
     case openApi = "openApi"
     case customJson = "customJson"
+    /// 洛雪 js 音源。脚本跑在 CF 的 runner Worker 里（Workers 请求期不允许生成代码，
+    /// 本机也没有第二个 JS 引擎 —— `ConfigurableScraper` 那个 JavaScriptCore 只处理响应文本），
+    /// 所以这一协议的搜索 / 取流 / 歌词全部经 `/api/music-gateway`，本机不落地脚本。
+    case lxjs = "lxjs"
+
+    /// 洛雪 js 音源只能由服务端执行脚本，本机的"添加线路"里没有它。
+    public static let localAddableCases: [AggregatedProtocolType] = allCases.filter { $0 != .lxjs }
+
+    public var badgeLabel: String {
+        switch self {
+        case .meting: return "Meting"
+        case .hyw: return "HYW"
+        case .nxinxz: return "NXINXZ"
+        case .openApi: return "OpenAPI"
+        case .customJson: return "JSON"
+        case .lxjs: return "洛雪JS·云端"
+        }
+    }
 
     public var displayName: String {
         switch self {
@@ -68,6 +100,62 @@ public enum AggregatedProtocolType: String, Codable, Sendable, CaseIterable {
         case .nxinxz: return "NXINXZ 线路"
         case .openApi: return "Music Open API"
         case .customJson: return "自定义 JSON"
+        case .lxjs: return "洛雪 JS 音源（服务端执行）"
+        }
+    }
+}
+
+/// 一条线路"能不能出声"的结论。
+///
+/// 需求 2 的原话：能访问不等于能播放，一定要能播放的源才有存在的价值。
+/// 所以这份结论只能来自"搜索 → 解析直链 → Range 真取 64KB 字节 → 字节层判定"，
+/// 绝不能是 HEAD 请求的往返时间（旧的「测速」就是在这骗人：报错页也回 200）。
+public struct AggregatedSourceVerdict: Codable, Sendable, Hashable {
+    /// `ok` / `audio_fail` / `resolve_fail` / `script_error` / `script_uncompilable`
+    /// / `no_sample` / `runner_missing` / `unsupported` / `error` / `unchecked`
+    public var status: String
+    public var detail: String
+    public var bytes: Int
+    /// 结论是谁测的：服务端体检下发的，还是本机实测的。洛雪 js 源只能是前者（脚本不在本机跑）。
+    public var origin: Origin
+
+    public enum Origin: String, Codable, Sendable {
+        case server
+        case local
+    }
+
+    /// 观测盲区：这些状态说明"我们没看清"，不是"这条源坏了" —— 不停用，也不建议删除。
+    /// 与 cf-sync-server `functions/lib/store.js` 的 blind 分支、Windows `app.js` 的
+    /// `VERDICT_BLIND` 同一份名单，三处必须一致。
+    public static let blindStatuses: [String] = ["no_sample", "runner_missing", "unsupported", "unchecked", "error"]
+
+    public init(status: String, detail: String = "", bytes: Int = 0, origin: Origin = .server) {
+        self.status = status
+        self.detail = detail
+        self.bytes = bytes
+        self.origin = origin
+    }
+
+    public var isPlayable: Bool { status == "ok" }
+    public var isBlind: Bool { Self.blindStatuses.contains(status) }
+
+    public enum Tone: Hashable {
+        case playable
+        case blind
+        case dead
+    }
+
+    public var tone: Tone {
+        if isPlayable { return .playable }
+        return isBlind ? .blind : .dead
+    }
+
+    /// 界面文案
+    public var toneLabel: String {
+        switch tone {
+        case .playable: return "可播"
+        case .blind: return "未检出"
+        case .dead: return "不可播"
         }
     }
 }
@@ -82,6 +170,21 @@ public struct AggregatedSourceItem: Identifiable, Codable, Sendable, Hashable {
     public var priority: Int
     public var latencyMs: Int?
 
+    // MARK: 云端清单带来的字段（全是可选 —— 老的本地存档必须还能解得开）
+
+    /// 这条线路是云端清单管下来的：增删改、启停、删除建议都在 CF 后台，本机只读 + 刷新。
+    public var cloudSourced: Bool?
+    /// 清单里 `platform` 的原文。本机没有的平台（咪咕）靠它原样回传给音乐网关。
+    public var cloudPlatform: String?
+    public var quality: String?
+    public var scriptHash: String?
+    /// 可用性结论：服务端下发的那份，或本机「检测全部可用」实测的那份。
+    public var verdict: AggregatedSourceVerdict?
+    /// 服务端体检判死后的删除建议（需求 2 的后半句）。
+    public var suggestDelete: Bool?
+
+    public var isCloudManaged: Bool { cloudSourced == true }
+
     public init(
         id: String = UUID().uuidString,
         name: String,
@@ -90,7 +193,13 @@ public struct AggregatedSourceItem: Identifiable, Codable, Sendable, Hashable {
         baseURL: String,
         isEnabled: Bool = true,
         priority: Int = 0,
-        latencyMs: Int? = nil
+        latencyMs: Int? = nil,
+        cloudSourced: Bool? = nil,
+        cloudPlatform: String? = nil,
+        quality: String? = nil,
+        scriptHash: String? = nil,
+        verdict: AggregatedSourceVerdict? = nil,
+        suggestDelete: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -100,6 +209,12 @@ public struct AggregatedSourceItem: Identifiable, Codable, Sendable, Hashable {
         self.isEnabled = isEnabled
         self.priority = priority
         self.latencyMs = latencyMs
+        self.cloudSourced = cloudSourced
+        self.cloudPlatform = cloudPlatform
+        self.quality = quality
+        self.scriptHash = scriptHash
+        self.verdict = verdict
+        self.suggestDelete = suggestDelete
     }
 }
 

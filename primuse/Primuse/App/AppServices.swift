@@ -522,6 +522,7 @@ final class AppServices {
     let musicIntelligence: MusicIntelligenceService
     let aggregatedSources: AggregatedSourceStore
     let aggregatedMusic: AggregatedMusicService
+    let cloudSources: CloudMusicSources
 
     private var sourceLifecycleObserverTokens: [NSObjectProtocol] = []
     private struct SourceCleanupRequest {
@@ -790,6 +791,13 @@ final class AppServices {
         let aggStore = AggregatedSourceStore.shared
         self.aggregatedSources = aggStore
         self.aggregatedMusic = AggregatedMusicService.shared
+
+        // 需求 4/5：本机只保存一个清单地址，线路名单 + 可用性结论 + 首页文案都从它解释出来。
+        // 启动即刷一次（够不到服务端时用本地缓存，标题不会跟着变一屏），之后带 ETag 每 15 分钟刷；
+        // 后台改了名单，客户端最迟一刻钟就跟得上 —— 不需要推送通道。
+        let cloudSources = CloudMusicSources.shared
+        self.cloudSources = cloudSources
+        cloudSources.startPeriodicRefresh()
 
         let aggSourceID = AggregatedMusicService.systemSourceID
         if let existing = store.allSources.first(where: { $0.id == aggSourceID }) {

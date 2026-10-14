@@ -1,67 +1,32 @@
 import SwiftUI
+import Observation
 import PrimuseKit
 
+// 这里没有写 `@MainActor`：SwiftUI 的 `View` 协议本身就带 `@MainActor`，
+//  conformity 会把这份隔离传到整个 struct 上（`body` 之外的 helper 也在主 actor 上），
+// 所以从 `@State` 的默认值里取 `CloudMusicSources.shared` 这个 MainActor 单例是合法的
+// —— 本仓库另外十九个页面（`ScrobbleSettingsView` 的 `ScrobbleService.shared`、
+// `MacContentView` 的 `MacUIPreferences.shared`）就是这么写的，CI 一直是绿的。
+// 也没有用 `@Environment(CloudMusicSources.self)` —— 这个页面有好几个入口
+// （iPhone 设置、iPad/Mac 侧栏的来源页、Mac 独立设置窗口），漏一处注入就是一次运行时崩溃。
 public struct AggregatedSourcesSettingsView: View {
     @Environment(AggregatedSourceStore.self) private var store
+    @State private var cloud = CloudMusicSources.shared
     @State private var showingAddSheet = false
     @State private var editingSource: AggregatedSourceItem?
+    @State private var manifestDraft = ""
+    @State private var showingManifestSheet = false
 
     public init() {}
 
+    private var cloudManagedCount: Int { store.sources.filter { $0.isCloudManaged }.count }
+    private var localCount: Int { store.sources.filter { !$0.isCloudManaged }.count }
+
     public var body: some View {
         Form {
-            Section {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("聚合音乐在线引擎")
-                            .font(.headline)
-                        Text("支持全网多线路在线搜索、高音质流媒体播放与动态歌词，可随时添加或切换备用线路。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button {
-                        Task { await store.pingAll() }
-                    } label: {
-                        if store.isPinging {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Label("测速", systemImage: "bolt.horizontal.circle")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(store.isPinging)
-                }
-                .padding(.vertical, 4)
-            }
-
-            Section {
-                ForEach(store.sources) { source in
-                    sourceRow(source)
-                }
-                .onDelete { indexSet in
-                    for index in indexSet {
-                        let id = store.sources[index].id
-                        store.deleteSource(id: id)
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("聚合音源线路列表 (\(store.sources.count))")
-                    Spacer()
-                    Button {
-                        showingAddSheet = true
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .imageScale(.large)
-                    }
-                }
-            } footer: {
-                Text("左右滑动可删除线路，点击可编辑 URL 或参数。优先使用响应最快的线路进行搜索与音频解析。")
-                    .font(.footnote)
-            }
-
-
+            cloudSection
+            lineListSection
+            localAddSection
         }
         .navigationTitle("聚合音乐源设置")
         #if os(iOS)
@@ -77,17 +42,165 @@ public struct AggregatedSourcesSettingsView: View {
                 store.updateSource(updatedSource)
             }
         }
+        .sheet(isPresented: $showingManifestSheet) {
+            ManifestURLSheet(current: $manifestDraft) { url in
+                cloud.setManifestURL(url)
+                Task { await cloud.refresh(force: true) }
+            }
+        }
+    }
 
+    // MARK: - 云端音乐源管理（需求 3 / 4）
+
+    @ViewBuilder
+    private var cloudSection: some View {
+        Section {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("聚合音乐在线引擎")
+                        .font(.headline)
+                    Text("线路名单由云端统一维护：本机只保存下面这一个清单地址，通过解释它得到可用线路。增删改与停用都在服务端后台完成，本机只读 + 刷新。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            Button {
+                showingManifestSheet = true
+                manifestDraft = cloud.manifestURL
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("音乐源清单地址")
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Text(manifestURLShortLabel)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            LabeledContent("清单版本") {
+                HStack(spacing: 6) {
+                    if cloud.revision >= 0 {
+                        Text("rev \(cloud.revision)")
+                            .font(.callout.monospacedDigit())
+                    } else {
+                        Text("尚未拉取").foregroundStyle(.secondary)
+                    }
+                    if let fetchedAt = cloud.fetchedAt {
+                        Text("· \(fetchedAt, format: .dateTime.hour().minute())")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if cloud.isRefreshing { ProgressView().controlSize(.small) }
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task {
+                        cloud.clearLocalVerdicts()
+                        await cloud.refresh(force: true)
+                        await cloud.checkAllAvailable()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if cloud.isCheckingAvailability {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "checkmark.seal")
+                        }
+                        Text(cloud.isCheckingAvailability ? "检测中…" : "检测全部可用")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(cloud.isCheckingAvailability)
+
+                Button {
+                    Task { await cloud.refresh(force: true) }
+                } label: {
+                    Label("刷新清单", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(cloud.isRefreshing)
+            }
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                if !cloud.lastError.isEmpty {
+                    Label(cloud.lastError, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+                Text("「检测全部可用」的判据是能不能出声：搜索 → 解析直链 → 真取前 64KB 字节做字节层判定。能访问不等于能播放 —— 报错页和反爬页也回 200，过去那个「测速」就是把它们都标成绿色的。")
+            }
+            .font(.footnote)
+        }
+    }
+
+    private var manifestURLShortLabel: String {
+        guard let host = URL(string: cloud.manifestURL)?.host else { return cloud.manifestURL }
+        return host
+    }
+
+    // MARK: - 线路列表
+
+    @ViewBuilder
+    private var lineListSection: some View {
+        Section {
+            ForEach(store.sources) { source in
+                sourceRow(source)
+            }
+            .onDelete { indexSet in
+                // 云端管下来的线路不允许在本机删（那是后台的权力）；这里只删得掉本机的。
+                for index in indexSet where !store.sources[index].isCloudManaged {
+                    store.deleteSource(id: store.sources[index].id)
+                }
+            }
+        } header: {
+            HStack {
+                Text("音源线路（云端 \(cloudManagedCount) · 本机 \(localCount)）")
+                Spacer()
+            }
+        } footer: {
+            Text("按「能不能出声」上色：绿色可播，灰色是观测盲区（未检出 —— 我们没测出来，不等于它坏了），红色不可播并附删除建议。云端线路只读，本机的左右滑动可删除。")
+                .font(.footnote)
+        }
+    }
+
+    @ViewBuilder
+    private var localAddSection: some View {
+        Section {
+            Button {
+                showingAddSheet = true
+            } label: {
+                Label("添加本机备用线路", systemImage: "plus.circle.fill")
+            }
+        } footer: {
+            Text("本机线路不参与云端名单，只做紧急备用；云端接管后每次刷新都会保留它们。")
+                .font(.footnote)
+        }
     }
 
     @ViewBuilder
     private func sourceRow(_ source: AggregatedSourceItem) -> some View {
-        HStack(spacing: 12) {
-            Toggle("", isOn: Binding(
-                get: { source.isEnabled },
-                set: { _ in store.toggleSource(id: source.id) }
-            ))
-            .labelsHidden()
+        let verdict = cloud.verdict(for: source)
+        HStack(alignment: .top, spacing: 12) {
+            // 本机线路保留原来的启停开关（这是本机自己的权力）；云端线路的启停在 CF 后台，
+            // 这里连开关都不给，免得本机改出一份和服务端不一样的名单。
+            if !source.isCloudManaged {
+                Toggle("", isOn: Binding(
+                    get: { source.isEnabled },
+                    set: { _ in store.toggleSource(id: source.id) }
+                ))
+                .labelsHidden()
+            }
+
+            verdictIcon(verdict)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -95,28 +208,94 @@ public struct AggregatedSourcesSettingsView: View {
                         .font(.subheadline.weight(.medium))
                     platformBadge(source.platform)
                     protocolBadge(source.protocolType)
+                    if source.isCloudManaged {
+                        Image(systemName: "cloud")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Text(source.baseURL)
+                Text(source.protocolType == .lxjs ? "音乐网关 /api/music-gateway（脚本在服务端执行）" : source.baseURL)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-            }
-
-            Spacer()
-
-            if let latency = source.latencyMs {
-                latencyBadge(latency)
-            }
-
-            Button {
-                editingSource = source
-            } label: {
-                Image(systemName: "pencil")
+                Text(verdictLine(verdict))
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
-            .buttonStyle(.plain)
+
+            Spacer(minLength: 4)
+
+            VStack(alignment: .trailing, spacing: 4) {
+                verdictBadge(verdict)
+                if source.suggestDelete == true || verdict.tone == .dead {
+                    Text("建议删除")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Color.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                }
+            }
+
+            if !source.isCloudManaged {
+                Button {
+                    editingSource = source
+                } label: {
+                    Image(systemName: "pencil")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.vertical, 2)
+        .swipeActions(edge: .trailing) {
+            if !source.isCloudManaged {
+                Button(role: .destructive) {
+                    store.deleteSource(id: source.id)
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    private func verdictLine(_ verdict: AggregatedSourceVerdict) -> String {
+        let who = verdict.origin == .local ? "本机实测" : "服务端结论"
+        let bytes = verdict.bytes > 0 ? " · \(verdict.bytes)B" : ""
+        return "\(verdict.detail)\(bytes) · \(who)".trimmingCharacters(in: .whitespaces)
+    }
+
+    @ViewBuilder
+    private func verdictIcon(_ verdict: AggregatedSourceVerdict) -> some View {
+        let symbol: String
+        switch verdict.tone {
+        case .playable: symbol = "play.circle.fill"
+        case .blind: symbol = "questionmark.circle"
+        case .dead: symbol = "exclamationmark.triangle.fill"
+        }
+        Image(systemName: symbol)
+            .font(.body)
+            .foregroundStyle(verdictColor(verdict))
+            .frame(width: 22, alignment: .center)
+    }
+
+    @ViewBuilder
+    private func verdictBadge(_ verdict: AggregatedSourceVerdict) -> some View {
+        Text(verdict.toneLabel)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(verdictColor(verdict), in: Capsule())
+    }
+
+    private func verdictColor(_ verdict: AggregatedSourceVerdict) -> Color {
+        switch verdict.tone {
+        case .playable: return Color(red: 0.12, green: 0.54, blue: 0.36)
+        case .blind: return Color(red: 0.37, green: 0.42, blue: 0.53)
+        case .dead: return Color(red: 0.75, green: 0.22, blue: 0.17)
+        }
     }
 
     @ViewBuilder
@@ -131,25 +310,12 @@ public struct AggregatedSourcesSettingsView: View {
 
     @ViewBuilder
     private func protocolBadge(_ protocolType: AggregatedProtocolType) -> some View {
-        Text(protocolType.displayName)
+        Text(protocolType.badgeLabel)
             .font(.system(size: 9))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 4)
             .padding(.vertical, 1.5)
             .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-    }
-
-    @ViewBuilder
-    private func latencyBadge(_ ms: Int) -> some View {
-        if ms < 0 {
-            Text("超时")
-                .font(.caption2.bold())
-                .foregroundStyle(.red)
-        } else {
-            Text("\(ms)ms")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(ms < 400 ? .green : (ms < 1200 ? .orange : .red))
-        }
     }
 
     private func platformColor(_ platform: AggregatedPlatform) -> Color {
@@ -158,13 +324,57 @@ public struct AggregatedSourcesSettingsView: View {
         case .netease: return .red
         case .kugou: return .blue
         case .kuwo: return .orange
+        case .migu: return .teal
         case .bilibili: return .cyan
         case .custom: return .purple
         }
     }
 }
 
-// MARK: - Edit / Create Sheet
+// MARK: - 清单地址
+
+private struct ManifestURLSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var current: String
+    let onSave: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("https://…/api/music-sources", text: $current)
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                } header: {
+                    Text("音乐源清单地址")
+                } footer: {
+                    Text("客户端只保存这一个 URL：线路名单、可用性结论、洛雪 js 音源、以及首页标题文案，都从这份清单里解释出来。换地址会清掉旧的缓存与云端线路。")
+                }
+            }
+            .navigationTitle("清单地址")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存并刷新") {
+                        onSave(current)
+                        dismiss()
+                    }
+                    .disabled(!current.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("http"))
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Edit / Create Sheet（只有本机线路能进这里）
 
 struct AggregatedSourceEditSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -198,7 +408,8 @@ struct AggregatedSourceEditSheet: View {
                         }
                     }
                     Picker("接口协议", selection: $protocolType) {
-                        ForEach(AggregatedProtocolType.allCases, id: \.self) { pt in
+                        // 洛雪 js 音源的脚本只能在服务端跑，本机手工加不了 —— 不放进选项。
+                        ForEach(AggregatedProtocolType.localAddableCases, id: \.self) { pt in
                             Text(pt.displayName).tag(pt)
                         }
                     }
