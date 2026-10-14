@@ -1338,6 +1338,81 @@ Swift 那份又是在这台没有 Xcode 的机器上写的 —— 给它配一�
 它管不到的是运行期行为（304 复用缓存、契约不符整份拒收、拉不到清单不清空线路）——
 那些在 Windows 侧由 `cloud-sources-contract-test.js` 的假服务器覆盖，Swift 侧只能等真机（§5 那件事）。
 
+## 25. Windows 歌词把播放按钮和 tab 糊住了：断言要看几何（2026-10-15，v1.9.17 / build 79）
+
+用户实机截图（黄昏 / 落日微醺）：歌词文字从屏幕顶一直排到屏幕底，压在播放按钮、音量条、
+三个槽位上，**连底部 tab bar 也在歌词底下**。而 v1.9.16 的冒烟是 19 项全绿的。
+
+### 25.1 根因：歌词写成了没有背景的覆盖层
+
+`styles.css` 里 `.lyrics { position: absolute; inset: 60px 0 0; padding: 30px 26px 60vh }` ——
+它是 `.player-inner` 的最后一个子元素，绝对定位、**没有背景、没有 z-index**，纵向从 top+60 一路铺到
+播放页底部（实测 `lyrics=60..881`，而 `.controls=699..779`、`.slots=809..871`、`#tabbar=825..881`）。
+于是歌词文字必然画在控制条和 tab 那一带上。`elementFromPoint` 在播放按钮中心回 `#ly-13`、
+在 tab 中心回 `#ly-15` —— 不只是"看着糊"，那两处**点下去也真的点不到**原来的控件。
+
+冒烟当时只断言了 `vis('lyrics') && $('s-lyrics').classList.contains('on')`：属性全对、屏幕全糊。
+这是 §23.5 那条教训的第二次应验，这次连 `hidden` 都没骗人，骗的是"看得见"和"摆对了"是两件事。
+
+### 25.2 忠于 iPhone：歌词是"换掉封面那一档"，不是盖住整页
+
+`NowPlayingView.swift:2124-2195` 的 `if showLyrics` 分支在 VStack 里，位置就是封面那一段：
+`grabber → 紧凑页眉（44pt 封面 + 曲名 + 歌手 + ♥ + ⋯）→ 歌词 → 进度条 → 控制条 → 音量 → 三个槽位`。
+控制条那段的外层条件是 `if !showLyrics || !isLyricsImmersive`（:2256）——**标准歌词模式下进度条、
+播放按钮、槽位照旧排在下面**，只有沉浸式歌词才把它们收掉。
+
+所以 Windows 侧改回流内：
+
+- `index.html`：`#lyrics` 从 `.format-row` 后面搬到 `.meta-row` 与 `.progress` 之间（`.meta-row` 就是那个紧凑页眉）；
+- `styles.css`：`.lyrics` 变成 `flex: 1; min-height: 0; overflow-y: auto; padding: 20px 26px 40vh`
+  —— 底部留白是为了最后一行也能 `scrollIntoView({block:'center'})` 滚到中间；
+- `.player.lyrics-on .art-area { display: none }`：歌词和封面抢的是同一档 `flex: 1`，一次只出现一个，
+  开关由 `renderLyrics()` 挂的 `lyrics-on` 类负责。
+
+### 25.3 tab bar 为什么会从 opaque 的播放页底下透出来
+
+`.player-bg` 是 `background: var(--bg)` 的不透明底，`#player` 是 `position: fixed; inset: 0; z-index: 50`，
+而 `#app`（tab bar 的父节点）没有 z-index —— 按层叠规则播放页必然压住它，本机 dev 实例里也确实压住了。
+用户机器上 tab bar 和页脚却翻到了上面。`#app` 里有 `.tabbar / .mini-wrap / .sheet` 三条 `backdrop-filter`，
+Chromium 会把它们提升成合成层，提升之后的绘制顺序在这种组合下不再等于层叠规则算出来的顺序 ——
+这是环境相关的，跟它较劲没有尽头。
+
+修法是不参与这件事：**播放页开着的时候，`#app` 整列不参与绘制**。
+
+```css
+body.player-open > #app { visibility: hidden; }
+```
+
+`renderPlayer()` 里 `document.body.classList.toggle('player-open', state.playerOpen)`。
+iPhone 的全屏播放页本来就把 tab bar 整个盖住，所以这不是妥协后的行为，是同一个行为。
+`visibility:hidden` 不影响布局，`#screen` 的滚动位置、`vis('tabbar')` 那类断言都不受影响。
+
+### 25.4 断言升级：量 rect 与命中，不量属性
+
+新增 `playerGeometry()`（`app.js`），返回四个布尔 + 一行诊断：
+`lyricsStaysAboveControls`（歌词底边不越过进度条顶边）、`lyricsStaysAboveTabbar`、
+`playButtonClickable`（播放按钮中心的命中必须落在 `#c-play` 里）、`tabbarNotUnderLyrics`。
+两处使用：冒烟新增的第五段 `lyrics-shot`（顺带拍 `smoke-ui-lyrics.png`，`main.js` 里连 16 行假歌词、
+当前行、封面让位、`#app` 收起一起判），以及原有的点击流段（真派发 click 走槽位按钮那条路）。
+
+反向验证做过：在跑起来的实例里把 v1.9.16 那段 CSS 原样贴回 `#lyrics`（inline 样式压过作者样式），
+四项**全部翻成 false**，诊断行直接给出 `hitPlay=#ly-13 / hitTab=#ly-15`；撤掉 inline 又全绿。
+
+顺带修掉两处与歌词无关的冒烟红：
+
+- `默认线路数量` 断的是 `sources.length === 9`。§23.4 之后这份列表是"内置 9 条 + 云端清单"合并出来的
+  （现网 50 条），条数会随云端漂移，于是这项从接入云源那天起就该红。改成验**内置那 9 条一条都不能少**
+  （`aggregated.DEFAULT_SOURCES` 的 id 逐个在列表里），云端只做合并、不替换内置。
+- 点击流里 `playButtonClickable` 假红过一次：上一步"加入播放队列"弹的 `#toast`（z-index:80）正好盖在
+  播放按钮上。它跟歌词没关系，所以 `playerGeometry()` 量之前先把 toast 摘掉、量完原样放回 ——
+  断言要问的是"歌词有没有拦住按钮"。
+
+本机 `npm run smoke` 全绿（`RESULT ok`），新增两段 PASS：
+`歌词模式几何 … {"lyricsStaysAboveControls":true,…,"detail":"lyrics=87..623 progress=623..684 tabbar=825..881 hitPlay=#c-play hitTab=#player","artHidden":true,"tabbarCovered":true}`。
+
+**Swift 侧没有这个坑**：iPhone 那份歌词本来就在 VStack 里（§25.2 就是照它改的），
+macOS 复用同一套视图。所以这一节只动 Windows。
+
 
 
 

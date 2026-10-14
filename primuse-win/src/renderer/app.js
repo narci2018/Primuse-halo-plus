@@ -1834,6 +1834,7 @@ function renderBatch() {
 function renderPlayer() {
   const p = $('player');
   p.hidden = !state.playerOpen;
+  document.body.classList.toggle('player-open', state.playerOpen);
   if (!state.playerOpen) return;
 
   const track = currentTrack();
@@ -1962,6 +1963,8 @@ function renderLyrics() {
   const box = $('lyrics');
   const on = state.playerView === 'lyrics';
   box.hidden = !on;
+  // 歌词模式下封面让位：两者抢的是同一档 flex:1 的高度（.lyrics-on 在 CSS 里藏 .art-area）
+  $('player').classList.toggle('lyrics-on', on);
   $('s-lyrics').classList.toggle('on', on);
   if (!on) return;
   if (!state.lyricRows.length) {
@@ -3808,6 +3811,60 @@ function vis(id) {
   return Boolean(el) && !el.hasAttribute('hidden') && getComputedStyle(el).display !== 'none';
 }
 
+/**
+ * 播放页的几何证据 —— 只断言属性（hidden/class）不够，v1.9.16 那次歌词浮层
+ * 「vis() 全绿、屏幕上却把播放按钮和 tab 糊住」就是证据。这里量的是渲染结果：
+ * 歌词框必须待在进度条以上，播放按钮和 tab 中心的命中测试不能落到歌词上。
+ * 返回的每个布尔项都要为 true；detail 只作诊断，不参与 ok 判定。
+ */
+function playerGeometry() {
+  const box = (id) => document.getElementById(id).getBoundingClientRect();
+  const topAt = (x, y) => {
+    const el = document.elementFromPoint(x, y);
+    // SVG 节点的 className 是 SVGAnimatedString，直接拼进诊断字符串只会读出 [object …]；
+    // 命中报告按「最近的带 id 祖先」给，读起来才是 #c-play 而不是 svg。
+    const named = el && el.closest('[id]');
+    const tag = !el ? 'null' : named ? `#${named.id}` : el.tagName.toLowerCase();
+    return { el, inLyrics: Boolean(el && el.closest('#lyrics')), tag };
+  };
+  const measure = () => {
+    const lyr = box('lyrics');
+    const prog = box('progress');
+    const play = box('c-play');
+    const tab = box('tabbar');
+    const atPlay = topAt(play.x + play.width / 2, play.y + play.height / 2);
+    const atTab = topAt(tab.x + tab.width / 2, tab.y + tab.height / 2);
+    return {
+      // 歌词框的底边不能越过进度条顶边（越过就说明它又在盖控制条）
+      lyricsStaysAboveControls: lyr.bottom <= prog.top + 1,
+      // 歌词框不能伸到 tab bar 那一带
+      lyricsStaysAboveTabbar: lyr.bottom <= tab.top + 1,
+      // 播放/暂停按钮的中心要能点到自己
+      playButtonClickable: !atPlay.inLyrics && Boolean(atPlay.el && atPlay.el.closest('#c-play')),
+      // tab bar 那一行要么被播放页盖住、要么根本没参与绘制 —— 但不能是歌词
+      tabbarNotUnderLyrics: !atTab.inLyrics,
+      detail: [
+        `lyrics=${Math.round(lyr.y)}..${Math.round(lyr.bottom)}`,
+        `progress=${Math.round(prog.y)}..${Math.round(prog.bottom)}`,
+        `tabbar=${Math.round(tab.y)}..${Math.round(tab.bottom)}`,
+        `hitPlay=${atPlay.tag}`,
+        `hitTab=${atTab.tag}`,
+      ].join(' '),
+    };
+  };
+  // #toast 是 z-index:80 的临时浮条（点击流里上一步「加入播放队列」就会弹一条），
+  // 它盖住播放按钮跟歌词没关系。这里问的是「歌词有没有拦住按钮」，所以先把 toast
+  // 摘掉再量，量完原样放回去。
+  const toast = document.getElementById('toast');
+  const wasHidden = toast.hidden;
+  toast.hidden = true;
+  try {
+    return measure();
+  } finally {
+    toast.hidden = wasHidden;
+  }
+}
+
 function shellEvidence() {
   const tabs = [...document.querySelectorAll('#tabbar .tab')];
   return {
@@ -4340,7 +4397,41 @@ async function smokePlayerShot() {
   };
 }
 
+async function smokeLyricsShot() {
+  // 上一段（player-shot）把浮层开着留给了截图；这里只补歌词模式。
+  // 歌词是从服务器取的，冒烟不该等网络 —— 直接塞 16 行带时间轴的假歌词，
+  // 量的是渲染结果的几何：歌词框必须待在进度条以上，播放按钮必须点得到。
+  if (!state.queue.length) {
+    state.queue = [
+      { kind: 'aggregated', platform: 'netease', rawID: 'smoke-ui-a', title: '冒烟 UI 探针 A', artist: '探针', duration: 200 },
+    ];
+    state.index = 0;
+    state.order = [0];
+  }
+  if (!vis('player')) openPlayer();
+  state.lyrics = Array.from({ length: 16 }, (_, i) => `[00:${String(i).padStart(2, '0')}:00]第 ${i + 1} 行冒烟歌词`).join('\n');
+  state.lyricRows = parseLrc(state.lyrics);
+  state.lyricIndex = 6;
+  state.playerView = 'lyrics';
+  render();
+  await settle(420); // 等 player-in 动画（0.32s）过去，量的才是落位之后的几何
+  const geo = playerGeometry();
+  return {
+    ...geo,
+    lyricsVisible: vis('lyrics'),
+    lyricLines: document.querySelectorAll('#lyrics .lyric-line').length,
+    nowLine: ($('lyrics').querySelector('.lyric-line.now') || {}).textContent || '',
+    artHidden: getComputedStyle(document.querySelector('.art-area')).display === 'none',
+    tabbarCovered: getComputedStyle($('app')).visibility === 'hidden',
+    overlayLeaks: overlayLeaks(),
+  };
+}
+
 async function smokePlaylistCleanup() {
+  state.playerView = null;
+  state.lyrics = null;
+  state.lyricRows = [];
+  state.lyricIndex = -1;
   closePlayer();
   // 上一段为了截图在内存里塞了两首探针（胶囊迷你条只在有当前曲目时出现）。
   // 这里必须把用户真实队列换回来 —— 直接清空会把 restoreQueue 刚写回磁盘的队列覆盖成空的。
@@ -4505,6 +4596,19 @@ async function smokePlaylistClicks() {
     clickDom(document.querySelector('[data-toggle-view="lyrics"]'));
     await settle();
     out.lyricsSlot = vis('lyrics') && $('s-lyrics').classList.contains('on');
+    // 歌词的几何：不能盖住播放按钮，也不能盖住 tab bar（v1.9.16 实机就是这两处糊了）
+    const geo = playerGeometry();
+    out.lyricsStaysAboveControls = geo.lyricsStaysAboveControls;
+    out.lyricsStaysAboveTabbar = geo.lyricsStaysAboveTabbar;
+    out.playButtonClickable = geo.playButtonClickable;
+    out.tabbarNotUnderLyrics = geo.tabbarNotUnderLyrics;
+    out.lyricsGeometry = geo.detail;
+    // 关掉歌词，封面必须回到原来那一档
+    clickDom(document.querySelector('[data-toggle-view="lyrics"]'));
+    await settle();
+    out.artReturnsWhenLyricsOff = vis('lyrics') === false && getComputedStyle(document.querySelector('.art-area')).display !== 'none';
+    clickDom(document.querySelector('[data-toggle-view="lyrics"]'));
+    await settle();
     clickDom(document.querySelector('[data-toggle-view="queue"]'));
     await settle();
     out.queueSlot = vis('queue-sheet') && state.queue.length > 0 && document.querySelectorAll('#qs-body .q-row').length > 0;
@@ -4517,7 +4621,16 @@ async function smokePlaylistClicks() {
 
     out.errors = smokeErrors.slice(-6);
     out.ok = Object.keys(out)
-      .filter((k) => k !== 'ok' && k !== 'rows' && k !== 'diag' && k !== 'errors' && k !== 'swept' && k !== 'leakedIds')
+      .filter(
+        (k) =>
+          k !== 'ok' &&
+          k !== 'rows' &&
+          k !== 'diag' &&
+          k !== 'errors' &&
+          k !== 'swept' &&
+          k !== 'leakedIds' &&
+          k !== 'lyricsGeometry'
+      )
       .every((k) => out[k] === true);
     return out;
   } finally {
@@ -4602,6 +4715,7 @@ api.cloud.onUpdated((payload) => {
         if (phase === 'cloud-sources-cleanup') return api.smokeReport(await smokeCloudSourcesCleanup());
         if (phase === 'playlist-ui') return api.smokeReport(await smokePlaylistUI());
         if (phase === 'player-shot') return api.smokeReport(await smokePlayerShot());
+        if (phase === 'lyrics-shot') return api.smokeReport(await smokeLyricsShot());
         if (phase === 'playlist-cleanup') return api.smokeReport(await smokePlaylistCleanup());
         if (phase === 'playlist-clicks') return api.smokeReport(await smokePlaylistClicks());
         return api.smokeReport(await smokeShellSearch(keyword));

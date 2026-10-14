@@ -555,7 +555,14 @@ async function runSmoke() {
     }
 
     const sources = store.aggregated.list();
-    step('默认线路数量', sources.length === 9, `实际 ${sources.length} 条（Swift 侧应为 9）`);
+    // 「=== 9」是接入云端音源管理之前的老断言：现在这份列表是「内置 9 条 + 云端清单」合并
+    // 出来的（现网 50 条），所以条数会随云端漂移。该验的是内置那 9 条一条都不能少。
+    const missingBuiltin = aggregated.DEFAULT_SOURCES.map((d) => d.id).filter((id) => !sources.some((s) => s.id === id));
+    step(
+      '内置 9 条线路都在（云端清单只做合并，不替换内置）',
+      missingBuiltin.length === 0 && sources.length >= aggregated.DEFAULT_SOURCES.length,
+      `实际 ${sources.length} 条（内置 ${aggregated.DEFAULT_SOURCES.length} + 云端若干），缺失 ${missingBuiltin.join('/') || '无'}`
+    );
 
     const keyword = '晴天';
     const items = await aggregated.searchAll(sources, keyword);
@@ -987,6 +994,30 @@ async function runSmoke() {
     const playerShot = path.join(OUT_DIR, 'smoke-ui-player.png');
     require('fs').writeFileSync(playerShot, (await mainWindow.webContents.capturePage()).toPNG());
     step('播放浮层截图', true, playerShot);
+
+    // 第五段专拍歌词模式。v1.9.16 实机反馈「歌词布局乱了，遮住了下面的播放按钮，
+    // 甚至遮住了下面的 tab」—— .lyrics 当时是 absolute 覆盖整张播放页的浮层，
+    // 而冒烟只断言了 vis('lyrics')，19 项全绿、屏幕上一坨糊。这一段量的是几何 + 实拍。
+    send('smoke:run', { keyword: '', phase: 'lyrics-shot' });
+    const lyr = (await waitUI(25000)) || { ok: false, note: '渲染层 25s 内未回报歌词几何' };
+    const lyrOk = Boolean(
+      lyr.lyricsVisible &&
+        lyr.lyricLines === 16 &&
+        lyr.nowLine === '第 7 行冒烟歌词' &&
+        lyr.artHidden &&
+        lyr.tabbarCovered &&
+        lyr.lyricsStaysAboveControls &&
+        lyr.lyricsStaysAboveTabbar &&
+        lyr.playButtonClickable &&
+        lyr.tabbarNotUnderLyrics &&
+        Array.isArray(lyr.overlayLeaks) &&
+        lyr.overlayLeaks.length === 0
+    );
+    step('歌词模式几何：歌词只占封面那一档，播放按钮点得到，tab bar 不参与绘制', lyrOk, JSON.stringify(lyr));
+
+    const lyricsShot = path.join(OUT_DIR, 'smoke-ui-lyrics.png');
+    require('fs').writeFileSync(lyricsShot, (await mainWindow.webContents.capturePage()).toPNG());
+    step('歌词模式截图（封面让位、进度条与控制条在歌词下方）', true, lyricsShot);
 
     send('smoke:run', { keyword: '', phase: 'playlist-cleanup' });
     const cleaned = (await waitUI(10000)) || { removed: false, note: '渲染层未回报' };

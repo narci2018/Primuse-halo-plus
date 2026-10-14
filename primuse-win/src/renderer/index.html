@@ -75,6 +75,13 @@
           </div>
         </div>
 
+        <!--
+          歌词在流里，不在浮层上：iPhone 的 showLyrics 是把封面那一档换成歌词，
+          进度条与控制条照旧留在下面（NowPlayingView.swift:2124-2195 + 2256）。
+          它以前写成 absolute 覆盖整张播放页，歌词就直接糊在播放按钮和 tab bar 上。
+        -->
+        <div class="lyrics" id="lyrics" hidden></div>
+
         <div class="progress" id="progress">
           <div class="track" id="track"><div class="fill" id="fill"></div><div class="knob" id="knob"></div></div>
           <div class="times"><span id="t-cur">0:00</span><span id="t-left">-0:00</span></div>
@@ -100,8 +107,6 @@
           <button class="slot" data-toggle-view="queue" id="s-queue" title="播放队列"></button>
         </div>
         <div class="format-row" id="np-format"></div>
-
-        <div class="lyrics" id="lyrics" hidden></div>
       </div>
 
       <!-- 队列：原版是 sheet（detents medium/large），Windows 用底部抽屉 -->
