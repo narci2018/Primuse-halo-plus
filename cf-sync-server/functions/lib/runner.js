@@ -251,11 +251,25 @@ export function buildRunnerUploadForm({ files, token, bytes, migrations = null }
 
 /* ── 脚本集合 ──────────────────────────────────────────────────────────── */
 
-/** runner 该带哪些脚本：只看**启用**的 lxjs 音源（停用的没必要占 bundle 额度）。 */
+/**
+ * runner 该带哪些脚本：**清单里所有 lxjs 音源的脚本，停用的也带上。**
+ *
+ * 直觉上"停用的没必要占 bundle 额度"很合理，实测却造出一洗不掉的死账：
+ * 一条洛雪源被停用之后它的脚本就从 bundle 里消失，重检时 runner 回
+ * `runner_missing`，而 runner_missing 属于观测盲区 —— 判据是"没看清就维持现状"，
+ * 于是它永远维持着"停用"，即使当初是误杀。HTTP 线路没这个问题（不依赖任何部署产物）。
+ * 所以要让"翻案"对洛雪源同样成立，脚本就必须在它被停用之后**仍然可执行**。
+ * 预算兜得住：现网 22 个脚本共 2.66MB，上限 6MB。
+ * 真超了才按"启用优先"裁剪，并把被丢掉的脚本报成 skipped（不许静默丢）。
+ */
 export async function desiredScriptSet(env) {
   const rows = await listSources(env);
-  const wanted = rows.filter((r) => r.protocol === "lxjs" && Number(r.enabled) === 1 && r.script_hash);
-  const hashes = Array.from(new Set(wanted.map((r) => String(r.script_hash))));
+  const lx = rows.filter((r) => r.protocol === "lxjs" && r.script_hash);
+  const order = new Map(lx.map((r, i) => [String(r.script_hash), i]));
+  const hashes = Array.from(new Set(lx.map((r) => String(r.script_hash)))).sort((a, b) => {
+    const on = (h) => lx.some((r) => String(r.script_hash) === h && Number(r.enabled) === 1) ? 0 : 1;
+    return on(a) - on(b) || Number(order.get(a)) - Number(order.get(b));
+  });
   const entries = [];
   const skipped = [];
   let total = 0;

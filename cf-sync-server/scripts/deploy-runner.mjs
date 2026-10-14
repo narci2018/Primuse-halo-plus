@@ -100,14 +100,17 @@ async function main() {
   const token = process.env.LX_RUNNER_TOKEN || secrets.LX_RUNNER_TOKEN || "";
   if (!token) throw new Error("没有 LX_RUNNER_TOKEN（.deploy-secrets.txt 或环境变量）；runner 不带令牌就会拒掉所有调用");
 
-  // 和后台完全同一条筛选口径：只看**启用**的 lxjs 源。
+  // 和后台同一条口径：**清单里所有 lxjs 源的脚本，停用的也带上**。
+  // 停用的不带上线，它就永远是 runner_missing（观测盲区 → 维持现状 → 维持停用），
+  // 误杀的洛雪源就再也翻不了案 —— 详见 functions/lib/runner.js 里 desiredScriptSet 的注释。
   const metas = rowsOf(
     d1Select(
       "SELECT s.hash AS hash, s.name AS name, s.raw_bytes AS raw_bytes FROM source_scripts s " +
-        "JOIN music_sources m ON m.script_hash = s.hash WHERE m.protocol = 'lxjs' AND m.enabled = 1 GROUP BY s.hash"
+        "JOIN music_sources m ON m.script_hash = s.hash WHERE m.protocol = 'lxjs' " +
+        "GROUP BY s.hash ORDER BY MAX(m.enabled) DESC, MIN(m.priority) DESC"
     )
   ).filter((r) => r && r.hash);
-  console.log(`远端 D1 里启用的 lxjs 脚本：${metas.length} 个`);
+  console.log(`远端 D1 里的 lxjs 脚本（含已停用的，供翻案重检）：${metas.length} 个`);
   const bodies = metas.length ? loadBodies(metas) : new Map();
 
   const entries = [];

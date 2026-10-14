@@ -382,16 +382,27 @@ async function main() {
       const rstat = await ADMIN_POST("music-sources", { action: "runner-status", }, ADMIN);
       const rd = rstat.json?.data;
       record("runner-status 打得通对端并报告模块数", rstat.json?.code === 0 && rd?.reachable === true && rd.modules >= 2, JSON.stringify({ reachable: rd?.reachable, modules: rd?.modules, err: rd?.error }));
-      // "该部署的集合"必须正好等于清单里启用的 lxjs 源，一条不多一条不少。
+      // "该部署的集合" = 清单里**所有** lxjs 源的脚本，停用的也算。
       // 这里刻意从清单现算而不是写死数字：用例里导入的源会变（本轮就多了一条会搜的假源），
       // 写死长度的断言只会逼人去改断言，而不是暴露真正的偏差。
       const nowMan = await req("/api/music-sources");
-      const wantLx = Array.from(new Set((nowMan.json?.data?.sources || []).filter((s) => s.protocol === "lxjs" && s.enabled).map((s) => s.scriptHash))).sort();
+      const allLx = Array.from(new Set((nowMan.json?.data?.sources || []).filter((s) => s.protocol === "lxjs").map((s) => s.scriptHash))).sort();
       record(
-        "runner-status 里「想部署的集合」= 启用的 lxjs 源（不是 runner 里现成的）",
-        Array.isArray(rd?.desiredHashes) && JSON.stringify(rd.desiredHashes.slice().sort()) === JSON.stringify(wantLx) && wantLx.includes(impData.hash) && wantLx.includes(fakeSrc?.scriptHash),
-        JSON.stringify({ desired: rd?.desiredHashes?.map((h) => String(h).slice(0, 8)), want: wantLx.map((h) => String(h).slice(0, 8)), live: rd?.liveHashes?.map((h) => String(h).slice(0, 8)) })
+        "runner-status 里「想部署的集合」= 清单里全部 lxjs 源（不是 runner 里现成的）",
+        Array.isArray(rd?.desiredHashes) && JSON.stringify(rd.desiredHashes.slice().sort()) === JSON.stringify(allLx) && allLx.includes(impData.hash) && allLx.includes(fakeSrc?.scriptHash),
+        JSON.stringify({ desired: rd?.desiredHashes?.map((h) => String(h).slice(0, 8)), want: allLx.map((h) => String(h).slice(0, 8)), live: rd?.liveHashes?.map((h) => String(h).slice(0, 8)) })
       );
+      // 停用的洛雪源**不许**掉出 bundle：掉出去之后它的重检永远回 runner_missing，
+      // 而 runner_missing 是观测盲区（维持现状），于是"停用"这个状态自己把自己焊死了 ——
+      // 当初若是误杀，就再也没有翻案的通道。HTTP 线路没这问题（不依赖部署产物）。
+      const offToggle = await ADMIN_POST("music-sources", { action: "toggle", id: fakeSrc.id, enabled: false }, ADMIN);
+      const rdOff = (await ADMIN_POST("music-sources", { action: "runner-status" }, ADMIN)).json?.data;
+      record(
+        "把一条 lxjs 源停用后，它的脚本仍在「想部署的集合」里（保留翻案通道）",
+        offToggle.json?.data?.source?.enabled === false && (rdOff?.desiredHashes || []).includes(fakeSrc.scriptHash),
+        JSON.stringify({ enabled: offToggle.json?.data?.source?.enabled, wanted: (rdOff?.desiredHashes || []).map((h) => String(h).slice(0, 8)) })
+      );
+      await ADMIN_POST("music-sources", { action: "toggle", id: fakeSrc.id, enabled: true }, ADMIN);
       record("脚本集合和 runner 现装不一致时如实报 stale", rd?.stale === true, `stale=${rd?.stale}（本地没有 CF 凭据，装不了长青那条）`);
       record("没配 CF 凭据时 canDeploy=false（不把缺凭据伪装成已部署）", rd?.canDeploy === false, `canDeploy=${rd?.canDeploy}`);
 
