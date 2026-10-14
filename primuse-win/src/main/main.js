@@ -301,7 +301,7 @@ function createWindow() {
     backgroundColor: '#0f1013',
     show: false,
     autoHideMenuBar: true,
-    icon: path.join(__dirname, '../../build/icon.png'),
+    icon: path.join(__dirname, '../renderer/icon.png'), // 不能用 build/icon.png：build/ 不进 asar
     webPreferences: {
       preload: path.join(__dirname, '../preload.js'),
       contextIsolation: true,
@@ -379,9 +379,25 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+/* 运行时图标（src/renderer/icon.png，由 scripts/make-icon.js 生成）。
+ * asar 里 nativeImage.createFromPath 偶尔解不出来，退回 createFromBuffer 再读一次。 */
+function appIconImage() {
+  const p = path.join(__dirname, '../renderer/icon.png');
+  let image = nativeImage.createFromPath(p);
+  if (image.isEmpty()) {
+    try {
+      image = nativeImage.createFromBuffer(require('fs').readFileSync(p));
+    } catch (error) {
+      console.warn('[icon] 读不到 src/renderer/icon.png：', error.message);
+    }
+  }
+  return image;
+}
+
 function createTray() {
   try {
-    const image = nativeImage.createFromPath(path.join(__dirname, '../../build/icon.png')).resize({ width: 16, height: 16 });
+    const image = appIconImage().resize({ width: 16, height: 16 });
+    if (image.isEmpty()) console.warn('[tray] 图标是空的，托盘将不可见 —— 跑一次 scripts/make-icon.js');
     tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
     tray.setToolTip('Primuse');
     tray.setContextMenu(
@@ -426,6 +442,60 @@ async function runSmoke() {
   const step = (name, ok, detail) => report.steps.push({ name, ok, detail });
 
   try {
+    // 图标：用户报"最小化到任务栏后是白色图片，看不到任何东西"。病根不是没设图标，
+    // 是素材用错了来源 —— build/icon.png 直接拿的 iPhone 主图标，而 iOS 规范要求
+    // 1024 full-bleed **不透明** RGB（白底黑音符）；深色任务栏上那就是一块白板。
+    // 断言只看真正渲染出来的像素：四角必须真透明、不透明像素的平均亮度必须低
+    //（旧的白底图这一步是 250 左右，一眼就能区分）。
+    const iconImage = appIconImage();
+    const iconSize = iconImage.getSize();
+    const bmp = iconImage.toBitmap(); // BGRA，行优先、自上而下
+    const px = (x, y) => {
+      const i = (y * iconSize.width + x) * 4;
+      return { r: bmp[i + 2], g: bmp[i + 1], b: bmp[i], a: bmp[i + 3] };
+    };
+    const corners = [
+      px(1, 1),
+      px(iconSize.width - 2, 1),
+      px(1, iconSize.height - 2),
+      px(iconSize.width - 2, iconSize.height - 2),
+    ];
+    let lumaSum = 0;
+    let lumaCount = 0;
+    for (let i = 0; i + 3 < bmp.length; i += 4) {
+      if (bmp[i + 3] < 200) continue;
+      lumaSum += 0.299 * bmp[i + 2] + 0.587 * bmp[i + 1] + 0.114 * bmp[i];
+      lumaCount += 1;
+    }
+    const meanLuma = lumaCount ? lumaSum / lumaCount : 0;
+    const icoPath = path.join(__dirname, '../../build/icon.ico');
+    let icoNote = 'build/icon.ico 不在本机（CI 里正常，exe 图标由打包阶段写入）';
+    if (require('fs').existsSync(icoPath)) {
+      const ico = require('fs').readFileSync(icoPath);
+      const frames = ico.readUInt16LE(4);
+      const sizes = [];
+      for (let f = 0; f < frames; f += 1) {
+        const w = ico.readUInt8(6 + f * 16) || 256;
+        sizes.push(w);
+      }
+      icoNote = `icon.ico ${frames} 帧 ${sizes.join('/')} · ${(ico.length / 1024).toFixed(0)}KB`;
+      step(
+        '桌面图标：深色底 + 四角透明 + ICO 含 256 帧（不再是 iOS 那张白底图）',
+        iconSize.width >= 256 && corners.every((c) => c.a === 0) && meanLuma < 120 && sizes.includes(256),
+        `src/renderer/icon.png ${iconSize.width}x${iconSize.height} · 四角 alpha ${corners
+          .map((c) => c.a)
+          .join('/')} · 不透明像素平均亮度 ${meanLuma.toFixed(0)}（旧白底图 ≈250）· ${icoNote}`
+      );
+    } else {
+      step(
+        '桌面图标：深色底 + 四角透明（不再是 iOS 那张白底图）',
+        iconSize.width >= 256 && corners.every((c) => c.a === 0) && meanLuma < 120,
+        `src/renderer/icon.png ${iconSize.width}x${iconSize.height} · 四角 alpha ${corners
+          .map((c) => c.a)
+          .join('/')} · 不透明像素平均亮度 ${meanLuma.toFixed(0)}（旧白底图 ≈250）· ${icoNote}`
+      );
+    }
+
     const sources = store.aggregated.list();
     step('默认线路数量', sources.length === 9, `实际 ${sources.length} 条（Swift 侧应为 9）`);
 
@@ -656,6 +726,18 @@ async function runSmoke() {
       `tab ${ui.tabs} 个（${ui.tabLabels}，图标 ${ui.tabIcons}）、当前 ${ui.activeTab}、迷你条 ${ui.hasMini}（未播放时隐藏 ${ui.miniHidden}）、` +
         `浮层控件 ${ui.playerControls} + 槽位 ${ui.playerSlots}、批量条按钮 ${ui.batchButtons}、行内「⋯」${ui.rowMenus} 个、登录墙 ${ui.hasLoginWall}、` +
         `该隐藏却糊在页面上的浮层 ${JSON.stringify(ui.overlayLeaks || [])}`
+    );
+
+    // 中文输入法：用户报"搜索框切中文输入法打不出字，一闪而过"。病根是组合期
+    // （拼音还没上屏）防抖到点触发整屏重绘，把 <input> 节点换掉、TSF 的连接断了。
+    // 所以断言看的是**节点身份**：组合期内发生一次 render() 之后，搜索框还得是同一个
+    // DOM 节点、值还得在，并且上屏后封锁要自动解除（否则界面永久不再刷新，更糟）。
+    const ime = ui.ime || {};
+    step(
+      '中文输入法组合期不销毁搜索框（拼音不再一闪而过）',
+      Boolean(ime.lockBegins && ime.sameNode && ime.valueKept && ime.lockReleased && ime.restored),
+      `封锁 ${ime.lockBegins} · 重绘后同一个节点 ${ime.sameNode} · 组合串还在 ${ime.valueKept} · ` +
+        `上屏后解除封锁 ${ime.lockReleased} · 探针已复位 ${ime.restored}`
     );
 
     const image = await mainWindow.webContents.capturePage();

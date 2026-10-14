@@ -861,4 +861,48 @@ PASS 界面截图
 
 拖拽排序（现在是手动 ▲▼）、歌词的逐行时间轴同步（现在只有整段文本槽位）、播放设备选择的真实实现（iPhone 那套依赖 AirPlay/输出设备枚举，Windows 侧目前只有面板占位），以及 §18.7 剩下的：真封面图、把 Windows 歌单结构回灌 iPhone 的实测。W5 的自建协议（subsonic/navidrome、jellyfin/emby/plex、fnMusic、songloft）与线路列表导入导出，按用户"优选忠于 UI、忠于功能"的排序继续往后放。
 
+## 20. 桌面图标（Free-Narci）与中文输入法（2026-10-14，v1.9.13 / build 75）
+
+用户提了两条：① "最小化任务栏后，视觉效果是白色图片，看不到任何东西，我想重新设计 logo，叫 Free-Narci"；② "搜索框切换中文输入法，无法输入中文，一闪而过"。追问后确认口径：**只换图标，App 名字保持 Primuse**（不改名就不动 `%APPDATA%\Primuse` 数据目录与同步机器码），logo 方向选"深色圆角方块 + 声波 F"。
+
+### 20.1 图标病根：拿 iOS 素材当桌面图标
+
+不是"图标没设置"。`build/icon.png` 直接复制的是 iPhone 主图标 `primuse/IconDesign/AppIcons2026/00-folded-note.png`，而那份 README 写得很清楚：**iOS master 是 1024×1024 full-bleed 不透明 RGB**（系统自己加圆角遮罩、主屏壁纸还会跟着取色）。白底不透明的图放到深色任务栏上就是一块白板，16px 下那枚黑音符根本看不见。桌面图标要的恰恰相反：**圆角外必须透明、主体高对比粗笔画**。
+
+### 20.2 生成链路：`scripts/make-icon.js`（dev-only，产物入库，CI 不跑）
+
+母图 `build/icon-master.png`（AI 出的 Free-Narci 声波 F，右下角带"Qoder AI 生成"水印、且自带白底圆角）→ 中心裁切 78% 一次同时甩掉水印和白底圆角 → 自己按 SDF 画圆角 alpha（`RADIUS_RATIO 0.215`，1px 抗锯齿，所以四角是真 `alpha=0`，不留白边）→ 出三样东西：
+
+- `build/icon.png`（1024，构建资源）、`build/icon.ico`（9 帧：16/20/24/32/40/48 用 32bpp DIB，64/128/256 用 PNG —— 小尺寸坚持用 DIB，老 shell 扩展对 PNG 压缩的小 ICO 条目支持不一致）、`win.icon` 从 `build/icon.png` 改成 **`build/icon.ico`**；
+- `src/renderer/icon.png`（256，运行时用，见 20.3）；
+- 预览图 `build/icon-preview-dark/light.png`、`icon-preview-small6x*.png`（最近邻放大 6 倍，**用的是 ICO 里真正那一帧**，不是"从 1024 再缩一次"的近似）。16/20/24 这三帧额外走 `frameFor()`：`brightness 1.12 + saturation 1.35 + sharpen`，否则 F 下半截的紫在深蓝底上糊成一坨。预览图不入库（`primuse-win/.gitignore`）。
+
+### 20.3 顺带修掉的断链：`build/` 根本不进 asar
+
+`build.files` 只有 `src/**/*` 和 `package.json`，所以装好的 App 里 `../../build/icon.png` **这个路径不存在** —— `BrowserWindow.icon` 静默退化，而托盘 `nativeImage.createFromPath(...)` 解出空图后走 `createEmpty()`，等于**托盘图标是隐形的**。现在运行时统一读 `src/renderer/icon.png`（跟界面资源一起进包），`appIconImage()` 在 `createFromPath` 失败时退回 `createFromBuffer(fs.readFileSync(...))`，读不到还会 `console.warn` 而不是安静地给一张空图。
+
+### 20.4 中文输入法：病根不是输入法，是组合期整屏重绘把输入框换掉了
+
+`render()` 里原本有一段"记住焦点和光标位置再恢复"的补丁，那只治得了英文：`value` 绑的是 `state.keyword`，重建后看起来一模一样；中文丢的是**还没上屏的组合串** —— Chromium 在组合期照样为每个拼音字母发 `input`（`isComposing=true`），220ms 防抖到点 → `runSearch()` → `render()` → `screen.innerHTML=…` 把 `<input>` 节点换掉，Windows TSF 与这个节点的连接一断，正在拼的拼音直接丢，用户看到的就是"打了字，闪一下没了"。三处改动：
+
+1. **组合期禁止整屏重绘**：`imeComposing` 标志 + `render()` 开头 `if (imeComposing) { renderQueuedWhileComposing = true; return; }`，`compositionend` 再补一次。封锁解除有四个兜底：`compositionend`、`window blur`、`focusout`、以及"组合期之后收到的第一个普通按键" —— 标志位一旦卡住整个界面就再也不刷新，那比原 bug 严重。
+2. **组合期不启动搜索**：半个拼音既查不到东西，又会把上面那条链踩响。
+3. **组合期按键一个都不许接**：`if (event.isComposing || event.keyCode === 229) return`。最要命的是 Enter —— 中文输入法按 Enter 是"上屏候选词"，而原来的全局 keydown 会把它当成"提交搜索"，拿半个拼音去查、再 `render()`。
+
+### 20.5 验证（本机全绿，源码与打包两种形态）
+
+冒烟从 24 项变 **26 项**，两条新断言都是"看渲染结果"而不是看属性：
+
+- `桌面图标：深色底 + 四角透明 + ICO 含 256 帧` —— 读真正加载进内存的位图：四角 `alpha` 必须是 `0/0/0/0`，不透明像素平均亮度 **54**（旧白底图这一步是 250 左右，一眼可分），ICO 帧序列 `16/20/24/32/40/48/64/128/256`。打包形态里 `build/` 不在包内属预期，那一步会明说"exe 图标由打包阶段写入"。
+- `中文输入法组合期不销毁搜索框` —— 探针派发真的 `compositionstart` + `isComposing=true` 的 `input`，然后**主动调用 `render()`**（就是原来踩雷的那一步），断言 `document.getElementById('search-input')` **还是同一个 DOM 节点**、组合串还在、`compositionend` 后封锁解除。写这条时探针自己先红了一次（`restored:false`）：解锁那次重绘已经把节点换掉了，拿旧引用写 `value` 是写给孤儿节点 —— 复位必须重新取节点。
+
+另外：`electron-builder` 吃自制 ICO 出包成功（`EXIT=0`，两个 1.9.13 产物）；`scripts/verify-asar.js` 13 项必需文件全 OK、无 HALO 资产泄漏；包内 `src/renderer/icon.png` 与源码 sha1 一致（`e24b026fd92c`）；用 PowerShell `ExtractAssociatedIcon` 从 `dist/win-unpacked/Primuse.exe` 里把 32×32 图标抠出来肉眼看过了，就是深色圆角 + 亮 F。四套离线契约（道理鱼 7/7、歌单同步 11/11、preload 50 链、线路 9 条）与 `npm run smoke` 打包形态 26 项同样全绿。
+
+### 20.6 还没做 / 已知代价
+
+- **Windows 图标缓存**：NSIS 装到同一个路径，他机器上任务栏可能仍显示旧的白板图标。让他看 `Primuse.exe` 文件图标即可判断是不是缓存问题；必要时 `ie4uinit.exe -show` 或注销一次。
+- Apple 侧没动：iOS/macOS 仍是原图标，换过去要跑 `scripts/generate_app_icon_assets.py` 重生成整套 iconset，且用户明确"只换图标、名字保持 Primuse"，没要求动 iPhone。
+- 关于页/安装向导里还没有出现 "Free-Narci" 字样（本次只换图形标识）。
+
+
 

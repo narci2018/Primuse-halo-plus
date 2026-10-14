@@ -1619,7 +1619,45 @@ function renderScreen() {
 const scrollMem = new Map();
 let scrollKey = null;
 
+/* ── 中文输入法（IME）组合期保护 ──────────────────────────
+ *
+ * 症状（用户 2026-10-14 报）：搜索框切到中文输入法后打不出字，拼音"一闪而过"。
+ *
+ * 病根不在输入法，在重绘：Chromium 在组合期（还没上屏）照样为每个拼音字母发
+ * `input`（`event.isComposing === true`），220ms 防抖到点 → `runSearch()` →
+ * `render()` → `screen.innerHTML = …` 把 `<input>` 节点整个换掉。节点一被销毁，
+ * 输入法编辑器（Windows TSF）与它的连接就断了，正在拼的那串拼音被直接丢弃。
+ * 英文不会露馅：`value` 绑的是 `state.keyword`，重建后看起来一模一样；中文丢的是
+ * "还没上屏的组合串"，重建救不回来 —— 于是用户看到的是"打了字，闪一下没了"。
+ *
+ * 上面 `render()` 里那段"记住焦点和光标位置再恢复"的补丁只治了英文，治不了这个：
+ * 焦点能恢复，组合串恢复不了。真正的修法是**组合期间不许整屏重绘**，
+ * compositionend 之后补一次。
+ *
+ * 兜底：window blur / 输入框失焦 / 组合期后收到普通按键，都要清标志位。
+ * 标志位一旦卡住，整个界面就再也不刷新了 —— 那比这个 bug 严重得多。
+ */
+let imeComposing = false;
+let renderQueuedWhileComposing = false;
+
+function imeBegin() {
+  imeComposing = true;
+}
+
+function imeEnd() {
+  if (!imeComposing) return;
+  imeComposing = false;
+  if (renderQueuedWhileComposing) {
+    renderQueuedWhileComposing = false;
+    render();
+  }
+}
+
 function render() {
+  if (imeComposing) {
+    renderQueuedWhileComposing = true;
+    return;
+  }
   const screen = $('screen');
   if (scrollKey) scrollMem.set(scrollKey, screen.scrollTop);
 
@@ -3312,8 +3350,12 @@ document.addEventListener('input', (event) => {
   const el = event.target;
   if (el.id === 'search-input') {
     const value = el.value.trim();
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => runSearch(value), 220); // 与 Swift 侧 200ms 防抖同量级
+    // 组合期（拼音还没上屏）不启动搜索：一半的拼音既查不到东西，又会把
+    // 「防抖到点 → render → 输入框被换掉 → 组合串丢失」这条链踩响。
+    if (!event.isComposing) {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => runSearch(value), 220); // 与 Swift 侧 200ms 防抖同量级
+    }
     if (value !== state.keyword) {
       state.keyword = value;
       const clear = el.parentElement.querySelector('.search-clear');
@@ -3336,6 +3378,28 @@ document.addEventListener('input', (event) => {
     setVolume(el.value);
     return;
   }
+});
+
+/* 输入法组合期的开始/结束。上屏（compositionend）之后 Chromium 才会发最后一次
+ * isComposing=false 的 input，所以这里只负责"解除重绘封锁"和补一次搜索调度。 */
+document.addEventListener('compositionstart', (event) => {
+  const t = event.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) imeBegin();
+});
+document.addEventListener('compositionend', (event) => {
+  imeEnd();
+  const el = event.target;
+  if (el && el.id === 'search-input') {
+    const value = el.value.trim();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(value), 220);
+  }
+});
+// 组合期被系统打断时不一定有 compositionend，这两个兜底不能省。
+window.addEventListener('blur', imeEnd);
+document.addEventListener('focusout', (event) => {
+  const t = event.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) imeEnd();
 });
 
 /* ── 进度条拖动 / 迷你条滑动 / 浮层下拉收起 ── */
@@ -3483,6 +3547,14 @@ $('mini-next').addEventListener('click', (event) => {
 /* ── 键盘与系统媒体键 ─────────────────── */
 
 document.addEventListener('keydown', (event) => {
+  /* 输入法组合期：按键全部归 TSF（选词、翻页、Escape 取消候选），一个都不许接。
+   * 最要命的是 Enter —— 中文输入法按 Enter 是"上屏当前候选词"，而这里原来会把它
+   * 当成"提交搜索"，于是拿半个拼音去查、再 render() 把输入框换掉、组合串没了。 */
+  if (event.isComposing || event.keyCode === 229) {
+    imeBegin(); // compositionstart 万一没到，这里补上，重绘封锁不能漏
+    return;
+  }
+  imeEnd(); // 组合期之后收到的第一个普通按键：说明组合已经结束，把攒下的重绘补掉
   if (event.code === 'Escape') {
     if (state.sheet) closeSheet();
     else if (state.npMenu || state.queueOpen || state.playerView) {
@@ -3690,6 +3762,7 @@ async function smokeShellSearch(keyword) {
     render();
     await settle(1400);
   }
+  const ime = await imeProbe();
   return {
     ready: state.results.length > 0,
     rows: document.querySelectorAll('#screen .song-row').length,
@@ -3698,8 +3771,49 @@ async function smokeShellSearch(keyword) {
     chips: document.querySelectorAll('#screen .chip').length,
     coverSamples: sample.map((s) => s.platform),
     coverLoads,
+    ime,
     ...shellEvidence(),
   };
+}
+
+/**
+ * 中文输入法回归探针（v1.9.13 起，用户报"搜索框切中文输入法打不出字，一闪而过"）。
+ *
+ * 这里刻意不去测"属性"，测的是**节点身份**：组合期一旦 `#search-input` 被换成另一个
+ * 节点，输入法与它的连接就断了，正在拼的拼音必然丢 —— 那正是用户看到的现象。
+ * 所以断言写成"重绘之后拿到的还是同一个 DOM 节点、值也还在"。
+ */
+async function imeProbe() {
+  const out = {};
+  const input = $('search-input');
+  if (!input) return { skipped: '搜索框不存在' };
+  const before = input.value;
+  const composed = before + '周杰';
+
+  input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+  input.value = composed;
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true, data: 'lun' }));
+  out.lockBegins = imeComposing === true;
+  out.searchNotScheduledWhileComposing = searchTimer === null || imeComposing === true;
+
+  render(); // 原来就是这一步（防抖到点 → runSearch → render）把输入框换掉的
+  out.sameNode = $('search-input') === input;
+  out.valueKept = input.value === composed;
+
+  input.value = composed + '伦';
+  input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '周杰伦' }));
+  out.lockReleased = imeComposing === false;
+  clearTimeout(searchTimer); // 探针不发真搜索，别把后面的断言带偏
+
+  // 解锁的那次重绘已经把节点换过了（这正是设计如此：上屏之后重建是安全的，
+  // 组合串已经进 value 了）。所以复位必须重新取节点，拿旧引用写 value 是写给孤儿节点。
+  const live = $('search-input') || input;
+  live.value = before;
+  state.keyword = before;
+  render();
+  out.restored = Boolean($('search-input')) && $('search-input').value === before;
+  await settle(120);
+  return out;
 }
 
 /**
