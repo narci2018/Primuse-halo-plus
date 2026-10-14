@@ -1409,6 +1409,9 @@ iPhone 的全屏播放页本来就把 tab bar 整个盖住，所以这不是妥�
 
 本机 `npm run smoke` 全绿（`RESULT ok`），新增两段 PASS：
 `歌词模式几何 … {"lyricsStaysAboveControls":true,…,"detail":"lyrics=87..623 progress=623..684 tabbar=825..881 hitPlay=#c-play hitTab=#player","artHidden":true,"tabbarCovered":true}`。
+`v1.9.17`（build 79）三条流水线全绿，同一条 Release 上 5 个产物齐（`Primuse-unsigned.ipa` 110MB /
+`Primuse-macos-arm64-1.9.17-b79.dmg` 76MB + `.zip` 67MB / `Primuse-Setup-1.9.17-x64.exe` 93MB +
+`Primuse-Portable-1.9.17-x64.exe` 92MB，全部 `state: uploaded`）。
 
 **Swift 侧没有这个坑**：iPhone 那份歌词本来就在 VStack 里（§25.2 就是照它改的），
 macOS 复用同一套视图。所以这一节只动 Windows。
