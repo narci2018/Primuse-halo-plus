@@ -228,19 +228,27 @@ export async function lyric(source, rawID) {
  * 字节层面的音频判据。
  * content-type 只能证明"服务器声称这是音频"，恰好是旧延迟检测被骗的那种声明：
  * 不少挂掉的解析站会拿 audio/mpeg 的头回一段 HTML 报错页或 JSON。
- * 所以这里再看开头几个字节：命中音频魔数才算真有声，命中文本特征直接判否。
+ *
+ * 但反过来只看 content-type 也是误杀：**真音频配错 content-type 是常态**
+ * （`text/plain`、`application/octet-stream`、干脆不给），旧写法里 OggS/fLaC 还各有 bug ——
+ * `head` 只截了 3 个字节，四字节魔数永远比不中。所以这一版：
+ *   - 字节数取够（12B，四字节魔数 + RIFF 的 WAVE 标记都在里面）；
+ *   - 命中魔数 或 content-type 是音频类，两者有一个成立就算有声；
+ *   - 文本特征（HTML/XML/JSON 开头）一票否决，这是真挂掉的样子。
+ * 客户端 src/main/cloud-sources.js 的 looksLikeAudio/isPlayableAudio 与本函数逐条对齐。
  */
 export function sniffAudio(bytes) {
-  const head = bytes.slice(0, 3);
-  const hex = Array.from(bytes.slice(0, 12)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const head = bytes.slice(0, 12);
+  const hex = Array.from(head).map((b) => b.toString(16).padStart(2, "0")).join("");
   const asText = new TextDecoder("utf8", { fatal: false }).decode(bytes.slice(0, 64));
+  const ascii = (at, text) => text.split("").every((ch, i) => head[at + i] === ch.charCodeAt(0));
   const magic =
-    (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) || // ID3
-    (head[0] === 0x4f && head[1] === 0x67 && head[2] === 0x53) || // OggS
-    (head[0] === 0x66 && head[1] === 0x4c && head[2] === 0x61 && head[3] === 0x43) || // fLaC
-    (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) || // MPEG 帧同步
-    (/^52494646.{8}57415645/i.test(hex)) || // RIFF....WAVE
-    (/^000000(18|20)66747970/i.test(hex)); // ISO-BMFF（mp4/m4a）
+    ascii(0, "ID3") || // mp3 带 ID3v2 头
+    ascii(0, "OggS") || // ogg / opus
+    ascii(0, "fLaC") || // flac
+    (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) || // MPEG / ADTS 帧同步
+    (ascii(0, "RIFF") && ascii(8, "WAVE")) || // wav
+    ascii(4, "ftyp"); // mp4 / m4a：前 4 字节是 box 长度，不假设它一定是 0x18/0x20
   const looksText = /^\s*(<\?xml|<!DOCTYPE|<html|<HTML|\{|\[)/.test(asText);
   return { magic, looksText, head: hex.slice(0, 24) };
 }
@@ -272,7 +280,7 @@ export async function probeAudio(url, { timeoutMs = 15000 } = {}) {
           return "";
         }
       })(),
-      playable: buf.byteLength > 8192 && /^(audio|application\/octet-stream|video\/mp2a)/i.test(ct) && !sniff.looksText,
+      playable: buf.byteLength > 8192 && !sniff.looksText && (sniff.magic || /^(audio|application\/octet-stream|video\/mp2a)/i.test(ct)),
     };
   } finally {
     clearTimeout(timer);

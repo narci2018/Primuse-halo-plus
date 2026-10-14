@@ -15,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { startLxRunner } from "./lx-runner.mjs";
-import { probeAudio } from "../functions/lib/protocols.js";
+import { probeAudio, sniffAudio } from "../functions/lib/protocols.js";
 import { normalizeLxSearch } from "../functions/lib/runner.js";
 import { verdictEffect, ERROR_GRACE } from "../functions/lib/store.js";
 
@@ -615,6 +615,65 @@ async function main() {
     }
     // 宽限次数本身就是判据的一部分，写死成 3：单次观测失败说明不了任何事。
     record("启停判据：error 宽限次数是 3（连续 3 次才动手）", Number(ERROR_GRACE) === 3, `实得 ${ERROR_GRACE}`);
+
+    // ── 7e. 音频魔数判据（这一条决定"能不能出声"，两类误杀都出在它身上）────────
+    // 旧实现有两处写死的字节错位：head 只截 3 个字节 → OggS/fLaC 的四字节魔数永远比不中；
+    // mp4 只认 size 字段正好是 0x18/0x20 的那两种 → 其余 m4a 全被判成"不是音频"。
+    // 更关键的是 playable 旧口径只看 content-type：真音频配了 text/plain 就被判死。
+    // 客户端 src/main/cloud-sources.js 用同一套判据，两边各钉一遍（见 primuse-win 的契约测试）。
+    const u8 = (arr) => Uint8Array.from(arr);
+    const str = (s) => u8([...s].map((c) => c.charCodeAt(0)));
+    const pad = (b, n = 40) => { const size = Math.max(n, b.length); const o = new Uint8Array(size); o.set(b); return o; };
+    const sniffCases = [
+      ["mp3（ID3v2 头）", pad(str("ID3\x03\x00\x00")), (s) => s.magic === true],
+      ["mp3（裸帧同步 0xFFFx）", pad([0xff, 0xfb, 0x90, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]), (s) => s.magic === true],
+      ["ogg/opus（OggS）", pad(str("OggS\x00\x02\x00\x00")), (s) => s.magic === true],
+      ["flac（fLaC）", pad(str("fLaC\x00\x00\x00\x22")), (s) => s.magic === true],
+      ["wav（RIFF....WAVE）", pad(str("RIFF\x00\x00\x00\x00WAVEfmt ")), (s) => s.magic === true],
+      ["m4a（ftyp，box size 不是 0x18/0x20）", pad(str("\x00\x00\x00\x1cftypM4A \x00\x00\x00\x00")), (s) => s.magic === true],
+      ["mp4（ftyp isom）", pad(str("\x00\x00\x00 ftypisom\x00\x00\x02\x00")), (s) => s.magic === true],
+      ["HTML 反爬页", pad(str("<html><body>checking your browser</body></html>")), (s) => s.magic === false && s.looksText === true],
+      ["报错 JSON", pad(str('{"error":"sign failed"}   ' + "x".repeat(40))), (s) => s.magic === false && s.looksText === true],
+      ["XML 网关拦截页", pad(str('<?xml version="1.0"?><Error><Code>NoSuchKey</Code></Error>')), (s) => s.magic === false && s.looksText === true],
+    ];
+    for (const [label, bytes, okFn] of sniffCases) {
+      const s = sniffAudio(bytes);
+      record(`魔数判据：${label}`, okFn(s), JSON.stringify(s));
+    }
+    record("魔数判据：字节不足 12 个时不误判（空响应/半截流）", sniffAudio(new Uint8Array(0)).magic === false && sniffAudio(u8([0x49, 0x44, 0x33])).magic === true, "ID3 只要前三字节就到齐");
+
+    // 取字节的整条判据：本机起一个小服务器，四种组合都过一遍（不联网，--no-net 也照跑）。
+    const MP3 = Buffer.concat([Buffer.from("ID3\x03\x00\x00\x00\x00\x00\x00"), Buffer.alloc(20000, 0x7f)]);
+    const HTML = Buffer.concat([Buffer.from("<html><body>404 Not Found</body></html>"), Buffer.alloc(20000, 0x41)]);
+    const httpMod = await import("node:http");
+    const sniffServer = httpMod.createServer((rq, rs) => {
+      const q = new URL(rq.url, "http://127.0.0.1").searchParams;
+      const kind = q.get("kind") || "mp3-audio-ct";
+      const body = kind === "html-lied-as-audio" || kind === "html" ? HTML : MP3;
+      const ct =
+        kind === "mp3-wrong-ct" ? "text/plain; charset=utf-8"
+        : kind === "mp3-no-ct" ? ""
+        : kind === "html-lied-as-audio" ? "audio/mpeg"
+        : "audio/mpeg";
+      rs.writeHead(200, ct ? { "content-type": ct, "content-length": String(body.length) } : { "content-length": String(body.length) });
+      rs.end(body);
+    });
+    await new Promise((r) => sniffServer.listen(0, "127.0.0.1", r));
+    const sniffBase = `http://127.0.0.1:${sniffServer.address().port}/t?kind=`;
+    try {
+      const honest = await probeAudio(`${sniffBase}mp3-audio-ct`);
+      record("取字节判据：content-type 与字节都对 → 可播", honest.playable === true && honest.magic === true && honest.bytes > 8192, JSON.stringify({ status: honest.status, ct: honest.contentType, bytes: honest.bytes, magic: honest.magic }));
+      const wrongCT = await probeAudio(`${sniffBase}mp3-wrong-ct`);
+      record("取字节判据：真音频但服务器把 content-type 写错了 → 仍可播（旧口径在这误杀）", wrongCT.playable === true && wrongCT.magic === true && /text/i.test(wrongCT.contentType), JSON.stringify({ ct: wrongCT.contentType, magic: wrongCT.magic, playable: wrongCT.playable }));
+      const noCT = await probeAudio(`${sniffBase}mp3-no-ct`);
+      record("取字节判据：干脆没给 content-type，字节是音频 → 仍可播", noCT.playable === true && noCT.magic === true, JSON.stringify({ ct: noCT.contentType, magic: noCT.magic, playable: noCT.playable }));
+      const liar = await probeAudio(`${sniffBase}html-lied-as-audio`);
+      record("取字节判据：挂着 audio/mpeg 的 HTML 报错页 → 判不可播（旧延迟检测就是在这被骗绿的）", liar.playable === false && liar.looksText === true && liar.magic === false, JSON.stringify({ ct: liar.contentType, magic: liar.magic, looksText: liar.looksText, playable: liar.playable }));
+      const ranged = await probeAudio(`${sniffBase}mp3-audio-ct`);
+      record("取字节判据：只取前 64KB，不为了体检下载整首歌", ranged.bytes <= 65536, `${ranged.bytes}B`);
+    } finally {
+      sniffServer.close();
+    }
 
   } catch (e) {
     record("测试执行未抛异常", false, String(e && e.message ? e.message : e));
