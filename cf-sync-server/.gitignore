@@ -6,3 +6,13 @@ node_modules/
 .runner-contract*/
 .runner-e2e/
 .runner-debug/
+.deploy-secrets.txt
+.runner-deploy/
+.env
+# 一次性探针/调试产物：sandbox 模块、临时 SQL。真实产物在 tests/sandbox-probe.mjs 里生成。
+tests/.sandbox-probe.*
+tests/.eval-probe/
+.runner-query.sql
+# 现网验证的一次性落盘/临时探针：runner 状态、清单、体检名单（名单内容会写进 docs，不入库）
+.live-*
+.check-live.json

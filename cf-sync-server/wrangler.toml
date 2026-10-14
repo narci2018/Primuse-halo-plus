@@ -2,13 +2,16 @@ name = "primuse-sync-server"
 compatibility_date = "2025-01-01"
 pages_build_output_dir = "public"
 
+# D1 绑定必须跟着部署走：Pages 的 Function 绑定是**每次部署**生效的，
+# 上一次部署是命令行带的，这次不带就等于把线上环境的 DB 绑定删了
+# （现象：/api/sync-playlists 照常、新端点报 "D1 数据库未绑定（env.DB 为空）"）。
 [[d1_databases]]
 binding = "DB"
 database_name = "halo-music-db"
 database_id = "3f1eaf4d-5d00-4849-857d-51b25e5e7ac6"
 
-# 仅本地 `wrangler pages dev` / 契约测试用的假令牌。
-# 线上令牌在 Cloudflare Pages 后台的 Environment variables（Secret）里，绝不要把真令牌写进这里。
-[vars]
-SOURCES_ADMIN_TOKEN = "local-dev-admin-token"
-SOURCES_CHECK_TOKEN = "local-dev-check-token"
+# 这里**故意**不写 [vars]：SOURCES_ADMIN_TOKEN / SOURCES_CHECK_TOKEN 是密钥，
+# 线上放在 Pages 后台的 Secrets，本地放在 .env（已 gitignore），写进本文件就等于提交进仓库。
+# 而且部署时同名绑定/变量重复会直接失败（"Binding name 'SOURCES_ADMIN_TOKEN' already in use"）。
+# runner 的地址与令牌（LX_RUNNER_URL / LX_RUNNER_TOKEN）同理：线上是 Secret，
+# 契约测试用 `wrangler pages dev ... -b KEY=VALUE` 现场注入（pages dev 没有 --var 这个选项）。

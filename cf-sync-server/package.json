@@ -10,7 +10,10 @@
     "test:offline": "node tests/cf-contract.test.mjs --no-net",
     "test:runner": "node tests/runner-e2e.mjs",
     "test:all": "node tests/cf-contract.test.mjs && node tests/runner-e2e.mjs",
-    "deploy": "wrangler pages deploy public --project-name=primuse-sync-server"
+    "deploy": "wrangler pages deploy public --project-name=primuse-sync-server",
+    "deploy:runner": "node scripts/deploy-runner.mjs",
+    "check:live": "node scripts/check-live.mjs",
+    "verify:live": "node scripts/verify-live.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.114.0"

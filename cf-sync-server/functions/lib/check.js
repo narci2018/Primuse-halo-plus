@@ -7,8 +7,8 @@
 
 import { search, resolveURL, probeAudio } from "./protocols.js";
 import { lxMeta, gunzipText } from "./lx.js";
-import { lxMusicUrl } from "./runner.js";
-import { metaGet, metaSet, loadScript, publicSource } from "./store.js";
+import { lxMusicUrl, lxSearch } from "./runner.js";
+import { metaGet, metaSet, loadScript, publicSource, listSources } from "./store.js";
 
 const SAMPLE_POOL_KEY = "probe_samples_v1";
 const SAMPLE_LIMIT = 24;
@@ -75,7 +75,43 @@ async function checkHttpSource(env, source, keyword) {
   return { status: "resolve_fail", detail: tried.join(" / ").slice(0, 400), bytes: 0 };
 }
 
-async function checkLxSource(env, source) {
+/**
+ * 拿到某平台可体检的真实歌曲 id：先看样本池，池子空了就现搜一次。
+ *
+ * 为什么要在体检链路里现搜：样本池原本只由**会搜索的 HTTP 线路**喂（网关搜索命中后回写），
+ * 而 2026-10-14 现网实测这些 HTTP 线路大批已经死了（520/525/需要卡密），于是 qq/kuwo/migu
+ * 这些平台的池子全是空的 —— 17 条源只能报 no_sample。这跟源本身没关系，是我们没样本。
+ * 官方洛雪协议只保证 musicUrl，但本机 22 个脚本里确实有一部分自己实现了 search
+ * （非常刀：读 info.keyword）。能搜就让它自己供样本，把观测盲区变成真结论。
+ *
+ * 只试 3 条：每条都要过一次 runner（最坏 25s），再多就把一次体检拖成了扫库。
+ */
+export async function ensureSamples(env, platform, keyword = "晴天") {
+  const pool = await getSamples(env);
+  const have = Array.isArray(pool[platform]) ? pool[platform] : [];
+  if (have.length) return have;
+
+  const rows = await listSources(env);
+  const cands = rows
+    .filter((r) => Number(r.enabled) === 1 && r.protocol === "lxjs" && r.platform === platform)
+    .slice(0, 3);
+  for (const r of cands) {
+    try {
+      const items = await lxSearch(env, { hash: r.script_hash, platform, keyword });
+      if (items.length) {
+        await rememberSamples(env, platform, items);
+        const again = await getSamples(env);
+        const ids = Array.isArray(again[platform]) ? again[platform] : [];
+        if (ids.length) return ids;
+      }
+    } catch {
+      /* 这条源不会搜 / 搜挂了：换下一条候选，结论由后面的取样步骤给出 */
+    }
+  }
+  return [];
+}
+
+async function checkLxSource(env, source, keyword) {
   const rec = await loadScript(env, source.scriptHash);
   if (!rec) return { status: "script_missing", detail: "D1 里找不到该音源的脚本正文", bytes: 0 };
   let text;
@@ -85,15 +121,15 @@ async function checkLxSource(env, source) {
     return { status: "script_error", detail: `脚本解压缩失败：${String(e.message || e)}`, bytes: 0 };
   }
   const meta = lxMeta(text);
-  const pool = await getSamples(env);
-  const ids = Array.isArray(pool[source.platform]) ? pool[source.platform] : [];
+  const ids = await ensureSamples(env, source.platform, keyword);
   if (!ids.length) {
-    // 样本池空着 ≠ 音源坏了（洛雪音源不会搜索，我们没有可考的歌曲 id）。
+    // 样本池空着 ≠ 音源坏了（这条源和它的同伴都不会搜索，我们没有可考的歌曲 id）。
     // 这种情况绝不能停用、更不能建议删除——那是把服务端的观测盲区算到源头上。
-    return { status: "no_sample", detail: `样本池里没有 ${source.platform} 的歌曲 id，暂无法验证（先用其它线路搜一次再体检）`, bytes: 0 };
+    return { status: "no_sample", detail: `${meta.name} · ${source.platform} 拿不到可考的歌曲 id（样本池空，且这条源的同伴里没有一个会搜索），暂无法验证`, bytes: 0 };
   }
   const tried = [];
   let runnerMissing = false;
+  let brokenScript = "";
   for (const id of ids.slice(0, 3)) {
     try {
       const r = await lxMusicUrl(env, { hash: rec.hash, platform: source.platform, rawID: id, quality: source.quality });
@@ -106,11 +142,17 @@ async function checkLxSource(env, source) {
       const msg = String(e && e.message ? e.message : e);
       // runner 侧的基础设施问题（未部署 / 够不到）不是音源本身的错，绝不能因此停用音源。
       if (e && (e.runnerError === "hash_not_deployed" || /runner_unavailable|hash_not_deployed|没有脚本|目标未配置/.test(msg))) runnerMissing = true;
+      // 反过来：脚本在沙箱里连编译都过不去，是这条源自己永远出不了声（不是我们的部署问题），
+      // 停用 + 建议删除才是符合"能播才有价值"的处理。错误文本原样带出来，好判断是谁的锅。
+      if (e && e.runnerError === "script_uncompilable") brokenScript = msg;
       tried.push(`${id}: ${msg.slice(0, 140)}`);
     }
   }
   if (runnerMissing) {
     return { status: "runner_missing", detail: `${meta.name} · runner Worker 尚未部署该脚本或不可达（后台点"部署 runner"后重试）`, bytes: 0 };
+  }
+  if (brokenScript) {
+    return { status: "script_uncompilable", detail: `${meta.name} · 脚本在本沙箱里编译不过：${brokenScript.slice(0, 240)}`, bytes: 0 };
   }
   const hardError = tried.find((t) => /未注册|SyntaxError|ReferenceError|TypeError|script_timeout|超过/.test(t)) || "";
   return {
@@ -128,7 +170,7 @@ export async function checkSource(env, row, keyword) {
   let result;
   try {
     if (source.protocol === "lxjs") {
-      result = await checkLxSource(env, source);
+      result = await checkLxSource(env, source, keyword);
     } else if (source.protocol === "customJson") {
       result = { status: "unsupported", detail: "customJson 协议两端都不做搜索（Swift :183-184），无法验证", bytes: 0 };
     } else {

@@ -57,26 +57,48 @@ export async function gunzipText(bodyBase64) {
 
 /* ── 沙箱模块构造 ─────────────────────────────────────────────────────── */
 
-export const LX_CONSOLE_MODULE = `// 自动生成：给 lx 沙箱用的 console 垫片。
-// 必须在任何 \`const console\` 遮蔽之前取到真实 console，所以它单独成一个模块。
-const base = (typeof console === "object" && console) ? console : { log: () => {}, error: () => {}, warn: () => {}, info: () => {} };
-const PASSTHROUGH = ["log", "info", "warn", "error"];
-const FLATTEN = ["debug", "trace", "assert", "dir", "dirxml", "table", "count", "countReset", "time", "timeEnd", "timeLog", "group", "groupCollapsed", "groupEnd"];
-export function __makeConsole() {
-  const out = {};
-  for (const k of PASSTHROUGH) out[k] = typeof base[k] === "function" ? base[k].bind(base) : () => {};
+// console 垫片必须在"任何 const console 遮蔽"之前拿到真实 console。
+// 早年它单独成一个 ESM 模块（scripts/__lx_console.mjs），改成 CommonJS 沙箱之后不能那么干了：
+// 一个 .cjs 里没法 import 兄弟模块，所以这里把它做成"在 IIFE 之外先抓住真 console"的工厂，
+// 再把结果作为 IIFE 形参注进沙箱 —— 形参遮蔽只影响函数体内部，取真值发生在遮蔽之前。
+const CONSOLE_FACTORY = `var __lxRealConsole = (typeof console === "object" && console) ? console : { log: function(){}, error: function(){}, warn: function(){}, info: function(){} };
+var __lxMakeConsole = function () {
+  var base = __lxRealConsole;
+  var out = {};
+  var PASS = ["log", "info", "warn", "error"];
+  var FLAT = ["debug", "trace", "assert", "dir", "dirxml", "table", "count", "countReset", "time", "timeEnd", "timeLog", "group", "groupCollapsed", "groupEnd"];
+  for (var i = 0; i < PASS.length; i++) { var k = PASS[i]; out[k] = typeof base[k] === "function" ? base[k].bind(base) : function () {}; }
   // workerd 没有 group/groupEnd 这类分组方法；音源脚本拿它们只是为了好看，降级成一行 log 就行。
-  for (const k of FLATTEN) out[k] = (...a) => out.log("[lx:" + k + "]", ...a);
+  for (var j = 0; j < FLAT.length; j++) { var k2 = FLAT[j]; out[k2] = function () { var a = [k2].slice.call(arguments); out.log.apply(out, a); }; }
   return out;
-}
+};
 `;
 
 /**
- * 把用户脚本包成 runner 的一个静态模块源码（由 lib/runner.js 打成 Worker bundle）。
- * 注意：这里的字符串是"生成的代码"，改动时务必保持 `${userScript}` 原样插入、不做转义。
+ * 沙箱模板：把用户脚本包成"一段函数体文本"，由 runner 在**启动阶段**用
+ * `new Function(prefix + 脚本正文 + suffix)` 执行。
+ *
+ * 为什么要绕到 new Function，而不是把沙箱直接写成 Worker 的 .mjs/.cjs 模块 —— 实测硬约束：
+ * wrangler 打包必过 esbuild，而 esbuild 会把这类写法判成编译错误、整包发布失败：
+ *   X [ERROR] Cannot assign to "o" because it is a constant
+ *   X [ERROR] Cannot assign to "q" because it is a constant
+ * 混淆音源里很常见：同一作用域先 `const q=...`，后面又 `q=...`，靠 try/catch 兜着 ——
+ * 这在 V8 里只在**执行到那一行**时才 TypeError，语法上完全合法，但 esbuild 属于"静态就能
+ * 看出迟早炸"就拒绝输出的那一类。改成 CommonJS 也救不了（本机实测：.cjs 一样报这两条），
+ * 因为约束来自"打包器要解析这份文本"，跟严格/宽松模式无关。
+ * 唯一既符合 Workers"请求期禁止生成代码"、又不让 esbuild 碰用户脚本的形态：
+ *   脚本以 **Text 模块**进 bundle（部署期写死，合法）→ 启动期 new Function 编译（实测允许）
+ *   → 请求期只做调用。顺带这也正是洛雪官方执行音源的方式，语义最贴近。
+ *
+ * 沙箱整体套进一个函数作用域：`const globalThis = {...}` 只遮蔽这个函数；真实 console
+ * 从 IIFE 形参递进来（形参遮蔽不影响取值点，取值发生在遮蔽之前）。
+ *
+ * 注意：这里产出的是"生成的代码"，改动时务必保持脚本正文原样插入、不做转义，
+ * 并且前后各留一个换行 —— 用户脚本可能以行注释结尾，少一个换行就会把后缀吃掉。
  */
-export function buildSandboxModule(userScript) {
+const SANDBOX_TEMPLATE = (() => {
   const prelude = `
+
 const __reg = { handlers: {}, inited: null, initedAt: 0, alerts: [], name: "", error: null };
 const __EVENT_NAMES = { inited: "inited", updateAlert: "updateAlert", changeUpdateSource: "changeUpdateSource", request: "request", keyDown: "keyDown" };
 function __on(event, fn) { (__reg.handlers[event] || (__reg.handlers[event] = [])).push(fn); }
@@ -193,8 +215,8 @@ function b64FromBytesShim(bytes) { let s = ""; const chunk = 0x8000; for (let i 
 `;
 
   const epilogue = `
-export const __registry = __reg;
-export function __waitInited(timeoutMs) {
+const __registry = __reg;
+function __waitInited(timeoutMs) {
   if (__reg.inited) return Promise.resolve(__reg.inited);
   const start = Date.now();
   return new Promise((resolve, reject) => {
@@ -206,7 +228,7 @@ export function __waitInited(timeoutMs) {
     setTimeout(tick, 0);
   });
 }
-export async function __request(action, params) {
+async function __request(action, params) {
   const list = __reg.handlers && __reg.handlers.request ? __reg.handlers.request.slice() : [];
   if (!list.length) throw new Error("音源脚本未注册 request 处理器（on(EVENT_NAMES.request)）");
   const errors = [];
@@ -222,14 +244,35 @@ export async function __request(action, params) {
   }
   throw new Error(errors.length ? errors.join(" / ").slice(0, 300) : "音源对该操作没有返回结果");
 }
-export const __inited = () => __reg.inited;
+const __inited = () => __reg.inited;
 `;
 
-  // import 提升 + 模块作用域遮蔽 console，两处都依赖 __lx_console.mjs 与沙箱模块同层存在
-  //（runner.js 每次部署都会带上它）。
-  const header = `import { __makeConsole } from "./__lx_console.mjs";\nconst console = __makeConsole();\n`;
-  return `${header}${helpers}\n${prelude}\n${userScript}\n${epilogue}`;
+  // 前缀：真 console 工厂 + IIFE 开始；后缀：导出收口 + IIFE 结束 + 函数体 return。
+  const prefix = `${CONSOLE_FACTORY}var __lxSandbox = (function (console) {\n${helpers}\n${prelude}\n`;
+  const suffix = `
+${epilogue}
+  return { __registry: __registry, __waitInited: __waitInited, __request: __request, __inited: __inited };
+})(__lxMakeConsole());
+return __lxSandbox;
+`;
+  return { prefix, suffix };
+})();
+
+/** 沙箱模板的两半（runner 把它们作为字面量写进入口，脚本正文夹在中间）。 */
+export function sandboxTemplate() {
+  return SANDBOX_TEMPLATE;
 }
+
+/**
+ * 生成交给 `new Function` 的**函数体**。名字沿用旧的 buildSandboxModule，
+ * 语义已经不同：旧版产出一个可独立 require 的 CommonJS 模块，这版产出一段函数体文本，
+ * 里面不含任何 import/export —— 用户脚本永远不该被打包器解析。
+ */
+export function buildSandboxModule(userScript) {
+  const { prefix, suffix } = SANDBOX_TEMPLATE;
+  return `${prefix}\n${userScript}\n${suffix}`;
+}
+
 
 /** 平台 → 洛雪音源内部用的 source key（tx/wy/kg/kw/mg/bil）。 */
 export function lxSourceKey(platform) {

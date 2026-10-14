@@ -209,20 +209,43 @@ export async function onRequestPost({ request, env }) {
     return ok({ contract: RUNNER_CONTRACT, script: runnerName(env), ...runner }, runner.deployed ? "runner 已重新部署" : "runner 无需变更或未部署");
   }
 
+  // 本机 wrangler 那条部署路径（scripts/deploy-runner.mjs）用不到 Workers API，部署完没法回写 D1。
+  // 这个动作把 D1 的"已部署哈希"对齐成 runner 当前真正加载的那份，后台和本机部署共用一个真相。
+  if (action === "trust-runner") {
+    const health = await trustRunnerHashes(env);
+    if (!health.reachable || !Array.isArray(health.hashes)) {
+      return fail(409, "runner 不可达或没有上报哈希，无法对齐部署记录", 409);
+    }
+    return ok({ hashes: health.hashes.slice().sort(), modules: health.hashes.length }, "已把部署记录对齐到 runner 实际加载的脚本集");
+  }
+
   if (action === "runner-status") {
     const wanted = await desiredScriptSet(env);
     const deployed = await deployedHashes(env);
     const health = await runnerHealth(env);
-    const stale = JSON.stringify(wanted.hashes.slice().sort()) !== JSON.stringify(deployed.slice().sort());
+    // 比较基准优先用 runner 自己上报的 /health.hashes —— 真相在边缘那个 Worker 里。
+    // D1 记的那份只是"上次部署动作写回的哈希"，而本机 wrangler 部署路径（scripts/deploy-runner.mjs）
+    // 走不了 Workers API，如果只看这份记录，后台会永远显示 stale、永远提示重部署。
+    const live = health.reachable && Array.isArray(health.hashes) ? health.hashes : null;
+    const compared = live || deployed;
+    const stale = JSON.stringify(wanted.hashes.slice().sort()) !== JSON.stringify(compared.slice().sort());
     return ok({
       contract: RUNNER_CONTRACT,
       script: runnerName(env),
       target: health.target || null,
       reachable: Boolean(health.reachable),
       modules: Number(health.modules || 0),
+      // runner 里"装上了但编译不过"的脚本：Text 模块 + 启动期 new Function 的形态下，
+      // 单条源语法有问题只影响它自己（其余源照常干活），所以这里必须单独报给后台看。
+      compiled: Number(health.compiled ?? health.modules ?? 0),
+      broken: Array.isArray(health.broken) ? health.broken : [],
       liveHashes: Array.isArray(health.hashes) ? health.hashes : null,
       desiredHashes: wanted.hashes,
       deployedHashes: deployed,
+      // 上面 stale 是按哪个口径算出来的：runner 上报（可信）/ D1 记录（够不到 runner 时才用）。
+      staleBasedOn: live ? "runner" : "record",
+      // 记录本身和现实不一致 —— 说明这次是本机 wrangler 部署的、没回写 D1，点一下对齐即可。
+      recordNeedsSync: Boolean(live) && JSON.stringify(live.slice().sort()) !== JSON.stringify(deployed.slice().sort()),
       stale,
       skipped: wanted.skipped,
       bytes: wanted.totalBytes,
@@ -334,7 +357,7 @@ export async function onRequestPost({ request, env }) {
     return ok({ devices: (rows && rows.results) || [] }, "设备列表");
   }
 
-  return fail(400, `未知 action：${action || "(空)"}（可用：upsert/toggle/delete/reorder/import-js/check-plan/check-one/prefs/global-settings/devices/deploy-runner/runner-status）`, 400);
+  return fail(400, `未知 action：${action || "(空)"}（可用：upsert/toggle/delete/reorder/import-js/check-plan/check-one/prefs/global-settings/devices/deploy-runner/runner-status/trust-runner）`, 400);
 }
 
 /**

@@ -200,6 +200,8 @@ export async function writeCheckResult(env, id, result) {
   //   runner_missing  runner Worker 没部署该脚本/不可达 —— 服务端自己的基础设施问题
   //   unsupported     customJson 协议两端都不做搜索 —— 按定义无法验证
   // 这三种如果也去停用，就是把"我没看清"当成"它不行"，会误杀好源。
+  // 反过来 script_uncompilable（脚本在 runner 沙箱里连编译都过不去）不在这里：
+  // 那是这条源永远出不了声，停用 + 建议删除才对得上"能播的源才有价值"。
   const inconclusive = ["no_sample", "runner_missing", "unsupported"].indexOf(result.status) >= 0;
   const streak = pass ? 0 : inconclusive ? Number((cur && cur.fail_streak) || 0) : Number((cur && cur.fail_streak) || 0) + 1;
   // 检不到可用的源：直接停用 + 建议删除（用户明确要求）。用户手动锁过启停的源不动它的 enabled。

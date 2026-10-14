@@ -47,6 +47,10 @@ export async function startLxRunner({ files, port, token, timeoutMs = 180000 }) 
   }
   writeFileSync(
     path.join(outDir, "wrangler.toml"),
+    // 别给 scripts/*.txt 写显式的 [[rules]] type = "Text"：wrangler 自带
+    // {"type":"Text","globs":["**/*.txt","**/*.html","**/*.sql"]}，同 type 重复声明会被它的
+    // module-collector 判成 "previous rule with the same type was not marked as
+    // fallthrough = true"，runner 直接起不来（本机实测）。Text 就靠这条默认规则拿到。
     `name = "primuse-lx-runner-contract"\nmain = "entry.mjs"\ncompatibility_date = "2025-08-01"\n\n[vars]\nLX_RUNNER_TOKEN = "${token}"\n`
   );
 

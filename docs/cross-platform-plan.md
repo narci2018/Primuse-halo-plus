@@ -914,5 +914,125 @@ PASS 界面截图
 - Apple 侧没动：iOS/macOS 仍是原图标，换过去要跑 `scripts/generate_app_icon_assets.py` 重生成整套 iconset，且用户明确"只换图标、名字保持 Primuse"，没要求动 iPhone。
 - "Free-Narci" 目前只是**标识名**（关于页那行小字 + 图形），产品名、exe 名、`%APPDATA%\Primuse` 数据目录都没改 —— 这是用户选的口径，不是遗漏。要真改名得连带写数据迁移，并且会让云端多出一台新设备（机器码存在 `primuse.json` 的 `sync.deviceId` 里）。
 
+## 21. 音源管理搬到 CF：把「能访问」变成「能出声」（2026-10-14，cf-sync-server 已上线）
+
+用户这条需求带了五个子项，并且写明**向下兼容**：音乐源管理搬到 CF、"检测全部延迟"改成"检测全部可用"、可导入本地 js 音源、CF 额外暴露一个音源管理 URL（客户端只存这个 URL）、首页 header 文案可由服务端按"本机唯一标识"设置。这一章记的是**服务端侧的全部落地**，以及为了把"能出声"这件事判对，Cloudflare 逼我们承认的几条事实。Win/Mac 客户端接入是 §21.7 的契约，属于下一步。
+
+口径沿用之前定下的两条：音源的增删改**只在 CF 后台**做，App 侧只读 + 刷新；洛雪 js 的执行通道选 **runner Worker + API 重部署**。扩容只走本机 `音源文件/` 里那 23 个 lx-js（`node scripts/import-js.mjs` 离线导入），**没有**去爬新的公开线路站。
+
+### 21.1 体检的判据从"通"改成"出声"
+
+`functions/lib/check.js` 里一条 lxjs 源要走完这条链才算 `ok`：搜到歌 → 解析直链 → 带 `Range: bytes=0-65535` 去请求 → 拿到 **>8192 字节** + `audio/*` content-type + **首字节魔术**（`ID3` / MPEG sync word / `OggS` / `ftyp`）+ 不是文本状内容。八秒音频的 mp3 帧头逃得过正则，逃不过魔术字节 + 体量的组合。
+
+分类上刻意分成三类，因为"服务端看不见"和"音源坏了"是两件事：
+
+- `ok` —— 真出声，写回清单。
+- **判死**：`audio_fail` / `search_empty` / `resolve_fail` / `script_error` / `timeout` → 直接 `disabled`，并在清单里下发 `suggest_delete: true`，App 可以据此提示"建议删除该源"。
+- **不可判**：`no_sample` / `runner_missing` / `unsupported` → **绝不停用**，也绝不建议删除。把我们的观测盲区算到源头上是这类系统最常见的误杀。
+
+现网这一轮 50 条的结果：**11 真出声 / 30 判死 / 9 不可判**（明细见 §21.6）。
+
+### 21.2 runner 的形状：Text 模块 + 启动期编译 + 请求期惰性执行
+
+洛雪音源是**用户提供的任意 JS**，要在一个 Worker 里跑 12+ 个互不信任的脚本，还要能按 hash 寻址。最终形状（`functions/lib/runner.js` 的 `buildRunnerFiles`）：
+
+1. 每个脚本原样落成一个 **Text 模块** `scripts/<sha256>.txt` —— 字节级等同原文，**esbuild 永远看不到用户代码**。
+2. 生成的 `entry.mjs` 把沙箱前后缀作为 JSON 字符串字面量内嵌，**启动期**用 `new Function(...)` 编译，只保存 factory，不执行。
+3. factory 在**首次请求**时才 `factory()` 并塞进 `SANDBOXES` 缓存（每个 isolate 一份），`lx.send/`lx.on` 的握手都在请求期完成。
+
+六条都是本机 workerd + 现网实测出来的，写进了代码注释，别再踩：
+
+- **打包器解析用户脚本就会判死。** 混淆稿会让 esbuild 直接报 `Cannot assign to "q" because it is a constant`，`.mjs` 换 `.cjs` 一样。当初把这事诊断为"Workers ESM 严格模式"是**误诊**——真正的约束是"打包器不能看到用户代码"，洛雪官方也是用 `new Function` 宽松执行音源的。所以 `长青SVIP`、`lx-玉宁熙` 这类混淆稿必须一直留在 e2e 用例里，它一旦再进打包器就必然发布失败。
+- **启动期不许碰 I/O 和 timer**，否则 `Disallowed operation called within global scope`。这就是"编译在启动、执行在请求"分工的由来。
+- **请求期不许生成代码**（Workers 禁止），所以不能改成"首次请求时 new Function"。
+- **别在 `wrangler.toml` 里自己写 `[[rules]] type="Text"`**：wrangler 已经注入同一条，重复会报 `fallthrough = true`，然后 workerd 端口根本不应答（表现为 3 分钟超时，看不出原因）。
+- **D1 `/query` 对超大结果集返回误导性的 `7403`**，取脚本正文要分成两步（先查 hash 列表，再按批取 body）。
+- **`wrangler deploy` 之后 workers.dev 还会用旧版本约 30 秒**（实测 30–40s 才切）。所以部署脚本对齐记录时必须轮询，不能一把读。
+
+### 21.3 病根一：`error code: 1101` 把坏源显示成基础设施故障
+
+现网跑第一轮体检时，9 条以上的酷狗/网易云 lxjs 全报同一个无法解释的东西：runner 返回不是 JSON，正文是 Cloudflare 的 `HTTP 500 / error code: 1101` 纯文本。
+
+根因不在音源，在我们自己的 `Promise.race`：脚本请求期 `throw` 时，那个 rejection **抛穿了 race**，一路穿出 `fetch`，Worker 没有 try/catch 兜住 → Cloudflare 回原生 500 文本。于是一条完全可以诊断的"酷狗上游挂了"，被显示成一桩查不出原因的基础设施故障——这正是"检测全部可用"最想消灭的状态。
+
+两处修好（`tests/runner-e2e.mjs` 里加了一条固定的假源来锁住它）：
+
+```js
+const guarded = await Promise.race([
+  // .catch 不能省：脚本 reject 时若无 catch，rejection 抛穿 fetch → Cloudflare 回 500 "error code: 1101"
+  Promise.resolve(run).then((v) => ({ kind: "value", v })).catch((e) => ({ kind: "error", e })),
+  new Promise((r) => setTimeout(() => r({ kind: "timeout" }), timeoutMs)),
+]);
+if (guarded.kind === "error") {
+  return Response.json({ ok: false, error: "script_exception",
+    detail: `${hash.slice(0, 16)} · ${action}：${String((e && e.message) || e).slice(0, 400)}`, inited }, { status: 422 });
+}
+```
+
+外层 `fetch` 再包一层 `try/catch` 回 `500 runner_exception`（带 stack 摘要），保证**任何情况下都回 JSON**。修完之后现网重跑，体检详情页说的是人话：`GD HTTP 520`、`暂不支持此音源`、`所有后端均失败（共 15 个）`、`zrcdy需要歌曲名`、`Search keyword is empty`。同时确认一条脚本抛异常**不污染别的源，也不把它算成"编译失败"**：`/health` 仍是 `{ok:true, broken:0}`。
+
+另外踩了一个纯工程上的雷：重构 `entry` 模板时留了 `},\n};`，`wrangler deploy` 报 `X [ERROR] Unexpected "," entry.mjs:177:3`。这类"生成的代码语法坏了"以前要等 3 分钟 workerd 超时才暴露，现在 e2e 里加了 `node --check` 前置守卫（先落 `OUT_DIR/.entry-syntax.mjs` 再检），几秒钟就红。
+
+### 21.4 病根二：D1 里的"已部署哈希"是记录，不是现实
+
+`lx_runner_hashes_v1`（D1 的 `cf_sync_meta`）只是**上一次部署写进去的账本**。本机 wrangler 直接部署、或者部署失败半次，账本就和边缘的真实脚本集脱节，后台于是永久显示 `stale: true` 而两个集合其实一模一样。
+
+现在 `?action=runner-status` 的比较基准优先取 runner 自己上报的 `/health.hashes`（真相在那个 Worker 里），并回吐两个字段：
+
+- `staleBasedOn: "runner" | "record"` —— 明说这次结论依据谁。
+- `recordNeedsSync` —— runner 现实与 D1 账本不一致，但**音源表其实没变**。后台面板此时给一行 ⚠️ 和"对齐记录"按钮，调 `?action=trust-runner`；`scripts/deploy-runner.mjs` 部署成功后自动调 `trustRunnerViaPages()`，每 20 秒重试、最多 120 秒，直到上报的模块数等于这次部署的条数（就是为了扛 §21.2 最后那条 30 秒版本滞后）。这一步永远不抛异常：对齐记录失败不该让部署失败。
+
+### 21.5 病根三：样本池空着不等于音源坏了
+
+`no_sample` 最初的唯一出路是"先用别的线路搜一次"——把运维步骤写进了用户可见的错误里。改成让源自己喂自己：洛雪协议里 `search` 是可选能力，`非常刀` 这类源自己实现（读 `info.keyword`，返回**裸数组**的 musicInfo）。于是新增 `lxSearch` + `normalizeLxSearch`（裸数组 / `{list}` / `{data:{list}}` / 嵌套 `musicInfo` 都吃，id 依次取 `id/rawId/songmid/mid/hash/midCode`，长度 <4 的伪 id 直接丢，最多 12 条），再包一层 `ensureSamples(env, platform, keyword)`：样本池空 → 找同平台最多 3 条已启用的 lxjs 兄弟 → 搜 → 回写样本池 → 重新读。喂完还是空才落 `no_sample`，明细里会写明"这条源的同伴里没有一个会搜索"。
+
+注意边界：**搜索只是用来喂样本池，没有开放成客户端的 lxjs 搜索能力**（gateway 侧的 `search` 仍只覆盖 meting 线路），那是下一阶段的事。
+
+### 21.6 现网名册（2026-10-14 实测）
+
+`npm run check:live`（只读 + 状态写回，落盘 `.check-live.json`）跑完整 50 条：
+
+| 状态 | 条数 | 处理 |
+| --- | --- | --- |
+| `ok` | **11** | 进可用清单 |
+| `audio_fail` | 21 | 停用 + `suggest_delete` |
+| `search_empty` | 6 | 停用 + `suggest_delete` |
+| `resolve_fail` | 2 | 停用 + `suggest_delete` |
+| `script_error` | 1 | 停用 + `suggest_delete` |
+| `no_sample` | 9（kuwo 6、migu 3） | **不停用**，只标"暂无法验证" |
+
+真出声的 11 条：`网易云 (七洁雅 Meting)`、`音乐下载器`、`非常刀`、`溯音音源`、`忆音音源`、`墨澜聚合音源`（网易云 + 酷狗两条）、`全豆要[聚合音源]`、`lx-玉宁熙-Pro`、`K×H测试`、`👖裤佬SVIP音源` —— 除第一条是 meting，其余 10 条都经 runner。
+
+写名单时自己踩了一次误报：`check-live.mjs` 的"判死"列表当初按状态名枚举，漏了 `resolve_fail`，导致面板显示 28 条判死而 D1 实际 30 条。现在改成**反向推导**（`ok` 之外、减去 `INCONCLUSIVE` 三个不可判状态都算判死），这类"新增状态忘了加进列表"的错以后只会绿不会静默漏报。
+
+### 21.7 客户端契约：一个 URL 换到全部
+
+只读验证脚本 `npm run verify:live`（15 项，全程不改任何数据）确认的现网形态：
+
+- `functions/api/music-sources.js` —— 后台管理入口（增删改、体检、runner 部署与对齐），需要 `SOURCES_ADMIN_TOKEN`。
+- `functions/api/manifest.js` —— 暴露给 App 的**唯一 URL**。返回可用源 + 每条的 `check` 字段（含 runner 取到的真实字节数），带 **ETag → 304**，且**绝不下发脚本正文**（有专项断言守着）。`settings.homeTitle` 按 `deviceId` 关联，这就是"首页文案由服务端设置"的实现。
+- `functions/api/gateway.js` —— 取直链：`capabilities` 按 `byProtocol` 报能力，`search` / `url` 走 meting 或 runner。本机端到端从"只有一个 manifest URL"出发，两条路径都拿到 `206 audio/mpeg 65536B magic=true`；按 `sourceId` 指名 lxjs 源走 runner 同样出声；对已判死的源回 `409`。
+- **向下兼容**：老的 `/api/sync-playlists` 契约与字段完全没动，iPhone 现网继续按原样用（用户那句"已经部署了，不需要重新部署，跟 iPhone 版用同一个服务器"指的是 HALO 后端，不是 cf-sync-server，两回事）。
+
+网络现实记一笔：本机到 `*.workers.dev` 不可达，所有现网验证都必须走 Pages Function 域名 `https://primuse-sync-server.pages.dev`（`curl --ssl-no-revoke` 或 Node fetch + `AbortSignal.timeout`）。
+
+### 21.8 验证与交付物
+
+- `npm test`（离线契约，workerd 起的真 Worker）：**58 项 0 失败**，含本轮新增的 3 条 runner-status/trust-runner 断言和 5 条 `normalizeLxSearch` 形状断言。
+- `npm run test:runner`（e2e，真 bundle + 真 workerd）：**30 项 0 失败**，含"请求期抛异常的假源"回归用例。
+- `npm run verify:live`：**15 项 0 失败**，全部只读。
+- 现网身份：Pages `primuse-sync-server`；runner Worker `primuse-lx-runner`（当前版本 `58d89d32…`，**12 个模块**，与启用集一致）；D1 `halo-music-db` / `3f1eaf4d-5d00-4849-857d-51b25e5e7ac6`；CF account `647ed46aadc8b020487af49c12bfcb80`。密钥只在 gitignored `.env` / `.deploy-secrets.txt` / Pages Secrets 里，入库的只有 account id 和 D1 id。
+- 新增 `scripts/`（`import-js.mjs` / `deploy-runner.mjs` / `check-live.mjs` / `verify-live.mjs`）与 `.env.example`；`.gitignore` 补了 `.live-*.json`、`.check-live.json`，并把三个一次性探针产物从库里移除（`tests/.sandbox-probe.mjs`、`tests/.eval-probe/`）。
+
+### 21.9 还没做
+
+- Windows / macOS 客户端接入：只存 manifest URL、读清单、把"检测全部延迟"换成"检测全部可用"（消费 `suggest_delete`）、首页 header 用 `settings.homeTitle`。
+- iPhone / macOS 侧同一契约的移植。
+- gateway 不暴露 lxjs `search`（见 §21.5 边界）；不可判的 9 条（kuwo / migu）要真判，得接一条会搜这两个平台的源或人工投喂样本。
+- W5 自建协议、线路导入导出，以及 §19.7 / §20.7 遗留项。
+- v1.9.8 Release 上那两个错误的 `HALO-Music-*` 资产仍在（删除 Release 资产属破坏性操作，等明确批准）。
+
+
+
 
 

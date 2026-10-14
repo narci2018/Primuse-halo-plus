@@ -637,7 +637,8 @@
       </div>
       <div class="modal-body">
         <div class="hint">
-          Cloudflare 边缘禁止在请求里生成代码，所以 js 音源只能在<b>部署期编成静态模块</b>的 runner Worker 里跑。
+          Cloudflare 边缘禁止在请求里生成代码，所以 js 音源只能在<b>部署期就写死进 bundle</b> 的 runner Worker 里跑：
+          脚本正文作为 Text 模块进包（混淆稿一旦被打包器解析就整包发布失败），启动阶段再交给 <code class="k">new Function</code> 编成沙箱 —— 和洛雪官方执行音源的方式一致。
           音源有增删改后点「重新部署」把当前启用的脚本集推上去；缺 CF 凭据时会明确报「未部署」，不会假装成功。
         </div>
         <div id="runnerStatus" class="hint">尚未查询。</div>
@@ -1314,9 +1315,17 @@
         box.innerHTML = [
           `脚本名：<code class="k">${escapeHtml(d.script)}</code>`,
           `目标：<code class="k">${escapeHtml(d.target || "未配置")}</code> · ${d.reachable ? "连通" : "不通" + (d.error ? "（" + escapeHtml(d.error) + "）" : "")}`,
-          `已装模块：${d.modules} · ${fmt(d.liveHashes)}`,
+          `已装模块：${d.modules}（编译通过 ${d.compiled == null ? d.modules : d.compiled}） · ${fmt(d.liveHashes)}`,
+          (d.broken && d.broken.length)
+            ? `⚠️ 编译不过的脚本（只有它自己不可用，其余源照常）：${d.broken.map((b) => escapeHtml(String(b.hash).slice(0, 10) + "（" + b.error + "）")).join("、")}`
+            : "",
           `音源表想要：${fmt(d.desiredHashes)}`,
-          `是否需要同步：<b>${d.stale ? "需要（音源变了，点下面的部署）" : "不需要"}</b>`,
+          // 比对基准：runner 连通时按它自己上报的哈希（真相在边缘），够不到才退回 D1 里的部署记录。
+          // 本机 wrangler 部署走不到 Workers API，那一份记录只能事后补，所以专门给个对齐按钮。
+          `是否需要同步：<b>${d.stale ? "需要（音源变了，点下面的部署）" : "不需要"}</b>（依据：${d.staleBasedOn === "runner" ? "runner 实装" : "D1 部署记录"}）`,
+          d.recordNeedsSync
+            ? `⚠️ D1 里的部署记录和 runner 实装不一致（多半是本机 <code class="k">scripts/deploy-runner.mjs</code> 部署的）。这不影响播放，点 <button class="btn btn-secondary btn-sm" onclick="alignRunnerRecord()">对齐部署记录</button> 即可。`
+            : "",
           `bundle 体量：${d.bytes}B · 可自动部署：${d.canDeploy ? "是" : "否（缺 CF_ACCOUNT_ID / CF_API_TOKEN）"}`,
           (d.skipped && d.skipped.length) ? `被跳过的脚本：${d.skipped.map((s) => escapeHtml(String(s.hash).slice(0, 10) + "（" + s.reason + "）")).join("、")}` : "",
         ].filter(Boolean).join("<br>");
@@ -1325,8 +1334,20 @@
       }
     }
 
-    async function deployRunner(force) {
-      const btn = document.getElementById("btnDeployRunner");
+    /** 把 D1 里的"已部署哈希"对齐成 runner 当前真正加载的那份（本机 wrangler 部署后要用）。 */
+    async function alignRunnerRecord() {
+      const box = document.getElementById("runnerStatus");
+      box.textContent = "对齐部署记录中...";
+      try {
+        const d = await adminPost("trust-runner", {});
+        box.textContent = `✅ 已对齐：runner 当前加载 ${Array.isArray(d.hashes) ? d.hashes.length : "?"} 个脚本。`;
+        setTimeout(queryRunner, 300);
+      } catch (err) {
+        box.textContent = err.message;
+      }
+    }
+
+    async function deployRunner(force) {      const btn = document.getElementById("btnDeployRunner");
       btn.disabled = true;
       const box = document.getElementById("runnerStatus");
       box.textContent = force ? "强制部署中..." : "部署中...";

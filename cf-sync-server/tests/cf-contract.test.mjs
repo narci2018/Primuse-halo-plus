@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { startLxRunner } from "./lx-runner.mjs";
 import { probeAudio } from "../functions/lib/protocols.js";
+import { normalizeLxSearch } from "../functions/lib/runner.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // 端口每次都换一个新的：上一轮被强杀的 workerd 可能还占着旧端口，
@@ -147,6 +148,9 @@ async function main() {
     ? `-b LX_RUNNER_URL=${runner.base} -b LX_RUNNER_TOKEN=${RUNNER_TOKEN} `
     : "";
   const child = spawn(
+    // wrangler.toml 里只留 D1 绑定，令牌走同目录 .env：
+    // Pages 生产环境的令牌是后台 Secret，部署时再带一份同名 [vars] 会被判成
+    // "Binding name 'SOURCES_ADMIN_TOKEN' already in use"，整次发布失败。
     `npx --yes wrangler pages dev public --port ${PORT} --ip 127.0.0.1 --persist-to .cf-local ${runnerVars}`,
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"], shell: true, env: { ...process.env, WRANGLER_LOG: "warn" } }
   );
@@ -287,6 +291,31 @@ async function main() {
       record("脚本集合和 runner 现装不一致时如实报 stale", rd?.stale === true, `stale=${rd?.stale}（本地没有 CF 凭据，装不了长青那条）`);
       record("没配 CF 凭据时 canDeploy=false（不把缺凭据伪装成已部署）", rd?.canDeploy === false, `canDeploy=${rd?.canDeploy}`);
 
+      // stale 的比较基准必须是 runner 自己上报的哈希，而不是 D1 里那份"上次部署动作写回的记录"：
+      // 本机 wrangler 那条路径（scripts/deploy-runner.mjs）用不到 Workers API，记录只能事后补，
+      // 只看记录会永远回答"需要重部署"，把已经对齐的边缘说成没对齐。
+      record(
+        "runner-status 按 runner 实装判定 stale，记录差异单独标 recordNeedsSync",
+        rd?.staleBasedOn === "runner" && rd?.recordNeedsSync === true && (rd?.deployedHashes || []).length === 0,
+        JSON.stringify({ basedOn: rd?.staleBasedOn, stale: rd?.stale, needsSync: rd?.recordNeedsSync, recorded: (rd?.deployedHashes || []).length })
+      );
+
+      const tr = await ADMIN_POST("music-sources", { action: "trust-runner" }, ADMIN);
+      const trd = tr.json?.data;
+      record(
+        "trust-runner：把 runner 上报的哈希写回 D1 的部署记录",
+        tr.json?.code === 0 && Array.isArray(trd?.hashes) && trd.hashes.length >= 1,
+        JSON.stringify({ code: tr.json?.code, message: tr.json?.message, n: (trd?.hashes || []).length })
+      );
+
+      const rstat2 = await ADMIN_POST("music-sources", { action: "runner-status" }, ADMIN);
+      const rd2 = rstat2.json?.data;
+      record(
+        "对齐之后：recordNeedsSync 归 false，且 stale 仍按 runner 实装如实回答",
+        rd2?.recordNeedsSync === false && rd2?.stale === true && (rd2?.deployedHashes || []).length === (rd2?.liveHashes || []).length,
+        JSON.stringify({ needsSync: rd2?.recordNeedsSync, stale: rd2?.stale, recorded: (rd2?.deployedHashes || []).length, live: (rd2?.liveHashes || []).length })
+      );
+
       const rdep = await ADMIN_POST("music-sources", { action: "deploy-runner" }, ADMIN);
       record(
         "缺凭据时 deploy-runner 明确跳过，不发任何对外请求",
@@ -338,6 +367,22 @@ async function main() {
       record("清单里 lxjs 源的 check 字段带 runner 取到的真实字节数", (finSrcs.find((s) => s.id === lxUsableId)?.check?.bytes || 0) > 8192, JSON.stringify(finSrcs.find((s) => s.id === lxUsableId)?.check));
     } else {
       console.log("SKIP | 联网断言（--no-net）");
+    }
+
+    // ── 7c. 搜索结果归一（纯函数，不联网）────────────────────────────────
+    // 体检一条 lxjs 源需要真实歌曲 id，而"脚本自己会搜"是各家脚本的自选动作，
+    // 返回形状五花八门（裸数组 / {list} / {data:{list}}）。这里把归一化钉住，
+    // 免得现网又出现"源明明搜到了歌，我们却报检不出样本"。
+    const shapes = [
+      ["裸数组（非常刀的形状）", [{ name: "晴天", singer: "周杰伦", id: "MUSIC_228908", source: "kw" }], ["MUSIC_228908"]],
+      ["{list:[…]}（官方洛雪形状）", { total: 30, list: [{ id: "3440441479", name: "晴天" }] }, ["3440441479"]],
+      ["{data:{list:[…]}}/嵌套 musicInfo", { data: { list: [{ musicInfo: { id: "0012345678" } }] } }, ["0012345678"]],
+      ["垃圾返回", "not json", []],
+      ["过短的伪 id 不收", [{ id: "1" }], []],
+    ];
+    for (const [label, input, expect] of shapes) {
+      const got = normalizeLxSearch(input).map((i) => i.rawID);
+      record(`搜索结果归一：${label}`, JSON.stringify(got) === JSON.stringify(expect), `得到 ${JSON.stringify(got)}`);
     }
 
   } catch (e) {

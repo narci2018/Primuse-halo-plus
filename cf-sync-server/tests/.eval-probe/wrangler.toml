@@ -1,3 +1,0 @@
-name = "primuse-eval-probe"
-main = "worker.js"
-compatibility_date = "2025-08-01"

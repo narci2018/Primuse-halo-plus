@@ -10,22 +10,26 @@
 // 只能在请求里取出来 → 在 Pages Function 里永远执行不了（quickjs-WASM 这条路本机也证不了）。
 //
 // 于是换成唯一站得住的边缘执行形态：
-//   后台导入/删除音源 → 本模块把所有脚本包成 sandbox 模块 + 一个固定入口 →
-//   通过 Cloudflare REST API PUT /workers/scripts/<runner> 重新部署 runner（脚本此刻变成
-//   "构建期静态模块"，合法）→ Pages Function 用服务绑定（或 workers.dev + Bearer）调它取直链。
+//   后台导入/删除音源 → 本模块把脚本正文包成 **Text 静态模块** + 一个固定入口 →
+//   通过 Cloudflare REST API PUT /workers/scripts/<runner> 重新部署 runner（脚本此刻仍然是
+//   "部署期就写死在 bundle 里的东西"，合法）→ 入口在**启动阶段**用 new Function 编译沙箱，
+//   在**第一个请求**里才真正执行脚本并缓存，之后请求只做调用
+//   → Pages Function 用服务绑定（或 workers.dev + Bearer）调它取直链。
+// 为什么中间要过一道 new Function 而不是直接把沙箱写成 .js 模块：wrangler 打包必过 esbuild，
+// 而 esbuild 解析混淆音源会直接拒绝整包（详见 lib/lx.js 顶部那段实测记录）。
 // 执行仍然发生在 CF 边缘，App 侧不需要任何 js 运行时，符合"客户端只保存一个 URL"。
 //
 // 安全边界：部署只由后台（带 SOURCES_ADMIN_TOKEN）动作触发，客户端可读路径绝不会
 // 携带 CF_API_TOKEN 去部署 Worker；runner 自身再要一个 LX_RUNNER_TOKEN 做二次门禁。
 
-import { buildSandboxModule, gunzipText, lxSourceKey, lxMusicInfo, LX_CONSOLE_MODULE } from "./lx.js";
+import { sandboxTemplate, gunzipText, lxSourceKey, lxMusicInfo } from "./lx.js";
 import { loadScript, metaGet, metaSet, listSources } from "./store.js";
 
 export const RUNNER_CONTRACT = "primuse.lx-runner.v1";
-const DEPLOYED_HASHES_KEY = "lx_runner_hashes_v1";
+export const DEPLOYED_HASHES_KEY = "lx_runner_hashes_v1";
 const COMPATIBILITY_DATE = "2025-08-01";
 /** 免费计划单 Worker bundle 上限 3MiB(gzip)。原始 6MiB 大约压到 1.5MiB，留足余量。 */
-const MAX_RAW_BYTES = 6_000_000;
+export const MAX_RAW_BYTES = 6_000_000;
 
 export function runnerName(env) {
   return String((env && env.LX_RUNNER_NAME) || "primuse-lx-runner").trim();
@@ -35,8 +39,17 @@ export function runnerName(env) {
 
 /**
  * 生成 runner 的全部模块文件。entries: [{ hash, scriptText }]。
- * 每个脚本走 buildSandboxModule()（已被 tests/sandbox-probe.mjs 证明能独立跑通），
- * 入口用**字面量** import 它们——这正是 Workers 允许的唯一动态代码形态：静态。
+ *
+ * 用户脚本一律以 **Text 模块**进 bundle，入口在**启动阶段**用 new Function 把它编成沙箱：
+ *   —— 打包器（wrangler 必然过 esbuild）一旦解析脚本正文，混淆稿就会让整个 bundle 发布失败
+ *      （`Cannot assign to "x" because it is a constant`；详见 lib/lx.js 里那段实测记录）；
+ *   —— 而 Workers 只禁止"请求期"生成代码，启动期 new Function 本机实测允许，
+ *      脚本此刻仍然是"部署期就写死在 bundle 里的静态资源"，没有破坏边缘执行的安全模型；
+ *   —— 顺带和洛雪官方一致（官方也是 new Function(脚本文本)）。
+ *   —— 但"编译"和"执行"必须分开：启动阶段真跑一句脚本，只要它顶层有 setTimeout / fetch，
+ *      workerd 就报 Disallowed operation called within global scope（本机实测倒在 lx-玉宁熙 上）。
+ *      所以入口只在启动期编译，factory() 留到第一个请求里惰性执行，成功的沙箱按 isolate 缓存。
+ * 每个脚本的编译单独 try/catch：一条烂源不该把整个 runner 拖到起不来。
  */
 export function buildRunnerFiles(entries) {
   const list = (entries || []).filter((e) => e && e.hash && e.scriptText);
@@ -45,23 +58,59 @@ export function buildRunnerFiles(entries) {
   const files = [];
   list.forEach((e, i) => {
     const alias = `m${i}`;
-    const path = `scripts/${e.hash}.mjs`;
-    imports.push(`import * as ${alias} from "./${path}";`);
+    // .txt 不是笔误：Text 模块的内容不会被任何 JS 解析器碰过，这正是我们要的。
+    const path = `scripts/${e.hash}.txt`;
+    imports.push(`import ${alias} from "./${path}";`);
     registry.push(`  [${JSON.stringify(e.hash)}, ${alias}],`);
-    files.push({ path, content: buildSandboxModule(e.scriptText), contentType: "application/javascript+module" });
+    files.push({ path, content: e.scriptText, contentType: "text/plain", moduleType: "Text" });
   });
-  // 沙箱模块统一 import "./__lx_console.mjs"，所以这个垫片必须和它们同目录。
-  if (list.length) {
-    files.push({ path: "scripts/__lx_console.mjs", content: LX_CONSOLE_MODULE, contentType: "application/javascript+module" });
-  }
+  const { prefix, suffix } = sandboxTemplate();
 
   const entry = `// 自动生成，请勿手改 —— ${RUNNER_CONTRACT}
 // 由 primuse-sync-server 的后台在音源变更时通过 Cloudflare REST API 重新部署。
 ${imports.join("\n")}
 
-const REGISTRY = new Map([
+const RAW = new Map([
 ${registry.join("\n")}
 ]);
+
+// 沙箱模板两半（见 lib/lx.js 顶部那段实测记录）。脚本正文夹在中间，
+// 前后各一个换行：脚本可能以行注释结尾，少一个换行会把后缀第一行吃掉。
+const SANDBOX_PREFIX = ${JSON.stringify(prefix)};
+const SANDBOX_SUFFIX = ${JSON.stringify(suffix)};
+
+// 启动阶段只做**编译**，不做执行。这一步的分工是被实测逼出来的：
+//   new Function(...)            → 只有启动期允许（请求期报 Code generation disallowed）
+//   紧接着把脚本跑起来            → 启动期禁止（脚本顶层一句 setTimeout/fetch 就报
+//      "Disallowed operation called within global scope"，本机倒在 lx-玉宁熙 上）
+// 所以编译产物先收进 COMPILED，真正 factory() 留到第一个请求里惰性执行（那时 I/O 和定时器合法），
+// 跑成功的沙箱再缓存进 SANDBOXES，一个 isolate 只初始化一次。
+const COMPILED = new Map();
+const BROKEN = new Map();
+const SANDBOXES = new Map();
+for (const [hash, text] of RAW) {
+  try {
+    COMPILED.set(hash, new Function(SANDBOX_PREFIX + "\\n" + String(text) + "\\n" + SANDBOX_SUFFIX));
+  } catch (e) {
+    BROKEN.set(hash, String(e && e.message ? e.message : e).slice(0, 300));
+  }
+}
+
+// 返回 { mod } 或 { error, detail }。初始化失败不缓存：那可能是源站一时抽风，下次得重试。
+function sandboxOf(hash) {
+  const cached = SANDBOXES.get(hash);
+  if (cached) return { mod: cached };
+  const factory = COMPILED.get(hash);
+  if (!factory) return { error: BROKEN.has(hash) ? "script_uncompilable" : "hash_not_deployed", detail: BROKEN.get(hash) || "" };
+  try {
+    const mod = factory();
+    if (!mod || typeof mod.__request !== "function") return { error: "script_init_failed", detail: "脚本没有产出沙箱导出（__request 缺失）" };
+    SANDBOXES.set(hash, mod);
+    return { mod };
+  } catch (e) {
+    return { error: "script_init_failed", detail: String(e && e.message ? e.message : e).slice(0, 300) };
+  }
+}
 
 const CONTRACT = ${JSON.stringify(RUNNER_CONTRACT)};
 
@@ -83,14 +132,37 @@ function unauthorized(request, env) {
 }
 
 export default {
+  // 最外层再兜一次：任何没预料到的异常都要以 JSON 的形式回来。
+  // Worker 里裸抛异常 = Cloudflare 回一张 "error code: 1101" 的纯文本页，
+  // 调用方（体检、网关）就只能说"runner 返回不是 JSON"，把能修的问题说成天书。
   async fetch(request, env) {
+    try {
+      return await handle(request, env);
+    } catch (e) {
+      return Response.json({
+        ok: false,
+        error: "runner_exception",
+        detail: String((e && (e.stack || e.message)) || e).slice(0, 500),
+      }, { status: 500 });
+    }
+  },
+};
+
+async function handle(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       return Response.json({
+        // ok 只表示"这个 Worker 起来了、能被调用"。某条源编译失败不叫不可达 ——
+        // 它由 broken 单独报，runner-status/体检会把它读成那条源的问题，而不是整机的问题。
         ok: true,
         contract: CONTRACT,
-        modules: REGISTRY.size,
-        hashes: Array.from(REGISTRY.keys()),
+        modules: RAW.size,
+        compiled: COMPILED.size,
+        initialized: SANDBOXES.size,
+        // 部署集合按 RAW 报（不是按编译成功的报），否则一条烂源会让"该部署的集合 vs
+        // 实装的集合"永远对不上，后台一直显示 stale、一直重部署。
+        hashes: Array.from(RAW.keys()),
+        broken: Array.from(BROKEN.entries()).map(([h, m]) => ({ hash: h, error: m })),
         bytes: Number((env && env.LX_RUNNER_BYTES) || 0),
       });
     }
@@ -102,10 +174,12 @@ export default {
     try { body = await request.json(); } catch { return Response.json({ ok: false, error: "body must be JSON" }, { status: 400 }); }
 
     const hash = String(body.hash || "");
-    const mod = REGISTRY.get(hash);
-    if (!mod) {
-      return Response.json({ ok: false, error: "hash_not_deployed", detail: \`runner 里没有脚本 \${hash.slice(0, 16)}（共 \${REGISTRY.size} 个模块）\`, hashes: Array.from(REGISTRY.keys()).slice(0, 8) }, { status: 409 });
+    const made = sandboxOf(hash);
+    if (!made.mod) {
+      const why = made.detail || (made.error === "script_uncompilable" ? "脚本编译失败" : "");
+      return Response.json({ ok: false, error: made.error, detail: made.error === "hash_not_deployed" ? \`runner 里没有脚本 \${hash.slice(0, 16)}（共 \${RAW.size} 个模块）\` : \`\${hash.slice(0, 16)}：\${why}\`, hashes: Array.from(RAW.keys()).slice(0, 8) }, { status: made.error === "hash_not_deployed" ? 409 : 422 });
     }
+    const mod = made.mod;
     const action = String(body.action || "musicUrl");
     const params = body.params || {};
     const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 20000, 1000), 28000);
@@ -122,15 +196,27 @@ export default {
 
     const run = mod.__request(action, params);
     const guarded = await Promise.race([
-      Promise.resolve(run).then((v) => ({ kind: "value", v })),
+      // .catch 不能省：脚本没活干时会 reject（"音源对该操作没有返回结果"、源站 500 之类），
+      // 少这一句 Promise.race 就把异常抛穿 fetch，Cloudflare 直接回 HTTP 500 "error code: 1101"
+      // 的纯文本 —— 体检读不到原因，只能说"runner 返回不是 JSON"，把一条能修的源冤枉成坏源。
+      // （本机现网实测：非常刀/西瓜聚合源 的酷狗线、聚合API接口 全部栽在这上面。）
+      Promise.resolve(run).then((v) => ({ kind: "value", v })).catch((e) => ({ kind: "error", e })),
       new Promise((r) => setTimeout(() => r({ kind: "timeout" }), timeoutMs)),
     ]);
     if (guarded.kind === "timeout") {
       return Response.json({ ok: false, error: "script_timeout", detail: \`\${action} 超过 \${timeoutMs}ms 没返回\`, inited }, { status: 504 });
     }
+    if (guarded.kind === "error") {
+      const e = guarded.e;
+      return Response.json({
+        ok: false,
+        error: "script_exception",
+        detail: \`\${hash.slice(0, 16)} · \${action}：\${String((e && e.message) || e).slice(0, 400)}\`,
+        inited,
+      }, { status: 422 });
+    }
     return Response.json({ ok: true, result: guarded.v, inited });
-  },
-};
+}
 `;
   return [{ path: "entry.mjs", content: entry, contentType: "application/javascript+module" }, ...files];
 }
@@ -151,6 +237,10 @@ export function buildRunnerUploadForm({ files, token, bytes, migrations = null }
   if (token) metadata.bindings.push({ type: "plain_text", name: "LX_RUNNER_TOKEN", text: String(token) });
   if (bytes) metadata.bindings.push({ type: "plain_text", name: "LX_RUNNER_BYTES", text: String(bytes) });
   if (migrations) metadata.migrations = migrations;
+  // 模块类型必须逐个声明：入口是 ESModule，音源正文是 Text（见 lx.js 顶部那段实测记录）。
+  // 不写 modules 的话 API 只认 main_module + 上传部分，会按扩展名猜；把 .txt 猜成 JS 模块，
+  // 就等于让打包器去解析混淆稿 —— 那个"整包发布失败"的老问题立刻回来。
+  metadata.modules = files.map((f) => ({ type: f.moduleType || "ESModule", path: f.path }));
   // metadata 必须是**文件部分**（带 filename），否则 API 认不出来。
   fd.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }), "metadata");
   for (const f of files) {
@@ -390,4 +480,41 @@ export async function lxDetectPlatforms(env, hash) {
   const out = await runnerInvoke(env, { hash, action: "capabilities", params: {} }).catch(() => null);
   if (!out) return null;
   return out.result || out.inited || null;
+}
+
+/**
+ * 让脚本自己搜一次歌。
+ *
+ * 官方洛雪协议里音源只保证 musicUrl，搜索是各家自己加的（本机的 22 个脚本里就有一部分实现了），
+ * 而体检一条 lxjs 源需要**真实的歌曲 id** —— 样本池只能靠会搜索的线路喂。所以这里把"脚本自己能搜"
+ * 变成可用信息：搜到了就喂样本池，让那条源能被体检；搜不到就照旧回答"检不出结果"（绝不停用）。
+ * 参数字段各家读的不一样（keyword / query / prompt / text），全部填满，免得源明明能搜却被判"不支持"。
+ */
+export async function lxSearch(env, { hash, platform, keyword = "晴天", limit = 8 }) {
+  const source = lxSourceKey(platform);
+  const info = { keyword, query: keyword, prompt: keyword, text: keyword, page: 1, limit, type: "music", rctype: "music" };
+  const out = await runnerInvoke(env, {
+    hash,
+    action: "search",
+    params: { source, type: "music", rctype: "music", page: 1, limit, ...info, info },
+  });
+  return normalizeLxSearch(out.result);
+}
+
+/** 搜索结果归一成 [{ rawID, title, artist }]；返回形状各家不同（裸数组 / {list} / {data:{list}}）。 */
+export function normalizeLxSearch(v) {
+  const raw = Array.isArray(v)
+    ? v
+    : (v && (v.list || (v.data && v.data.list) || (v.source && v.source.list))) || [];
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const it of raw) {
+    if (!it) continue;
+    const m = it.musicInfo || it.rawData?.musicInfo || it;
+    const id = String(m.id ?? m.rawId ?? m.songmid ?? m.mid ?? m.hash ?? m.midCode ?? "").trim();
+    if (id.length < 4) continue;
+    out.push({ rawID: id, title: String(m.name || m.title || "").slice(0, 80), artist: String(m.singer || m.artist || "").slice(0, 80) });
+    if (out.length >= 12) break;
+  }
+  return out;
 }
