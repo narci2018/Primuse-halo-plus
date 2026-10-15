@@ -496,6 +496,17 @@
         <input type="password" id="adminToken" class="form-input" placeholder="管理令牌（SOURCES_ADMIN_TOKEN，只留在本浏览器 sessionStorage）" autocomplete="off">
         <button class="btn btn-sm" onclick="saveToken()">记住令牌</button>
       </div>
+      <div class="form-help">
+        <b>这个令牌是什么：</b>服务端写接口的唯一凭证。
+        清单读取是开放的（App 也走它，所以不需要令牌）；但增删改源、启停、体检、改首页文案、动样本池这些
+        <b>写操作</b>一律要 <code class="k">Authorization: Bearer &lt;令牌&gt;</code> —— 这个后台是 <code class="k">CORS: *</code> 的公网页面，
+        没有它任何人都能改音源、把全站用户的播放带偏。没配令牌时写接口直接 503（fail closed），不会退化成"谁都能改"。
+        <br><b>去哪拿：</b>Cloudflare 控制台 → Pages → 本项目 → Settings → Environment variables → 变量 <code class="k">SOURCES_ADMIN_TOKEN</code>。
+        那里只存不回显明文；本机仓库的 <code class="k">.deploy-secrets.txt</code>（已 gitignore）留有明文，忘了就从那里取，或重新设一个再 <code class="k">wrangler pages secret put</code>。
+        另有低权限的 <code class="k">SOURCES_CHECK_TOKEN</code>，只够调 <code class="k">check-one / check-plan</code>，适合给"只想让它体检别想改源"的人。
+        <br><b>「记住令牌」做什么：</b>把它写进<b>本标签页的 sessionStorage</b>，之后每次点写操作自动带上，省去反复粘贴。
+        它<b>不落 localStorage、不进磁盘、关闭标签页即消失</b>，刷新页面就要重填 —— 令牌泄漏的窗口只有一次会话那么长。
+      </div>
       <div class="admin-row">
         <button class="btn btn-warning btn-sm" id="btnCheckAll" onclick="checkAll()">🔊 检测全部可用</button>
         <button class="btn btn-secondary btn-sm" onclick="openImportDialog()">📥 导入洛雪 js 音源</button>
@@ -507,6 +518,25 @@
       <div id="sourceContainer">
         <div class="empty-tip">点击「刷新清单」加载音源</div>
       </div>
+    </div>
+
+    <!-- 体检样本池：no_sample（未检出）唯一的出口 -->
+    <div class="card">
+      <div class="card-title">
+        <span>🧪 体检样本池（probe_samples_v1）</span>
+        <span style="display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-secondary btn-sm" onclick="openSampleDialog()">打开样本池</button>
+          <button class="btn btn-secondary btn-sm" onclick="loadSampleSummary()">↻ 刷新</button>
+        </span>
+      </div>
+      <div class="hint">
+        体检要"真出声"就得先有一首<b>真实的歌</b>去解析取流。会搜索的线路每次命中都会把歌曲 id 攒进这里（每平台上限 24 个），
+        洛雪 js 音源不会搜索，就靠这份池子被体检。某个平台的池子是空的、而这个平台的源又没有一个会搜 ——
+        服务端就只能报<b>未检出（no_sample）</b>：这不是"源坏了"，是<b>我们手上没它的考题</b>，所以既不停用也不加载进 App。
+        <b>填一个该平台的真实歌曲 id（网易云 / QQ / 酷狗 / 酷我 / 咪咕的歌单页地址里那串数字）</b>，再对那条源点"用歌曲 id 复测"，
+        结论就从"未检出"变成真的能播或不能播。
+      </div>
+      <div id="sampleSummary" class="form-help">还没读取。</div>
     </div>
   </div>
 
@@ -684,6 +714,36 @@
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary btn-sm" onclick="closeModal('settingsModal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. 体检样本池模态框 -->
+  <div id="sampleModal" class="modal-overlay">
+    <div class="modal-content" style="max-width:720px;">
+      <div class="modal-header">
+        <h3>🧪 体检样本池</h3>
+        <button class="modal-close" onclick="closeModal('sampleModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">平台</label>
+          <select id="samplePlatform" class="form-select" onchange="loadSamplePool()"></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">歌曲 id（每行或逗号一个，真实存在的歌；上限 24 个/平台）</label>
+          <textarea id="sampleIds" class="form-input" rows="6" style="font-family:ui-monospace,Consolas,monospace;" placeholder="例如 30022668, 30001688"></textarea>
+          <div class="form-help" id="sampleHelp">池子里的 id 会同时用于「搜索接口挂了」的 HTTP 线路和全部洛雪 js 音源的体检。</div>
+        </div>
+        <div class="form-group">
+          <button class="btn btn-sm" onclick="saveSamples('add')">➕ 追加（去重）</button>
+          <button class="btn btn-secondary btn-sm" onclick="saveSamples('replace')">♻ 整平台替换</button>
+          <button class="btn btn-danger btn-sm" onclick="saveSamples('clear')">🗑 清空该平台</button>
+        </div>
+        <div class="form-help" id="sampleResult" style="white-space:pre-wrap;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('sampleModal')">关闭</button>
       </div>
     </div>
   </div>
@@ -1116,16 +1176,21 @@
     }
 
     const STATUS_TEXT = {
-      ok: "能出声", unchecked: "未体检", search_empty: "搜不到歌", no_url: "取不到直链",
-      no_sample: "没有测试样本", audio_dead: "直链取不到音频", runner_missing: "runner 未部署",
-      unsupported: "协议不支持", timeout: "超时", error: "出错",
+      ok: "能出声", unchecked: "未体检", no_sample: "未检出（没样本）", runner_missing: "runner 未部署",
+      unsupported: "协议不支持", error: "没测成（有 3 次宽限）", script_missing: "D1 里没有脚本",
+      script_error: "脚本报错", script_uncompilable: "脚本编译不过",
+      resolve_fail: "解析/取流失败", audio_fail: "直链不能播", search_empty: "搜不到歌",
+      no_url: "取不到直链", timeout: "超时", audio_dead: "直链取不到音频",
     };
+    // 服务端体检实际会回的这些状态里，这一组是「观测盲区」：没结论 ≠ 源坏了，
+    // 不停用、不建议删除，但也不会下发给 App 加载（App 只加载能出声的）。
+    const BLIND_STATUSES = ["no_sample", "runner_missing", "unsupported", "unchecked", "error"];
 
     function statusPill(s) {
       const c = s.check || {};
       if (!s.enabled) return '<span class="pill pill-muted">已停用</span>';
       if (c.status === "ok") return `<span class="pill pill-ok">能出声 · ${(c.bytes / 1024).toFixed(0)}KB</span>`;
-      if (["runner_missing", "no_sample", "unsupported"].indexOf(c.status) >= 0) {
+      if (BLIND_STATUSES.indexOf(c.status) >= 0) {
         return `<span class="pill pill-warn">${STATUS_TEXT[c.status] || c.status}</span>`;
       }
       return `<span class="pill pill-bad">${STATUS_TEXT[c.status] || c.status || "未知"}</span>`;
@@ -1159,7 +1224,28 @@
         const hit = cachedPlatforms.find((x) => x.id === p);
         return hit ? hit.displayName : p;
       };
-      let h = `<table class="src-table"><thead><tr>
+      const n = { ok: 0, blind: 0, bad: 0, off: 0 };
+      for (const s of cachedSources) {
+        const st = (s.check && s.check.status) || "unchecked";
+        if (!s.enabled) n.off++;
+        else if (st === "ok") n.ok++;
+        else if (BLIND_STATUSES.indexOf(st) >= 0) n.blind++;
+        else n.bad++;
+      }
+      const blindNames = cachedSources
+        .filter((s) => s.enabled && BLIND_STATUSES.indexOf((s.check && s.check.status) || "") >= 0)
+        .map((s) => `${s.name}（${platName(s.platform)}）`);
+      let h = `<div class="form-help" style="margin-bottom:10px;">
+          共 <b>${cachedSources.length}</b> 条：
+          <span class="pill pill-ok">能出声 ${n.ok}</span>
+          <span class="pill pill-warn">未检出 ${n.blind}</span>
+          <span class="pill pill-bad">不可播 ${n.bad}</span>
+          <span class="pill pill-muted">已停用 ${n.off}</span>
+          <div style="margin-top:6px;">App 端只加载<b>能出声</b>的那 ${n.ok} 条 —— 这就是"能播放的源才有存在的价值"。
+            ${n.blind ? `<b>未检出 ${n.blind} 条</b>是服务端没它的考题（不是它坏了）：${escapeHtml(blindNames.join("、"))}。去下面「体检样本池」给对应平台填一个真实歌曲 id，再点该行「用歌曲 id 复测」。` : ""}
+            ${n.bad ? `不可播的 ${n.bad} 条已被自动停用并给出删除建议。` : ""}</div>
+        </div>`;
+      h += `<table class="src-table"><thead><tr>
         <th>音源</th><th>平台</th><th>协议</th><th>优先级</th><th>体检</th><th>结论</th><th></th>
       </tr></thead><tbody>`;
       for (const s of cachedSources) {
@@ -1179,6 +1265,7 @@
             <td style="white-space:nowrap;">
               <button class="btn btn-secondary btn-sm" onclick="toggleSource('${encodeURIComponent(s.id)}', ${!s.enabled})">${s.enabled ? "停用" : "启用"}</button>
               <button class="btn btn-secondary btn-sm" onclick="checkOne('${encodeURIComponent(s.id)}')">体检</button>
+              <button class="btn btn-secondary btn-sm" onclick="checkOneWithId('${encodeURIComponent(s.id)}', '${escapeHtml(s.platform)}')" title="用人工指定的真实歌曲 id 验播放：no_sample（未检出）的出口">用歌曲 id 复测</button>
               <button class="btn btn-danger btn-sm" onclick="removeSource('${encodeURIComponent(s.id)}')">删除</button>
             </td>
           </tr>`;
@@ -1209,6 +1296,104 @@
         await adminPost("check-one", { id: decodeURIComponent(encId) });
         loadSources();
       } catch (err) { alert(err.message); }
+    }
+
+    /**
+     * 「用歌曲 id 复测」= no_sample 的出口。
+     * 服务端报"未检出"从来不是说这条源坏了，是我们没有它平台的考题（样本池空 + 这个平台的源都不会搜）。
+     * 用户从咪咕/QQ 的歌页地址里抄一个真实歌曲 id 填进来，checkSource 就跳过搜索直接验播放，
+     * 结论落到"能出声 / 不能出声"，同时这个 id 会被服务端写回样本池，同平台其它源下次不必再喂。
+     */
+    async function checkOneWithId(encId, platform) {
+      const id = decodeURIComponent(encId);
+      const src = cachedSources.find((s) => s.id === id) || {};
+      const raw = prompt(
+        `用哪个${platform || src.platform || ""}的歌曲 id 验播放？\n（歌单页/歌曲页地址里那串数字，可一次给最多 5 个，用逗号分隔）`,
+        (cachedSamplePool[platform || src.platform] || [])[0] || ""
+      );
+      if (raw === null) return;
+      const rawId = String(raw).trim();
+      if (!rawId) { alert("没填 id。留空就没法跳过搜索。"); return; }
+      try {
+        const d = await adminPost("check-one", { id, rawId });
+        const r = d.result || {};
+        alert(`${src.name || id}\n结论：${STATUS_TEXT[r.status] || r.status}\n${String(r.detail || "").slice(0, 300)}${d.advice ? "\n" + d.advice : ""}`);
+        loadSources();
+        loadSampleSummary();
+      } catch (err) { alert(err.message); }
+    }
+
+    /* ── 体检样本池 ───────────────────────────────
+       GET /api/music-sources?devices=1 顺带把池子回给后台（只读、不含任何密钥），
+       所以看池子不需要令牌；改池子走 POST samples，要令牌。 */
+    let cachedSamplePool = {};
+
+    async function fetchSamplePool() {
+      const res = await fetch("/api/music-sources?devices=1");
+      const json = await res.json();
+      if (!json || json.code !== 0) throw new Error((json && json.error) || "HTTP " + res.status);
+      cachedSamplePool = (json.data && json.data.samplePool) || {};
+      cachedDevices = (json.data && json.data.devices) || cachedDevices;
+      return json.data;
+    }
+
+    async function loadSampleSummary() {
+      const box = document.getElementById("sampleSummary");
+      box.textContent = "读取中…";
+      try {
+        await fetchSamplePool();
+        const plats = (cachedPlatforms.length ? cachedPlatforms : Object.keys(cachedSamplePool).map((p) => ({ id: p, displayName: p })));
+        const parts = plats.map((p) => {
+          const arr = Array.isArray(cachedSamplePool[p.id]) ? cachedSamplePool[p.id] : [];
+          return `<b>${escapeHtml(p.displayName)}</b> ${arr.length} 个${arr.length ? `（<code class="k">${escapeHtml(arr.slice(0, 3).join(" "))}</code>${arr.length > 3 ? "…" : ""}）` : ""}`;
+        });
+        const empty = plats.filter((p) => !(Array.isArray(cachedSamplePool[p.id]) ? cachedSamplePool[p.id] : []).length).map((p) => p.displayName);
+        box.innerHTML = parts.join(" · ") + (empty.length ? `<br>池子还空着：${escapeHtml(empty.join("、"))} —— 这些平台的源体检只能报「未检出」。` : "");
+      } catch (err) {
+        box.textContent = err.message;
+      }
+    }
+
+    async function openSampleDialog() {
+      document.getElementById("sampleResult").textContent = "";
+      openModal("sampleModal");
+      try {
+        if (!cachedPlatforms.length) {
+          const res = await fetch("/api/music-sources");
+          const json = await res.json();
+          cachedPlatforms = (json.data && json.data.platforms) || [];
+        }
+        await fetchSamplePool();
+        const sel = document.getElementById("samplePlatform");
+        sel.innerHTML = cachedPlatforms.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}（${p.id}）</option>`).join("");
+        await loadSamplePool();
+      } catch (err) {
+        document.getElementById("sampleResult").textContent = err.message;
+      }
+    }
+
+    function loadSamplePool() {
+      const p = document.getElementById("samplePlatform").value;
+      const arr = Array.isArray(cachedSamplePool[p]) ? cachedSamplePool[p] : [];
+      document.getElementById("sampleIds").value = arr.join("\n");
+      document.getElementById("sampleHelp").textContent = `${p} 当前有 ${arr.length} 个样本（每平台上限 24，最旧的会被挤掉）。`;
+      return Promise.resolve();
+    }
+
+    async function saveSamples(mode) {
+      const platform = document.getElementById("samplePlatform").value;
+      const ids = String(document.getElementById("sampleIds").value || "").split(/[,，;；\s\n]+/).filter(Boolean);
+      if (mode !== "clear" && !ids.length) { alert("先填歌曲 id（清空按钮不需要）。"); return; }
+      const box = document.getElementById("sampleResult");
+      box.textContent = "保存中…";
+      try {
+        const d = await adminPost("samples", { platform, ids, mode });
+        cachedSamplePool = d.pool || cachedSamplePool;
+        box.textContent = `${platform}：现在 ${d.count} 个样本${d.revision ? ` · 清单 rev ${d.revision}` : ""}。\n${(cachedSamplePool[platform] || []).join(" ")}`;
+        loadSampleSummary();
+      } catch (err) {
+        box.textContent = err.message;
+      }
     }
 
     // 一次 HTTP 只检一条：CF 免费计划单请求子请求数有上限，全塞一次必然超。
@@ -1373,16 +1558,30 @@
         document.getElementById("globalHomeTitle").value = s && s.homeTitleFrom !== "default" ? s.homeTitle : "";
         if (s && s.homeTitleFrom === "default") document.getElementById("globalHomeTitle").placeholder = "当前是内置默认「首页」，填入即改";
       } catch { /* 读不到也不挡着填设备覆盖 */ }
+      /*
+        设备下拉这一排以前只认带令牌的 POST devices：令牌没填 → 整排空白，
+        而现网明明已经有同步过的设备 —— 用户看到的就是"有设备却没得选"。
+        现在走免鉴权的 GET ?devices=1（这份数据 /api/sync-playlists 本来就无条件给，不新增暴露面），
+        它挂了再退回页面早先加载过的 cachedDevices。填文案这个**写**操作照旧要令牌。
+      */
+      const sel = document.getElementById("prefDevice");
+      const help = document.getElementById("prefHelp");
+      sel.innerHTML = '<option value="">-- 请选择设备 --</option>';
+      let devices = [];
       try {
-        const d = await adminPost("devices", {});
-        const sel = document.getElementById("prefDevice");
-        sel.innerHTML = '<option value="">-- 请选择设备 --</option>';
-        for (const dev of d.devices || []) {
-          sel.innerHTML += `<option value="${escapeHtml(dev.device_id)}">${escapeHtml(dev.device_name || "未命名")} (${escapeHtml(String(dev.device_id).slice(0, 18))}…)</option>`;
-        }
-      } catch (err) {
-        document.getElementById("prefHelp").textContent = "设备列表需要管理令牌：" + err.message;
+        const d = await fetchSamplePool();
+        devices = (d && d.devices) || [];
+      } catch { /* 下面用 cachedDevices 兜底 */ }
+      if (!devices.length && Array.isArray(cachedDevices)) devices = cachedDevices;
+      for (const dev of devices) {
+        const id = dev.device_id || dev.deviceId;
+        if (!id) continue;
+        sel.innerHTML += `<option value="${escapeHtml(id)}">${escapeHtml(dev.device_name || dev.deviceName || "未命名")} (${escapeHtml(String(id).slice(0, 18))}…)</option>`;
       }
+      const opts = sel.options.length - 1;
+      help.textContent = opts
+        ? `${opts} 台设备可选（列出设备不需要令牌，保存这台设备的文案需要）。`
+        : "还没有设备同步过歌单：App 里做一次歌单备份后回来这里就能选到它。";
     }
 
     async function loadDevicePref() {

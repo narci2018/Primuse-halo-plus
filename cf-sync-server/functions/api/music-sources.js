@@ -28,7 +28,7 @@ import {
   PLATFORMS,
   PROTOCOLS,
 } from "../lib/store.js";
-import { checkSource } from "../lib/check.js";
+import { checkSource, getSamples, updateSamplePool, parseRawIds } from "../lib/check.js";
 import { gzipBase64, sha256Hex, lxMeta, gunzipText } from "../lib/lx.js";
 import {
   RUNNER_CONTRACT,
@@ -67,6 +67,14 @@ export async function onRequestGet({ request, env }) {
   const pub = rows.map(publicSource);
   const pref = deviceId ? await getDevicePref(env, deviceId) : null;
   const globalTitle = await metaGet(env, "home_title_default", "");
+
+  // ?devices=1 —— 后台「按设备覆盖」的下拉框要能列出设备，却不该为了列设备先掏管理令牌。
+  // 这份数据 /api/sync-playlists 的 GET 早就无条件给了（device_id / device_name / 计数），
+  // 所以这里同口径开放：只读、只回已同步过的设备，不新增任何暴露面。
+  if (url.searchParams.get("devices") === "1") {
+    const ds = await env.DB.prepare("SELECT device_id, device_name, platform, playlist_count, song_count, updated_at FROM device_playlists ORDER BY updated_at DESC LIMIT 100").all();
+    return ok({ devices: (ds && ds.results) || [], samplePool: await getSamples(env) }, "设备列表");
+  }
 
   let script = null;
   const scriptId = url.searchParams.get("script");
@@ -293,17 +301,31 @@ export async function onRequestPost({ request, env }) {
     const row = await getSource(env, body.id);
     if (!row) return fail(404, "未找到该音源", 404);
     const keyword = String(body.keyword || "晴天").slice(0, 40) || "晴天";
-    const result = await checkSource(env, row, keyword);
+    // rawId：后台人工指定"用这首歌的 id 去验播放"。给 no_sample 那批源留的出口，
+    // 见 lib/check.js 里 checkSource 的注释；不带它时行为与原来完全一致。
+    const rawId = body.rawId !== undefined ? body.rawId : body.rawIds;
+    const result = await checkSource(env, row, keyword, { rawId });
     const applied = await writeCheckResult(env, row.id, result);
     const rev = await bumpRevision(env);
     const fresh = await getSource(env, row.id);
     return ok({
       result,
       applied,
+      usedRawIds: parseRawIds(rawId),
       source: publicSource(fresh),
       revision: rev,
       advice: applied.suggestDelete ? "该源不可用，已自动停用，建议删除" : applied.enabled ? "" : "已停用",
     }, result.status === "ok" ? "可用" : "不可用");
+  }
+
+  if (action === "samples") {
+    // 体检样本池：{platform: [真实歌曲 id]}。池子是"检测全部可用"能不能落到 migu / kuwo 这些
+    // 只有洛雪源的平台的决定因素 —— 池子空 → 只能报 no_sample（不停用，但也没结论）。
+    const pool = await getSamples(env);
+    if (body.platform === undefined) return ok({ pool, limit: 24 }, "样本池");
+    const saved = await updateSamplePool(env, body.platform, { ids: body.ids, mode: body.mode || "add" });
+    const rev = await bumpRevision(env);
+    return ok({ ...saved, revision: rev }, `样本池 ${body.platform} 已更新（${saved.count} 个）`);
   }
 
   if (action === "prefs") {
@@ -332,7 +354,7 @@ export async function onRequestPost({ request, env }) {
     return ok({ devices: (rows && rows.results) || [] }, "设备列表");
   }
 
-  return fail(400, `未知 action：${action || "(空)"}（可用：upsert/toggle/delete/reorder/import-js/check-plan/check-one/prefs/global-settings/devices/deploy-runner/runner-status/trust-runner）`, 400);
+  return fail(400, `未知 action：${action || "(空)"}（可用：upsert/toggle/delete/reorder/import-js/check-plan/check-one/samples/prefs/global-settings/devices/deploy-runner/runner-status/trust-runner）`, 400);
 }
 
 /**

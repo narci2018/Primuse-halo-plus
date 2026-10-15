@@ -276,6 +276,23 @@ async function main() {
     record("按 deviceId 关联的文案只影响该设备", deviceView.json?.data?.settings?.homeTitle === "我的音乐" && deviceView.json?.data?.settings?.homeTitleFrom === "device", JSON.stringify(deviceView.json?.data?.settings));
     record("其它设备仍拿全局默认", otherView.json?.data?.settings?.homeTitle === "免费音乐", JSON.stringify(otherView.json?.data?.settings?.homeTitle));
 
+    // ── 5b. 免令牌列出设备 + 样本池读写（后台那两个洞：下拉框空着 / 未检出没法解）──
+    // 用户报的现网现象：CF 里明明有 2 台设备同步过，"按设备覆盖"的下拉框却是空的 ——
+    // 因为列设备原来只有带令牌的 POST 一条路，令牌没填就整排空白。现在 GET ?devices=1 开放。
+    const openDevices = await req("/api/music-sources?devices=1");
+    record("GET ?devices=1 不带令牌也能列出设备（列设备不是写操作）", openDevices.status === 200 && openDevices.json?.code === 0 && Array.isArray(openDevices.json?.data?.devices), JSON.stringify({ n: (openDevices.json?.data?.devices || []).length, err: openDevices.json?.error }));
+    record("?devices=1 顺带把样本池回给后台（只读、不含密钥）", openDevices.json?.data && typeof openDevices.json.data.samplePool === "object", JSON.stringify(Object.keys(openDevices.json?.data?.samplePool || {})));
+    const plainManifest = await req("/api/music-sources");
+    record("普通清单 GET 的形状没被新参数带跑（客户端解析不受影响）", plainManifest.json?.code === 0 && plainManifest.json?.data?.contract === "primuse.music-sources.v1" && plainManifest.json?.data?.devices === undefined, JSON.stringify({ keys: Object.keys(plainManifest.json?.data || {}).slice(0, 8) }));
+    const noTokenSamples = await ADMIN_POST("music-sources", { action: "samples", platform: "netease", ids: ["x"] }, null);
+    record("样本池写入仍受令牌门禁（新 action 不是后门）", noTokenSamples.status === 401 || noTokenSamples.json?.code === 401, JSON.stringify({ status: noTokenSamples.status, err: noTokenSamples.json?.error }));
+    const seedPool = await ADMIN_POST("music-sources", { action: "samples", platform: "kugou", ids: ["kg-seed-1", "kg-seed-1", "kg-seed-2"], mode: "add" });
+    record("samples add：去重后落进池子", seedPool.json?.code === 0 && JSON.stringify(seedPool.json?.data?.pool?.kugou) === JSON.stringify(["kg-seed-1", "kg-seed-2"]), JSON.stringify(seedPool.json?.data?.pool?.kugou));
+    const replacePool = await ADMIN_POST("music-sources", { action: "samples", platform: "kugou", ids: [" 30022668，30001688 "], mode: "replace" });
+    record("samples replace + 中英文逗号/空格混排的 id 串解析", replacePool.json?.code === 0 && JSON.stringify(replacePool.json?.data?.pool?.kugou) === JSON.stringify(["30022668", "30001688"]), JSON.stringify(replacePool.json?.data?.pool?.kugou));
+    const clearPool = await ADMIN_POST("music-sources", { action: "samples", platform: "kugou", mode: "clear" });
+    record("samples clear：整平台移除键而不是留个空数组", clearPool.json?.code === 0 && clearPool.json?.data?.pool?.kugou === undefined, JSON.stringify(clearPool.json?.data?.pool));
+
     // ── 6. 导入 js 音源（需求 3）+ 洛雪运行时（需求 1/4 的执行侧）─────────
     const samplePath = path.join(ROOT, "../音源文件/忆音音源_v1.js");
     const sample = readFileSync(samplePath, "utf8");
@@ -332,8 +349,36 @@ async function main() {
         JSON.stringify({ status: deadSrc?.check?.status, detail: String(deadSrc?.check?.detail || "").slice(0, 120) })
       );
 
-      // 现网实测：3e0 那条的 /search 恒回 {"error":"unknown type"}，但 /url 是能出声的。
-      // 旧实现给它判过 search_empty 并停用 —— 那正是这次要消灭的误杀。这里钉住"结论必须是播放层面的"，
+      // ── 7a′. 人工指定歌曲 id 复测：no_sample（未检出）唯一的出口 ──────────────
+      // 现网卡住的正是这一类：3 条咪咕 lxjs 源，样本池里没有 migu 的可考 id，
+      // 而这批源和它们的同伴没有一个会搜索 —— 服务端只能报 no_sample，App 端也就永远拿不到它们。
+      // 后台填一个真实歌曲 id 复测，走的是"跳过搜索、直接验播放"这条路。
+      const seedRaw = `contract-seed-${Date.now() % 1000000}`;
+      const withRaw = await ADMIN_POST("music-sources", { action: "check-one", id: "contract-dead-line", rawId: `${seedRaw}，junk-${seedRaw} 30022668` }, CHECK);
+      const withRawSrc = withRaw.json?.data?.source;
+      record(
+        "带 rawId 时不再报 no_sample（人工 id 直接进播放验证）",
+        withRaw.json?.code === 0 && withRawSrc && withRawSrc.check.status !== "no_sample" && withRawSrc.check.status !== "unchecked",
+        JSON.stringify({ status: withRawSrc?.check?.status, detail: String(withRawSrc?.check?.detail || "").slice(0, 120) })
+      );
+      record(
+        "人工 id 里第 1 个真的传到了解析这一步（detail 里能看到它）",
+        /解析无直链/.test(String(withRawSrc?.check?.detail || "")) && String(withRawSrc?.check?.detail || "").includes(seedRaw),
+        String(withRawSrc?.check?.detail || "").slice(0, 160)
+      );
+      record(
+        "rawId 串按中英文逗号/空格拆分、去重、最多 5 个",
+        JSON.stringify(withRaw.json?.data?.usedRawIds) === JSON.stringify([seedRaw, `junk-${seedRaw}`, "30022668"]),
+        JSON.stringify(withRaw.json?.data?.usedRawIds)
+      );
+      const poolAfterRaw = await req("/api/music-sources?devices=1");
+      record(
+        "复测用过的人工 id 写回样本池（同平台其它源下次不必再喂）",
+        (poolAfterRaw.json?.data?.samplePool?.netease || []).includes(seedRaw),
+        JSON.stringify((poolAfterRaw.json?.data?.samplePool?.netease || []).slice(0, 4))
+      );
+
+      // 现网实测：3e0 那条的 /search 恒回 {"error":"unknown type"}，但 /url 是能出声的。      // 旧实现给它判过 search_empty 并停用 —— 那正是这次要消灭的误杀。这里钉住"结论必须是播放层面的"，
       // 而不断言 ok/不 ok：它到底能不能播由它的站点今天的心情决定，不由我们的判据决定。
       const searchBroken = await ADMIN_POST("music-sources", { action: "check-one", id: "default-netease-meting-3e0" }, CHECK);
       const brokenSrc = searchBroken.json?.data?.source;

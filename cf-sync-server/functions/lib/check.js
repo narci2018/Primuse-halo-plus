@@ -34,6 +34,40 @@ export async function getSamples(env) {
   }
 }
 
+/** 把 id 输入（数组或"a,b c\n4"这样的串）拆成干净去重的列表，最多 limit 个。 */
+export function parseRawIds(input, limit = 5) {
+  const text = Array.isArray(input) ? input.join(",") : String(input == null ? "" : input);
+  const out = [];
+  for (const piece of text.split(/[,，;；|\s]+/)) {
+    const id = piece.trim().slice(0, 64);
+    if (id && out.indexOf(id) < 0) out.push(id);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * 人工维护样本池（后台「样本池」卡片用）。
+ * mode: add（并进去重，默认）/ replace（整平台替换）/ clear（清空该平台）。
+ * 存在的理由见下面 explicitSamples 的注释：某些平台的池子只能靠人手喂第一次。
+ */
+export async function updateSamplePool(env, platform, { ids = [], mode = "add" } = {}) {
+  const key = String(platform || "").trim();
+  if (!key) throw new Error("缺少 platform");
+  const pool = await getSamples(env);
+  const clean = parseRawIds(ids, SAMPLE_LIMIT);
+  if (mode === "clear") delete pool[key];
+  else if (mode === "replace") pool[key] = clean;
+  else pool[key] = [...clean, ...(Array.isArray(pool[key]) ? pool[key] : [])].filter((v, i, a) => a.indexOf(v) === i).slice(0, SAMPLE_LIMIT);
+  await metaSet(env, SAMPLE_POOL_KEY, JSON.stringify(pool));
+  return { pool, count: Array.isArray(pool[key]) ? pool[key].length : 0 };
+}
+
+/**
+ * 人工指定的样本 id 一旦用于体检，就顺手落进池子（见上面 rawIds.length 分支）：
+ * 同一平台别的源下次体检不必再手工喂一次 —— no_sample 这个盲区是被"填平"的，不是一次性绕过的。
+ */
+
 function rowToSource(row) {
   const pub = publicSource(row);
   return {
@@ -47,19 +81,26 @@ function rowToSource(row) {
   };
 }
 
-async function checkHttpSource(env, source, keyword) {
+async function checkHttpSource(env, source, keyword, rawIds = []) {
   // **我们没测成 ≠ 这条源不行。** search() 里的 fetchText 会抛（9s 超时、连接被重置），
   // 以前这一抛就顺着 checkSource 的兜底 catch 变成 status:"error" → 立即停用 + 建议删除。
   // 现网 2026-10-14 真的这么杀掉了唯一还能用的 HTTP 搜索线路（七洁雅 Meting 慢了一拍）。
   // 所以这里把"我这边的观测失败"接住，按"搜索没结果"同样退回样本池继续验播放。
+  const labelOf = new Map();
+  let ids;
+  if (rawIds.length) {
+    // 后台人工喂的样本：跳过搜索直接验播放 —— 需要人工喂的场景恰恰是"搜索接口挂了但取流是好的"。
+    ids = rawIds;
+    await rememberSamples(env, source.platform, rawIds.map((id) => ({ rawID: id })));
+  } else {
   let s;
   try {
     s = await search(source, keyword);
   } catch (e) {
     s = { items: [], note: `搜索请求没测成：${String((e && e.message) || e).slice(0, 120)}` };
   }
-  const labelOf = new Map(s.items.map((i) => [i.rawID, `${i.title || ""}${i.artist ? ` / ${i.artist}` : ""}`]));
-  let ids = s.items.map((i) => i.rawID).filter(Boolean);
+  for (const i of s.items) if (i.rawID) labelOf.set(i.rawID, `${i.title || ""}${i.artist ? ` / ${i.artist}` : ""}`);
+  ids = s.items.map((i) => i.rawID).filter(Boolean);
   if (ids.length) {
     // 顺手喂样本池：洛雪音源不会搜索，靠这里攒的真实歌曲 id 才能被体检。
     await rememberSamples(env, source.platform, s.items);
@@ -71,8 +112,9 @@ async function checkHttpSource(env, source, keyword) {
     // 只有池子也空着才是真的无从判断 —— 那是我们的观测盲区，报 no_sample、绝不停用。
     ids = await ensureSamples(env, source.platform, keyword);
     if (!ids.length) {
-      return { status: "no_sample", detail: `搜索无结果（${s.note || "未返回条目"}），样本池里也没有 ${source.platform} 的可考 id，暂无法验证`, bytes: 0 };
+      return { status: "no_sample", detail: `搜索无结果（${s.note || "未返回条目"}），样本池里也没有 ${source.platform} 的可考 id，暂无法验证；可在后台「样本池」给 ${source.platform} 填一个真实歌曲 id 再复测`, bytes: 0 };
     }
+  }
   }
   const tried = [];
   for (const rawID of ids.slice(0, 3)) {
@@ -87,7 +129,7 @@ async function checkHttpSource(env, source, keyword) {
       return {
         status: "ok",
         // 用样本池 id 验出来时要说清楚，否则"这条源搜索接口挂了却显示 ok"看着像假阳性。
-        detail: `${label || rawID} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}${labelOf.size ? "" : "（搜索接口当前无结果，用样本池的歌曲 id 验的播放）"}`,
+        detail: `${label || rawID} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}${labelOf.size ? "" : rawIds.length ? "（用后台人工指定的歌曲 id 验的播放）" : "（搜索接口当前无结果，用样本池的歌曲 id 验的播放）"}`,
         bytes: a.bytes,
         host: a.finalHost,
       };
@@ -133,7 +175,7 @@ export async function ensureSamples(env, platform, keyword = "晴天") {
   return [];
 }
 
-async function checkLxSource(env, source, keyword) {
+async function checkLxSource(env, source, keyword, rawIds = []) {
   const rec = await loadScript(env, source.scriptHash);
   if (!rec) return { status: "script_missing", detail: "D1 里找不到该音源的脚本正文", bytes: 0 };
   let text;
@@ -143,11 +185,13 @@ async function checkLxSource(env, source, keyword) {
     return { status: "script_error", detail: `脚本解压缩失败：${String(e.message || e)}`, bytes: 0 };
   }
   const meta = lxMeta(text);
-  const ids = await ensureSamples(env, source.platform, keyword);
+  // 后台人工喂的 id 优先，并且会写回池子（同一平台的其它源下次不必再喂）。
+  const ids = rawIds.length ? rawIds : await ensureSamples(env, source.platform, keyword);
+  if (rawIds.length) await rememberSamples(env, source.platform, rawIds.map((id) => ({ rawID: id })));
   if (!ids.length) {
     // 样本池空着 ≠ 音源坏了（这条源和它的同伴都不会搜索，我们没有可考的歌曲 id）。
     // 这种情况绝不能停用、更不能建议删除——那是把服务端的观测盲区算到源头上。
-    return { status: "no_sample", detail: `${meta.name} · ${source.platform} 拿不到可考的歌曲 id（样本池空，且这条源的同伴里没有一个会搜索），暂无法验证`, bytes: 0 };
+    return { status: "no_sample", detail: `${meta.name} · ${source.platform} 拿不到可考的歌曲 id（样本池空，且这条源的同伴里没有一个会搜索），暂无法验证；可在后台「样本池」给 ${source.platform} 填一个真实歌曲 id 再复测`, bytes: 0 };
   }
   const tried = [];
   let runnerMissing = false;
@@ -174,7 +218,7 @@ async function checkLxSource(env, source, keyword) {
     // 上一次体检还是 ok，这一次就成了"建议删除"——那是我们够不到 m701 的那 15 秒，不是它的锅。
     const a = await probeAudio(r.url);
     if (a.playable) {
-      return { status: "ok", detail: `${meta.name} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}`, bytes: a.bytes, host: a.finalHost };
+      return { status: "ok", detail: `${meta.name} · ${a.status} ${a.contentType.split(";")[0]} · ${a.bytes}B · ${a.finalHost}${rawIds.length ? "（用后台人工指定的歌曲 id 验的播放）" : ""}`, bytes: a.bytes, host: a.finalHost };
     }
     tried.push(`${id}: 直链不可播 ${a.status} ${a.contentType} ${a.bytes}B`);
   }
@@ -194,17 +238,22 @@ async function checkLxSource(env, source, keyword) {
 
 /**
  * 体检单条线路。keyword 由调用方给（默认「晴天」），失败原因写回 D1 并决定是否停用。
+ * opts.rawId / opts.rawIds：后台人工指定的真实歌曲 id（可多个，取前 5 个）。
+ * 它存在的理由是现网那 3 条咪咕 lxjs 源 —— 样本池里没有 migu 的可考 id，而这批源和它们的同伴
+ * 没有一个会搜索，于是服务端只能报 no_sample。"没法判断"不该一直挂着，给人工喂 id 的口子，
+ * 结论就能从"未检出"变成真的能播 / 不能播。显式 id 优先级最高，并且会写回样本池。
  */
-export async function checkSource(env, row, keyword) {
+export async function checkSource(env, row, keyword, opts = {}) {
   const source = rowToSource(row);
+  const rawIds = parseRawIds(opts.rawId !== undefined ? opts.rawId : opts.rawIds);
   let result;
   try {
     if (source.protocol === "lxjs") {
-      result = await checkLxSource(env, source, keyword);
+      result = await checkLxSource(env, source, keyword, rawIds);
     } else if (source.protocol === "customJson") {
       result = { status: "unsupported", detail: "customJson 协议两端都不做搜索（Swift :183-184），无法验证", bytes: 0 };
     } else {
-      result = await checkHttpSource(env, source, keyword);
+      result = await checkHttpSource(env, source, keyword, rawIds);
     }
   } catch (e) {
     result = { status: "error", detail: String(e && e.message ? e.message : e).slice(0, 300), bytes: 0 };
