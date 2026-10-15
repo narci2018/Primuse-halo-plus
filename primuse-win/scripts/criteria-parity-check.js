@@ -940,6 +940,30 @@ record('判显隐只有一处：渲染侧只交数据（Windows 不许建窗口�
     && !/orderFront|orderOut/.test(macViewBlock)
     && macViewBlock.includes('onPush(') && WIN_APP.includes('api.taskbarLyric.push('), '');
 
+// 本机没有 Swift 工具链，名字拼错要等 CI 跑 15 分钟才红（v1.9.23 就这么死过一次：
+// `NSWindow.didCloseNotification` / `didOcclusionStateNotification` 都不存在）。
+// 白名单里每一项都是**这个仓库里已被 CI 编过**的名字，或由 AppKit 的 ObjC 常量
+// `NSWindowXxxNotification` 按同一套改名规则直接推得（didMiniaturize / willEnterFullScreen
+// 这些已在 `PrimuseTheme.swift:690-697` 里过了编译）—— 新名字先进白名单再进代码。
+const REAL_NS_WINDOW_NOTIFICATIONS = [
+  'didMiniaturizeNotification', 'didDeminiaturizeNotification', 'willCloseNotification',
+  'didChangeOcclusionStateNotification', 'didUpdateNotification', 'didBecomeKeyNotification',
+  'didResignKeyNotification', 'didBecomeMainNotification', 'didResignMainNotification',
+  'didResizeNotification', 'didMoveNotification', 'didChangeScreenNotification',
+  'didChangeBackingPropertiesNotification', 'didEndLiveResizeNotification',
+  'willEnterFullScreenNotification', 'didEnterFullScreenNotification',
+  'willExitFullScreenNotification', 'didExitFullScreenNotification'
+];
+const usedWindowNotifications = [...new Set(
+  Array.from(stripLineComments(SWIFT_MAC_LYRIC).matchAll(/NSWindow\.(\w+Notification)/g)).map((m) => m[1])
+)];
+record('事件来源用到的 NSWindow 通知名逐个得是真的（拼错 = 白花一次 15 分钟的 macOS 构建）',
+  usedWindowNotifications.length >= 3
+    && usedWindowNotifications.every((n) => REAL_NS_WINDOW_NOTIFICATIONS.includes(n))
+    && !stripLineComments(SWIFT_MAC_LYRIC).includes('didCloseNotification')
+    && !stripLineComments(SWIFT_MAC_LYRIC).includes('didOcclusionStateNotification'),
+  `用到=${usedWindowNotifications.join('/')}`);
+
 // —— 用户 2026-10-15 那两句投诉的看守：屏幕上的"0 个音乐源""搜不到"都是 Mac 独有的显示缺口。
 
 const macSourcesContent = braceBlock(SWIFT_MAC_SOURCES, SWIFT_MAC_SOURCES.indexOf('private var content: some View'));

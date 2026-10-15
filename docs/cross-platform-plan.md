@@ -2507,3 +2507,46 @@ Windows 那侧同理（不许建窗口、不许调 `shouldShow`），判显隐�
   iOS 那两处（只做了源码核对）。需要他回传三样截图：来源页（在线卡在不在最上面、页脚有没有报在线）、
   在线搜索失败那一次（红卡那句在不在）、app 最小化且正在播有词的歌（那条在不在、点 ✕ 之后还在不在）。
 
+### 31.9 实况回收：v1.9.23 的 macOS 构建红在两个通知名上，其余一次过编译
+
+上面那句"CI 才是编译器"当天就兑现了。tag `v1.9.23` 三条流水线里 Windows 绿（3 分 8 秒）、
+macOS **失败**，`--log-failed` 抓出来的 `error:` 只有两条，且都在同一处：
+
+```
+MacMiniaturizedLyrics.swift:233:22: error: type 'NSWindow' has no member 'didCloseNotification'
+MacMiniaturizedLyrics.swift:234:22: error: type 'NSWindow' has no member 'didOcclusionStateNotification'
+```
+
+这两条同时给出两个结论：
+
+1. **这一轮其余的 Swift 改动是干净的。** 整模块一次编译只报这两行，
+   说明 §31.2 的来源页重构、§31.3 的搜索页三处、`PrimuseApp.swift` 的接线、设置页那一行开关
+   全部过了类型检查 —— 不必再猜"是不是还有别的没编过"。
+2. **我猜错了两个 AppKit 通知名。** 真实名字是 `NSWindow.willCloseNotification`
+   （窗口关完就没了，AppKit 只发 will 不发 did）和 `NSWindow.didChangeOcclusionStateNotification`
+   （"可见性变了"那条），我写的 `didCloseNotification` / `didOcclusionStateNotification` 都不存在。
+   改名规则本身没被我写错，是被我用漏了前缀 —— 同一份代码里的 `didMiniaturizeNotification` /
+   `didDeminiaturizeNotification` 编译器没报错，正是 `NSWindowDidMiniaturizeNotification` 去掉类名前缀
+   再首字母小写的结果，仓库里 `PrimuseTheme.swift:690-697` 那批 `willEnterFullScreenNotification` 之类
+   也早就过过编译。
+
+修法之外补了一件**看守**，因为这类错误本来就不该花一次 15 分钟的远程构建才知道：
+第 17 组加一项「事件来源用到的 NSWindow 通知名逐个得是真的」，
+把可用名字收成一份白名单（每一项都取自我在本机能确认"已被 CI 编过"的用法），
+`NSWindow.\w+Notification` 抓出来的名字逐个比 —— 白名单外的一律红。
+两个变异各只打红这一条：换回 `didCloseNotification` → 123/1；换成一个假名 `didBecomingVisibleNotification` → 123/1。
+顺带又踩了一次已经记过的那条纪律：这一项是**否定式 + 正则抓取**，注释里那句"`didCloseNotification` 不存在"
+会把断言打红，所以两处都过 `stripLineComments()`（见 §31.6 末尾那条教训）。
+还有一个变异本身是无效的教训：假名不带 `Notification` 后缀就压根不被正则抓到，看守当然不会红 ——
+打红一个断言之前要先确认变异落在断言的射程里，否则会得到一个"假绿"。
+
+顺带修了一个这次才看清的时序问题：`willClose` 到的那一刻窗口还挂在 `NSApp.windows` 上、也还算 visible，
+当场判一次得到的是"还没看不见"。所以关掉那一路多挂一个延迟 150ms 的再判
+（`try? await Task.sleep(nanoseconds:)`，这个写法仓库里到处是），
+不用等下一条歌词推过来才补上。守卫 17 组现在 **124 项全绿**。
+
+版本号按 +1 走：失败的那次 `v1.9.23` 的 tag 与它那条 Release（只有两个 Windows exe）**原样留着不动**
+（published tag 不许移动是硬约束），修好的这一份发 `v1.9.24 / build 86`。
+要装 Mac 版的人请拿 1.9.24，1.9.23 那条 Release 上永远不会有 dmg。
+
+

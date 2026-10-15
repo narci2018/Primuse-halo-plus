@@ -227,11 +227,15 @@ final class MacMiniaturizedLyricsController {
     private func installObservers() {
         let center = NotificationCenter.default
         // 主窗口最小化 / 还原 / 关掉：Windows 那边是 minimize/restore/show/hide 四个事件都喊一声 sync。
+        // 通知名一律用 AppKit 真实存在的那几个（`willCloseNotification` 而非"didClose" —— 窗口关完就
+        // 没了，AppKit 只发 will；`didChangeOcclusionStateNotification` 是"可见性变了"那条）。
+        // v1.9.23 的 macOS 构建就是被一个不存在名字打红的，那一轮白花 15 分钟，所以
+        // `criteria-parity-check.js` 第 17 组现在有一项专门盯这几个名字的拼写。
         for name in [
             NSWindow.didMiniaturizeNotification,
             NSWindow.didDeminiaturizeNotification,
-            NSWindow.didCloseNotification,
-            NSWindow.didOcclusionStateNotification
+            NSWindow.willCloseNotification,
+            NSWindow.didChangeOcclusionStateNotification
         ] {
             observers.append(center.addObserver(
                 forName: name,
@@ -241,6 +245,19 @@ final class MacMiniaturizedLyricsController {
                 Task { @MainActor in self?.apply() }
             })
         }
+        // 关窗口这件事，`willClose` 到的那一刻窗口还挂在 NSApp.windows 上、也还算 visible，
+        // 所以当场判一次是"还没看不见"。延一小步再判：那会儿它已经不在名单里了，
+        // 第二条（主窗口真的看不见）才会真的成立 —— 不等下一条歌词推过来才补上。
+        observers.append(center.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                self?.apply()
+            }
+        })
         // 屏幕布局变了（换分辨率 / 插外接屏）：重新贴一次。
         observers.append(center.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
