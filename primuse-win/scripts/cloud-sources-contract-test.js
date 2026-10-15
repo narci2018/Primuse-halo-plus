@@ -405,7 +405,15 @@ const originOf = () => `http://127.0.0.1:${server.address().port}`;
   const listBefore = JSON.stringify(store.aggregated.list());
   const verdicts = [];
   const all = await cloudSources.checkAll(store.aggregated.list(), (v) => verdicts.push(v));
-  record('checkAll 只过已启用的线路（停用的不占流量）', all.length === store.aggregated.list().filter((s) => s.isEnabled).length && !all.some((v) => v.id === 'cloud-lx-off'), `${all.length} 条：${all.map((v) => `${v.id}=${v.status}`).join(', ')}`);
+  record('checkAll 只过服务端还开着的线路（那一条 cloud-lx-off 不占流量）', all.length === store.aggregated.list().length - 1 && !all.some((v) => v.id === 'cloud-lx-off'), `${all.length} 条：${all.map((v) => `${v.id}=${v.status}`).join(', ')}`);
+  record('体检闸门是 enabledOnServer，不是 isEnabled（本机没加载的恰恰要再验一次 —— 需求 2）',
+    typeof cloudSources.checkable === 'function'
+      && cloudSources.checkable({ id: 'x', cloud: true, enabledOnServer: true, isEnabled: false }) === true
+      && cloudSources.checkable({ id: 'x', cloud: true, enabledOnServer: false, isEnabled: false }) === false
+      && cloudSources.checkable({ id: 'x', isEnabled: true }) === true
+      && cloudSources.checkable({ id: 'x', isEnabled: false }) === false
+      && cloudSources.checkable(null) === false,
+    'isEnabled 现在的意思是"在不在播放路径里"，拿它当闸门等于"没测过的永远没机会被测"');
   record('每条出结论就回调（界面能看着进度走）', verdicts.length === all.length, `${verdicts.length}/${all.length}`);
   record('并发压在 4 以内（第三方站点都可能慢）', flags.maxInFlight > 0 && flags.maxInFlight <= 4, `同时在取字节的请求峰值 = ${flags.maxInFlight}`);
   record('App 侧只读：checkAll 不改任何 isEnabled（停用是 CF 后台的权力）', JSON.stringify(store.aggregated.list()) === listBefore, `前后 ${store.aggregated.list().length} 条，enabled 计数 ${store.aggregated.list().filter((s) => s.isEnabled).length}`);

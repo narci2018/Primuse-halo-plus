@@ -17,6 +17,7 @@ const { app, BrowserWindow, Menu, Tray, ipcMain, shell, nativeImage, globalShort
 
 const aggregated = require('./aggregated');
 const cloudSources = require('./cloud-sources');
+const taskbarLyric = require('./taskbar-lyric');
 const { DaoLiYuClient, originOf } = require('./daoliyu');
 const store = require('./store');
 const sync = require('./sync');
@@ -241,7 +242,14 @@ function registerIpc() {
   ipcMain.handle('queue:load', () => store.library.queue());
   ipcMain.handle('player:save', (_e, patch) => store.library.setPlayer(patch));
   ipcMain.handle('player:load', () => store.library.player());
-  ipcMain.handle('settings:save', (_e, patch) => store.library.setSettings(patch));
+  // 设置里那条"任务栏歌词"开关一落盘就立刻生效（关掉时那条浮窗得马上消失，别等下一次歌词变化）。
+  ipcMain.handle('settings:save', (_e, patch) => {
+    const next = store.library.setSettings(patch);
+    taskbarLyric.sync();
+    return next;
+  });
+  // 冒烟要看"这条到底在不在、为什么在"，光靠截图不够（它浮在主窗口之外，capturePage 拍不到）。
+  ipcMain.handle('taskbar-lyric:status', () => taskbarLyric.status());
   ipcMain.handle('settings:load', () => store.library.settings());
 
   // 歌单（含系统歌单「我喜欢」= primuse.system.liked）
@@ -371,6 +379,12 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { noCached: true });
+
+  // 任务栏歌词条（需求 8）：主窗口一隐藏/最小化就来一条判断。
+  // 'close' 不在名单里 —— 关到托盘时它后面必然跟一个 'hide'；真关出去则由 'closed' 收走歌词条，
+  // 免得主窗口都没了还留一条浮窗，把 App 吊在半空。
+  ['minimize', 'restore', 'show', 'hide'].forEach((event) => mainWindow.on(event, () => taskbarLyric.sync()));
+  mainWindow.on('closed', () => taskbarLyric.hide());
 
   mainWindow.on('close', (event) => {
     const settings = store.library.settings();
@@ -864,6 +878,23 @@ async function runSmoke() {
       JSON.stringify(pages)
     );
 
+    // 需求 8 的那一条开关：光看 DOM 里有它不算数 —— 这条浮窗归主进程管，
+    // 判据是"点下去之后主进程认不认、开关画的状态跟主进程的状态是不是一致、点回来设不设得回去"。
+    const tls = (pages.settings || {}).taskbarLyric || {};
+    step(
+      '设置·播放：任务栏歌词开关在屏上，点击真的改到主进程并复位',
+      Boolean(
+        tls.rowFound === true &&
+          tls.painted === true &&
+          tls.labelShown === true &&
+          tls.inPlaybackGroup === true &&
+          tls.togglesMainProcess === true &&
+          tls.switchMatchesMain === true &&
+          tls.restored === true
+      ),
+      JSON.stringify(tls)
+    );
+
     // 关于页此刻就在屏幕上（那个 phase 故意停在关于页收尾）：新加的品牌标识必须
     // 有"人眼看过"的证据，光有 naturalWidth 断言不算数。
     const aboutShot = path.join(OUT_DIR, 'smoke-ui-about.png');
@@ -907,6 +938,7 @@ async function runSmoke() {
     delete cs._text;
     const csPage = cs.page || {};
     const csVer = cs.verdicts || {};
+    const csLoad = cs.loadPolicy || {};
     const csHome = cs.homeHeader || {};
     const csOk = Boolean(
       csHome.painted &&
@@ -920,19 +952,29 @@ async function runSmoke() {
         csPage.hintMentionsCF === true &&
         csVer.rowCount === 3 &&
         csVer.iconsPainted === true &&
+        // 需求 4：音乐源的缩略图是那张写真的底，不再是灰块（三行 + 清单 URL 行都算）
+        csVer.photoCovers === true &&
+        csVer.photoCoverCount >= 4 &&
         JSON.stringify((csVer.ok || {}).capsules) === JSON.stringify(['可播']) &&
         (csVer.ok || {}).painted === true &&
-        JSON.stringify((csVer.blind || {}).capsules) === JSON.stringify(['未检出']) && // 盲区不许挂「建议删除」
+        // 需求 1/3：未检出与不可播的那两条挂「未加载」，可播的那条不挂
+        JSON.stringify((csVer.blind || {}).capsules) === JSON.stringify(['未加载', '未检出']) && // 盲区不许挂「建议删除」
         (csVer.blind || {}).painted === true &&
-        JSON.stringify((csVer.bad || {}).capsules) === JSON.stringify(['建议删除', '不可播']) &&
+        JSON.stringify((csVer.bad || {}).capsules) === JSON.stringify(['未加载', '建议删除', '不可播']) &&
         (csVer.bad || {}).painted === true &&
         csVer.ok.tone !== csVer.bad.tone &&
         csVer.blind.tone !== csVer.ok.tone &&
+        csLoad.groupPresent === true &&
+        csLoad.loadedValue === '1 条' &&
+        csLoad.skippedValue === '2 条' &&
+        csLoad.notLoadedCapsule.ok === false &&
+        csLoad.notLoadedCapsule.blind === true &&
+        csLoad.notLoadedCapsule.bad === true &&
         Array.isArray(cs.overlayLeaks) &&
         cs.overlayLeaks.length === 0
     );
     step(
-      '聚合音乐源屏渲染：清单 URL / 两个按钮 / 三种结论分组（App 侧只读）',
+      '聚合音乐源屏渲染：清单 URL / 两个按钮 / 三种结论分组 / 只加载可播的那条（App 侧只读）',
       csOk,
       JSON.stringify(cs)
     );
@@ -1000,6 +1042,8 @@ async function runSmoke() {
     // 而冒烟只断言了 vis('lyrics')，19 项全绿、屏幕上一坨糊。这一段量的是几何 + 实拍。
     send('smoke:run', { keyword: '', phase: 'lyrics-shot' });
     const lyr = (await waitUI(25000)) || { ok: false, note: '渲染层 25s 内未回报歌词几何' };
+    const lk = lyr.lyricLook || {};
+    const strip = lyr.taskbarStrip || {};
     const lyrOk = Boolean(
       lyr.lyricsVisible &&
         lyr.lyricLines === 16 &&
@@ -1010,14 +1054,71 @@ async function runSmoke() {
         lyr.lyricsStaysAboveTabbar &&
         lyr.playButtonClickable &&
         lyr.tabbarNotUnderLyrics &&
+        // 需求 5：当前行是金色（不是灰），字号按 20px 基准走用户的档位
+        lk.nowGold === true &&
+        lk.idleGold === true &&
+        lk.anyGray === false &&
+        Math.abs(lk.nowFontSize - Math.round(20 * (lk.scale || 1))) < 1 &&
+        // 需求 8：主窗口还看得见的时候，那条绝不允许浮出来（判据在主进程，这里验它的结论）
+        strip.visibleWhileMainWindowShown === false &&
+        strip.stripWindowExists === false &&
+        strip.pushedText === lyr.nowLine &&
         Array.isArray(lyr.overlayLeaks) &&
         lyr.overlayLeaks.length === 0
     );
-    step('歌词模式几何：歌词只占封面那一档，播放按钮点得到，tab bar 不参与绘制', lyrOk, JSON.stringify(lyr));
+    step(
+      '歌词模式几何 + 金色字号 + 任务栏条该藏时确实藏着（歌词只占封面那一档，播放按钮点得到）',
+      lyrOk,
+      JSON.stringify(lyr)
+    );
 
     const lyricsShot = path.join(OUT_DIR, 'smoke-ui-lyrics.png');
     require('fs').writeFileSync(lyricsShot, (await mainWindow.webContents.capturePage()).toPNG());
     step('歌词模式截图（封面让位、进度条与控制条在歌词下方）', true, lyricsShot);
+
+    // 需求 8 的出场测试：那条窗口只在"主窗口真的看不见"时才允许露脸，所以这里真把它最小化一次。
+    // 判据取自主进程自己的 status()（显示与否一律在那边判），图由那条窗口自己拍自己 ——
+    // 主窗口的 capturePage 拍不到它，它浮在主窗口之外。跑完务必 restore，最后还断言它收干净了。
+    send('smoke:run', { keyword: '', phase: 'taskbar-strip-push' });
+    const tbFeed = (await waitUI(10000)) || { note: '渲染层未推歌词' };
+    let tb = {};
+    let tbPng = null;
+    try {
+      mainWindow.minimize();
+      await new Promise((r) => setTimeout(r, 1000)); // 出场 + 透明窗合成一帧
+      tb = { ...taskbarLyric.status() };
+      tbPng = await taskbarLyric.capture();
+      tb.captured = Boolean(tbPng && tbPng.length > 500);
+      if (tbPng) require('fs').writeFileSync(path.join(OUT_DIR, 'smoke-ui-taskbar.png'), tbPng);
+    } finally {
+      mainWindow.restore();
+      await new Promise((r) => setTimeout(r, 500));
+      taskbarLyric.sync();
+    }
+    const wa = require('electron').screen.getPrimaryDisplay().workArea;
+    const bounds = tb.bounds || {};
+    const afterRestore = taskbarLyric.status();
+    const tbOk = Boolean(
+      tbFeed.received === true &&
+        tb.enabled === true &&
+        tb.hidden === true &&
+        tb.visible === true &&
+        tb.dismissed === false &&
+        tb.captured === true &&
+        (tb.payload || {}).text === '第 7 行冒烟歌词' &&
+        bounds.width >= 200 &&
+        bounds.height >= 30 &&
+        bounds.y >= wa.y - 1 &&
+        bounds.y + bounds.height <= wa.y + wa.height + 1 && // 贴工作区下沿，绝不压住任务栏
+        bounds.x >= wa.x - 1 &&
+        bounds.x + bounds.width <= wa.x + wa.width + 1 &&
+        afterRestore.visible === false
+    );
+    step(
+      '最小化后任务栏上方真长出单行歌词（贴工作区下沿、恢复主窗口即收走）',
+      tbOk,
+      `推送 ${JSON.stringify(tbFeed)} · 最小化时 ${JSON.stringify({ ...tb, bounds })} · 恢复后仍在屏上 ${afterRestore.visible}`
+    );
 
     send('smoke:run', { keyword: '', phase: 'playlist-cleanup' });
     const cleaned = (await waitUI(10000)) || { removed: false, note: '渲染层未回报' };
@@ -1067,6 +1168,19 @@ if (!gotLock && !SMOKE) {
     store.load();
     registerIpc();
 
+    // 任务栏歌词条（需求 8）。三个钩子把这条浮窗的"该不该露脸"交回给主窗口的状态与设置：
+    // 开关在设置里、隐藏与否看主窗口、点一下还原 —— 判断全在主进程，渲染层只推歌词。
+    taskbarLyric.init({
+      isEnabled: () => store.library.settings().taskbarLyric !== false,
+      mainWindowHidden: () => !mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized() || !mainWindow.isVisible(),
+      onRestore: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      },
+    });
+
     proxy = await startProxy({
       resolveAggregated: async (platform, rawID, force) => {
         if (force) aggregated.streamCache.delete(`${platform}:${rawID}`);
@@ -1105,6 +1219,8 @@ if (!gotLock && !SMOKE) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    // 歌词条是独立窗口：不先收掉它，主窗口关了它还会把 App 吊在半空。
+    taskbarLyric.dispose();
     store.save(true);
     try {
       globalShortcut.unregisterAll();

@@ -16,6 +16,13 @@
  *     （对不上 = Swift 解出来整份是 nil，界面上"线路凭空没了"）；
  *   - 观测盲区名单：`未检出` 不停用这条规则，服务端 / Windows 渲染层 / Swift 三份必须同源。
  *
+ * 2026-10-15 起还钉这四件（都是"两端各写一遍、写歪了没人报错"的那类）：
+ *   11. 加载闸门：只有服务端确认可播的源进播放路径 —— Windows 与 Swift 必须是同一口径，
+ *       且收口只有一处（Windows 是 aggregated.enabledSources()，渲染层只读 loaded 不再自己判）；
+ *   12. 封面占位色：色相表 + FNV-1a 常数 + UTF-16 迭代口径两端一致，音乐源那一档的写真底图文件在位；
+ *   13. 歌词：当前行金色（两套主题都有 token）、基准 20px；
+ *   14. 任务栏歌词条：出场条件五项、换歌自动解除 ✕、通道名两侧都在、不抢焦点不进任务栏。
+ *
  * 用法：node scripts/criteria-parity-check.js
  */
 
@@ -35,6 +42,14 @@ const SWIFT_SNIFF = read('primuse/Primuse/Services/AggregatedMusic/AudioSniff.sw
 const SWIFT_MODELS = read('primuse/Primuse/Services/AggregatedMusic/AggregatedMusicModels.swift');
 const SWIFT_CLOUD = read('primuse/Primuse/Services/AggregatedMusic/CloudMusicSources.swift');
 const SWIFT_STORE = read('primuse/Primuse/Services/AggregatedMusic/AggregatedSourceStore.swift');
+const SWIFT_ART = read('primuse/Primuse/Views/Components/CachedArtworkView.swift');
+const WIN_STYLES = read('primuse-win/src/renderer/styles.css');
+const WIN_AGG = read('primuse-win/src/main/aggregated.js');
+const WIN_STORE = read('primuse-win/src/main/store.js');
+const WIN_PRELOAD = read('primuse-win/src/preload.js');
+const WIN_STRIP_PRELOAD = read('primuse-win/src/preload-lyric.js');
+const WIN_STRIP = read('primuse-win/src/main/taskbar-lyric.js');
+const WIN_MAIN = read('primuse-win/src/main/main.js');
 
 // MARK: - 断言器（与 cloud-sources-contract-test.js 同一形状）
 
@@ -180,13 +195,18 @@ const CF_CHECK_KEYS = topLevelKeys(braceBlock(CF_STORE, CF_STORE.indexOf('check:
 const SWIFT_CHECK_PROPS = swiftProps(SWIFT_CLOUD, 'CloudSourceCheckDTO');
 record(`check 对象的 ${CF_CHECK_KEYS.length} 个字段 Swift 全认得`,
   CF_CHECK_KEYS.every((k) => SWIFT_CHECK_PROPS.includes(k)), `${CF_CHECK_KEYS.join(', ')} vs ${SWIFT_CHECK_PROPS.join(', ')}`);
-const MANIFEST_BLOCK = braceBlock(CF_MANIFEST, CF_MANIFEST.indexOf('return ok('));
+// 清单正文那个 `return ok(...)` 不是文件里第一个 —— 后台面板的 `?devices=1` 也回一句 ok()。
+// 认正文的办法是说得出话的那一条：块里带 `contract:`。
+const MANIFEST_BLOCK =
+  Array.from(CF_MANIFEST.matchAll(/return ok\(/g))
+    .map((m) => braceBlock(CF_MANIFEST, m.index))
+    .find((block) => block.includes('contract:')) || '';
 const MANIFEST_KEYS = topLevelKeys(MANIFEST_BLOCK);
 const SWIFT_MANIFEST_PROPS = swiftProps(SWIFT_CLOUD, 'CloudManifestDTO');
 const MANIFEST_MISSING = MANIFEST_KEYS.filter((k) => !SWIFT_MANIFEST_PROPS.includes(k));
 record(`清单正文顶层 ${MANIFEST_KEYS.length} 个字段 Swift 全认得`,
-  MANIFEST_KEYS.includes('contract') && MANIFEST_KEYS.includes('sources') && MANIFEST_MISSING.length === 0,
-  `缺：${MANIFEST_MISSING.join(', ') || '无'}`);
+  MANIFEST_KEYS.length >= 8 && MANIFEST_KEYS.includes('contract') && MANIFEST_KEYS.includes('sources') && MANIFEST_MISSING.length === 0,
+  `顶层：${MANIFEST_KEYS.join(', ')}｜缺：${MANIFEST_MISSING.join(', ') || '无'}`);
 record('settings.homeTitle / homeTitleFrom / deviceId 三个都在 DTO 里',
   ['homeTitle', 'homeTitleFrom', 'deviceId'].every((k) => swiftProps(SWIFT_CLOUD, 'CloudDeviceSettingsDTO').includes(k)), '');
 record('gateway.base / actions / note 三个都在 DTO 里',
@@ -243,6 +263,109 @@ record('Swift 把 default 当"没设置"，回落到本地 home_title',
   '现网没人设置过时照样回 {homeTitle:"首页",homeTitleFrom:"default"}，照单全收会把 de/es/fr/hi/ar 的本地化压成中文');
 record('Swift 回落的是本地化键而不是硬编码"首页"',
   /String\(localized: "home_title"\)/.test(SWIFT_CLOUD), '');
+
+// MARK: - 4. 加载闸门（需求 1 + 3）
+
+group('11. 加载闸门：只有"服务端确认可播"的源进播放路径，两处客户端同一口径');
+record('Windows 的"可播"就是 check.status === "ok"（不看 HTTP 码、不看延迟）',
+  /function isPlayable\(s\) \{\s*return Boolean\(s && s\.check && s\.check\.status === 'ok'\)/.test(WIN_CLOUD), '');
+record('Windows 的加载条件 = enabled && !suggestDelete && 可播',
+  /function isLoadable\(s\) \{\s*return Boolean\(s && s\.enabled\) && !s\.suggestDelete && isPlayable\(s\)/.test(WIN_CLOUD), '');
+record('Windows 落进线路表时 isEnabled 就是"在不在播放路径"，且把 loaded 一起带下去',
+  /isEnabled: loaded,/.test(WIN_CLOUD) && /enabledOnServer: Boolean\(s\.enabled\)/.test(WIN_CLOUD), '');
+record('Swift 同一口径（enabled && !suggestDelete && check?.status == "ok"）',
+  /dto\.enabled && !\(dto\.suggestDelete \?\? false\) && check\?\.status == "ok"/.test(SWIFT_CLOUD), '');
+record('Swift 也把它写进 isEnabled，并单独留一个 loaded 给界面说话',
+  /isEnabled: loaded/.test(SWIFT_CLOUD) && /loaded: loaded/.test(SWIFT_CLOUD) && /public var loaded: Bool\?/.test(SWIFT_MODELS), '');
+record('服务端下发的 usable 数组是同一口径（派生物，不是第二份真相）',
+  /usable: pub\.filter\(\(s\) => s\.enabled && s\.check\.status === "ok"\)/.test(CF_MANIFEST), '');
+record('播放路径的唯一收口是 aggregated.enabledSources()（它只认 isEnabled，而 isEnabled 就是 loaded）',
+  /function enabledSources\(sources, platform = null\) \{\s*return sources\s*\.filter\(\(s\) => s\.isEnabled\)/.test(WIN_AGG)
+    && (WIN_AGG.match(/enabledSources\(sources/g) || []).length >= 3,
+  '搜索 / 解析直链 / 取歌词三条线都从这里出发，闸门只此一处');
+record('渲染层不再自己算一遍闸门（真相只有一份，界面只读 loaded）',
+  /function isLoaded\(s\) \{\s*return s && s\.loaded !== false;\s*\}/.test(WIN_APP), '渲染层自己判 status 就会和服务端结论打架');
+record('界面上"未加载"这一档真的挂在行上，且和「本机加载」那一组一起渲染',
+  /未加载/.test(WIN_APP) && /本机加载/.test(WIN_APP) && /云端有 · 本机不加载/.test(WIN_APP), '');
+record('本机体检的闸门是"服务端还开着"，不是"本机已加载"（两处同一口径，否则没测过的永远没机会被测）',
+  /function checkable\(s\) \{\s*if \(!s \|\| !s\.id\) return false;\s*return s\.cloud \? s\.enabledOnServer !== false : s\.isEnabled !== false;\s*\}/.test(WIN_CLOUD)
+    && /store\.sources\.filter \{ !\$0\.id\.isEmpty && \$0\.isCheckable \}/.test(SWIFT_CLOUD)
+    && /public var isCheckable: Bool \{ isCloudManaged \? enabledOnServer != false : isEnabled \}/.test(SWIFT_MODELS)
+    && /enabledOnServer: dto\.enabled/.test(SWIFT_CLOUD), '');
+
+// MARK: - 5. 缩略图不再灰（需求 4）
+
+group('12. 封面占位色：两端同一张色相表、同一个哈希口径');
+const HUES_WIN = (WIN_APP.match(/COVER_HUES = \[([\d,\s]+)\]/) || [])[1];
+const HUES_SWIFT = (SWIFT_ART.match(/placeholderHueDegrees: \[Double\] = \[([\d,\s.]+)\]/) || [])[1];
+const hueList = (s) => (s || '').split(',').map((x) => Number(x.trim())).filter((x) => !Number.isNaN(x));
+record('Windows 与 Swift 的色相表逐项相同（8 档）',
+  hueList(HUES_WIN).length === 8 && JSON.stringify(hueList(HUES_WIN)) === JSON.stringify(hueList(HUES_SWIFT)),
+  `${HUES_WIN} vs ${HUES_SWIFT}`);
+record('FNV-1a 的两个常数两端一致（种子 0x811c9dc5 / 素数 16777619，都是 32 位那一对）',
+  /0x811c9dc5/.test(WIN_APP) && /Math\.imul\(hash, 0x01000193\) >>> 0/.test(WIN_APP)
+    && /0x811c_9dc5/.test(SWIFT_ART) && /&\* 0x0100_0193/.test(SWIFT_ART) && /var hash: UInt32/.test(SWIFT_ART),
+  'Swift 若用 UInt64 的 64 位 FNV，取模结果与 JS 完全不同 —— 两端同专辑不同色，没人会报这个 bug');
+record('哈希走的是 UTF-16 码元（JS 的 charCodeAt 与 Swift 的 .utf16 同宽，否则中文名两端不同色）',
+  /basis\.charCodeAt\(i\)/.test(WIN_APP) && /for unit in identity\.utf16/.test(SWIFT_ART), '');
+record('占位渐变走 --cover-placeholder，且 CSS 里至少 8 处封面用它兜底（不是灰块）',
+  /--cover-placeholder: linear-gradient\(/.test(WIN_STYLES) && (WIN_STYLES.match(/background: var\(--cover-placeholder\)/g) || []).length >= 8,
+  `命中 ${(WIN_STYLES.match(/background: var\(--cover-placeholder\)/g) || []).length} 处`);
+record('音乐源那一档用的是写真封面底图，且文件真的在渲染目录里（打包要能带上）',
+  /\.sico\.photo \{[\s\S]{0,200}source-cover\.png/.test(WIN_STYLES)
+    && fs.existsSync(path.join(ROOT, 'primuse-win/src/renderer/source-cover.png')), '');
+record('结论色走那一圈内描（照片底上底色分不出三档）',
+  /\.sico\.photo \{[\s\S]{0,300}box-shadow: inset 0 0 0 1\.5px var\(--ring/.test(WIN_STYLES), '');
+
+// MARK: - 6. 歌词颜色与字号（需求 5）
+
+group('13. 歌词：当前行金色、基准 20px，两套主题都有值');
+const GOLD = {
+  light: (WIN_STYLES.match(/:root[\s\S]{0,2000}?--gold: (#[0-9a-f]{6});/) || [])[1],
+  lightNow: (WIN_STYLES.match(/:root[\s\S]{0,2000}?--gold-now: (#[0-9a-f]{6});/) || [])[1],
+};
+record('浅色两套金色 token 都在（深色块里另有一套，两处都命中）',
+  Boolean(GOLD.light) && Boolean(GOLD.lightNow) && (WIN_STYLES.match(/--gold: #/g) || []).length >= 2 && (WIN_STYLES.match(/--gold-now: #/g) || []).length >= 2,
+  JSON.stringify(GOLD));
+record('.lyric-line 用 var(--gold)、当前行用 var(--gold-now)，都不再是灰色/primary',
+  /\.lyric-line \{[\s\S]{0,400}color: var\(--gold\)/.test(WIN_STYLES) && /\.lyric-line\.now \{[\s\S]{0,200}color: var\(--gold-now\)/.test(WIN_STYLES), '');
+record('基准字号收到 20px（原来抄 iPhone 的 26px），档位仍乘这个基准',
+  /\.lyric-line \{[\s\S]{0,200}font-size: 20px/.test(WIN_STYLES) && /Math\.round\(20 \* scale\)/.test(WIN_APP), '');
+
+// MARK: - 7. 任务栏歌词条（需求 8）
+
+group('14. 任务栏歌词条：显示与否只由主进程判一处，渲染层只喂数据');
+record('出场条件五项齐全（开关 + 主窗口看不见 + 没被 ✕ 掉 + 在播 + 这句有字）',
+  /deps\.isEnabled\(\) &&\s*deps\.mainWindowHidden\(\) &&\s*!dismissed &&\s*lastPayload &&\s*lastPayload\.playing &&\s*String\(lastPayload\.text \|\| ''\)\.trim\(\)/.test(WIN_STRIP), '');
+record('换歌自动解除"这一首别露脸"（歌曲身份在主进程就地算，不靠渲染层多传字段）',
+  /const key = `\$\{next\.title\}\|\$\{next\.artist\}`;[\s\S]{0,160}dismissed = false/.test(WIN_STRIP), '');
+record('渲染层只 push，不自己开窗口（app.js 里不许出现那条窗口的创建/显隐）',
+  /api\.taskbarLyric\.push\(/.test(WIN_APP) && !/new BrowserWindow/.test(WIN_APP), '');
+record('开关默认开，且设置项在「播放」组里（关掉时主进程 sync 一次立刻收走）',
+  /taskbarLyric: true/.test(WIN_STORE) && /data-switch-taskbar-lyric/.test(WIN_APP) && /taskbarLyric\.sync\(\)/.test(WIN_MAIN), '');
+record('那条窗口自己的桥只有三件事（收词 / 唤回 / ✕），主窗口的整套能力一律不给',
+  /exposeInMainWorld\('lyricStrip'/.test(WIN_STRIP_PRELOAD)
+    && (WIN_STRIP_PRELOAD.match(/ipcRenderer\.(send|on)\(/g) || []).length === 3, '浮在别人桌面上的窗口，能力越少越好');
+// 主窗口那侧走 set/reset/status，那条窗口自己那侧走 restore/dismiss（两个 preload，能力各给一半）。
+// status 的 handle 在 main.js，其余三个 on 在 taskbar-lyric.js —— 两侧各查两个文件。
+const CHANNELS = {
+  'taskbar-lyric:set': [WIN_PRELOAD],
+  'taskbar-lyric:reset': [WIN_PRELOAD],
+  'taskbar-lyric:status': [WIN_PRELOAD],
+  'taskbar-lyric:restore': [WIN_STRIP_PRELOAD],
+  'taskbar-lyric:dismiss': [WIN_STRIP_PRELOAD],
+};
+const badChannels = Object.keys(CHANNELS).filter(
+  (c) =>
+    !(WIN_STRIP.includes(`'${c}'`) || WIN_MAIN.includes(`'${c}'`)) ||
+    !CHANNELS[c].some((side) => side.includes(`'${c}'`))
+);
+record('五个通道名两侧都在（主进程 ↔ 两个 preload，对不上就是静默失灵）',
+  badChannels.length === 0, badChannels.join(', ') || Object.keys(CHANNELS).join(' / '));
+record('不抢焦点、不进任务栏、不跟随主窗口节流（否则最小化后它就哑了）',
+  /focusable: false/.test(WIN_STRIP) && /skipTaskbar: true/.test(WIN_STRIP) && /backgroundThrottling: false/.test(WIN_STRIP), '');
+record('只贴工作区下沿，不盖任务栏',
+  /workArea/.test(WIN_STRIP) && /STRIP_HEIGHT - BOTTOM_GAP/.test(WIN_STRIP), '');
 
 // MARK: - 汇总
 
