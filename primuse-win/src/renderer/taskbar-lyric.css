@@ -1,0 +1,83 @@
+/* 任务栏歌词条（需求 8）。
+   配色跟着 App 的深色档：半透明墨底 + 金色歌词，和播放页的歌词是同一套语言。
+   这条窗口是 transparent + frameless，所以 html/body 必须真的透明，圆角才画得出来。 */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  font-family: 'Segoe UI Variable Display', 'Segoe UI', -apple-system, 'Microsoft YaHei', sans-serif;
+}
+
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 10px 0 14px;
+  border-radius: 22px;
+  background: rgba(18, 19, 23, 0.86);
+  border: 1px solid rgba(235, 235, 245, 0.14);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(18px) saturate(1.5);
+}
+
+.strip:hover {
+  background: rgba(24, 25, 30, 0.94);
+}
+
+/* 整条都可点（点了唤回主窗口），所以这里刻意**不做** -webkit-app-region: drag：
+   窗口本身 movable:false，拖不动还吞掉 click，两头不讨好。 */
+
+.meta {
+  flex: none;
+  max-width: 40%;
+  font-size: 11px;
+  color: rgba(235, 235, 245, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.line {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: #e6c068; /* 与 App 里歌词当前行的 --gold-now 同一支金 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+
+/* 空歌词（纯音乐 / 这一句还没词）时不摆一个孤零零的空条 */
+.line.empty {
+  color: rgba(235, 235, 245, 0.42);
+  font-weight: 400;
+}
+
+.close {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(235, 235, 245, 0.1);
+  color: rgba(235, 235, 245, 0.62);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: rgba(235, 235, 245, 0.2);
+  color: #fff;
+}

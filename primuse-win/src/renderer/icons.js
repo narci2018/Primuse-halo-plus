@@ -131,6 +131,10 @@ const ICONS = {
     '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8.4"/><path d="M9.9 9.6a2.2 2.2 0 1 1 3.5 1.9c-.9.7-1.4 1.2-1.4 2.3"/><path d="M12 16.6h.02"/></g>',
   textformat:
     '<g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4.6 6.4h10.2M9.7 6.4v11.2"/><path d="M17.4 11.2h4.2M19.5 11.2v6.4"/></g>',
+  // 需求 8「任务栏歌词」设置项：一条横胶囊里放一行字，故意做成"扁条"而不是气泡
+  //（气泡已经被 quote.bubble 占了，两个开关挨在一起时必须一眼分得出谁是谁）。
+  'captions.bubble':
+    '<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="2.6" y="8.6" width="18.8" height="6.8" rx="3.4"/><path d="M6.4 12h6.6" stroke-linecap="round" stroke-width="2"/><path d="M16.8 12h.02" stroke-linecap="round" stroke-width="2.6"/></g>',
 };
 
 function icon(name, cls) {

@@ -54,6 +54,14 @@
   --warn: #ff9500;
   --shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
 
+  /* 用户 2026-10-15 点名的两件事：歌词那一片不要灰、所有缩略图不要灰。
+     --ph-hue 由 bgStyle() 按"这条叫什么名字"哈希出来，同名恒定同色、不同名岔开色相，
+     所以刷新不会跳色、两台机器上同一个歌单也是同一个颜色；渐变本身走 --cover-placeholder。 */
+  --gold: #d99a2b; /* 歌词非当前行：暖金压一档，浅色底下不刺眼 */
+  --gold-now: #b8860b; /* 歌词当前行：深色一档才压得住白底 */
+  --ph-hue: 268;
+  --cover-placeholder: linear-gradient(140deg, hsl(var(--ph-hue) 82% 58%) 0%, hsl(calc(var(--ph-hue) + 46) 78% 41%) 100%);
+
   --tab-h: 56px;
   --mini-h: 44px;
   --col: 620px; /* ContentView.swift:2036-2053 迷你条 maxWidth 620，整列照这个上限 */
@@ -77,6 +85,8 @@
     --material: rgba(24, 25, 29, 0.72);
     --material-2: rgba(24, 25, 29, 0.88);
     --shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
+    --gold: #e6c068;
+    --gold-now: #ffd75e;
   }
 }
 
@@ -97,6 +107,8 @@ html[data-appearance='dark'] {
   --material: rgba(24, 25, 29, 0.72);
   --material-2: rgba(24, 25, 29, 0.88);
   --shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
+  --gold: #e6c068;
+  --gold-now: #ffd75e;
 }
 
 * {
@@ -354,7 +366,7 @@ button {
   width: 30px;
   height: 30px;
   border-radius: 6px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
   flex: none;
   position: relative;
   overflow: hidden;
@@ -466,7 +478,7 @@ button {
   width: 44px;
   height: 44px;
   border-radius: 6px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
   flex: none;
   position: relative;
   overflow: hidden;
@@ -729,7 +741,7 @@ button {
   width: 50px;
   height: 50px;
   border-radius: 8px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2);
 }
 
@@ -798,7 +810,7 @@ button {
   width: 52px;
   height: 52px;
   border-radius: 9px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
 }
 
 .qa-item .nm {
@@ -888,7 +900,7 @@ button {
   width: 36px;
   height: 36px;
   border-radius: 7px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
   border: 1px solid var(--line-soft);
 }
 
@@ -916,7 +928,7 @@ button {
   width: 54px;
   height: 54px;
   border-radius: 9px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
   flex: none;
   display: flex;
   align-items: center;
@@ -956,7 +968,7 @@ button {
   width: 180px;
   height: 180px;
   border-radius: 14px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
   box-shadow: var(--shadow);
   display: flex;
   align-items: center;
@@ -1166,6 +1178,18 @@ button {
 .sico .ico-svg {
   width: 16px;
   height: 16px;
+}
+
+/* 音乐源没有图片时用的"写真封面"（需求 4：别再拿灰色块当封面）。
+   一层薄暗纱 + 白色图标才压得住照片；--ring 把体检结论的颜色留在边框上，
+   所以换了封面也不会丢掉"可播 / 未检出 / 不可播"这一层信息。 */
+.sico.photo {
+  background: linear-gradient(rgba(8, 10, 14, 0.2), rgba(8, 10, 14, 0.2)), url('./source-cover.png') center/cover no-repeat;
+  box-shadow: inset 0 0 0 1.5px var(--ring, transparent);
+}
+
+.sico.photo .ico-svg {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
 }
 
 .slabel {
@@ -1679,7 +1703,7 @@ body.player-open > #app {
   aspect-ratio: 1;
   max-height: 46vh;
   border-radius: 12px;
-  background: var(--bg-3) center/cover no-repeat;
+  background: var(--cover-placeholder) center/cover no-repeat;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
   display: flex;
   align-items: center;
@@ -1934,24 +1958,26 @@ body.player-open > #app {
 }
 
 .lyric-line {
-  font-size: 26px;
+  /* 26px 是原来 iPhone 播放页的字号抄本；用户 2026-10-15 要求"稍微缩小点"，收到 20px（--fs-title3 那一档）。
+     颜色不再用 var(--text)+opacity —— 那在深浅两套主题下都是一片灰，正是他指的"歌词是灰色的"。 */
+  font-size: 20px;
   font-weight: 600;
-  line-height: 1.35;
-  padding: 7px 0;
-  color: var(--text);
-  opacity: 0.46;
+  line-height: 1.3;
+  padding: 6px 0;
+  color: var(--gold);
+  opacity: 0.7;
   cursor: pointer;
   transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
 .lyric-line.past {
-  opacity: 0.32;
+  opacity: 0.4;
 }
 
 .lyric-line.now {
   opacity: 1;
   font-weight: 800;
-  color: var(--accent);
+  color: var(--gold-now);
 }
 
 .queue-sheet {

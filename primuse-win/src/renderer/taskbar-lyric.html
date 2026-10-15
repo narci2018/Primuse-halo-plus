@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:;"
+    />
+    <title>Primuse 歌词</title>
+    <link rel="stylesheet" href="taskbar-lyric.css" />
+  </head>
+  <body>
+    <!--
+      任务栏上方那一条（需求 8）。整条就是一个可点的胶囊：
+        左边 歌名 · 歌手（次要，窄屏先挤掉它）
+        中间 当前这一句歌词（主角，金色，单行省略号）
+        右边 ✕（这一首之内不再露出）
+      文字全部由主进程推来（src/main/taskbar-lyric.js），这里一个字都不自己判断 ——
+      "该不该显示"是主进程的事，这里只负责"显示成什么样"。
+    -->
+    <div class="strip" id="strip" title="点击回到 Primuse">
+      <span class="meta" id="meta"></span>
+      <span class="line" id="line">…</span>
+      <button class="close" id="close" title="这一首不再显示歌词">✕</button>
+    </div>
+    <script src="taskbar-lyric-view.js"></script>
+  </body>
+</html>

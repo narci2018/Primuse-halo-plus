@@ -557,8 +557,27 @@ function switchTab(tab) {
 
 const num = (n) => Number(n || 0).toLocaleString('zh-Hans-CN');
 
-function bgStyle(url) {
-  return url ? ` style="background-image:url('${esc(url)}')"` : '';
+/**
+ * 无封面时的占位色相。用户 2026-10-15 的原话："全部缩略图不要用灰色的"。
+ *
+ * 刻意不做成"随机"：FNV-1a 哈希 + 一张固定色相表，同名恒定同色（刷新不跳、
+ * 两台机器上同一个歌单也是同一个颜色），不同名字岔开。色相表是手挑的 8 档鲜艳色，
+ * 排掉了 200–260 那一段纯蓝紫（在深色底下发灰、看着还是像占位块）。
+ */
+const COVER_HUES = [348, 22, 45, 96, 158, 300, 330, 68];
+function hueOf(seed) {
+  const basis = String(seed == null ? '' : seed);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < basis.length; i += 1) {
+    hash ^= basis.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return COVER_HUES[hash % COVER_HUES.length];
+}
+
+function bgStyle(url, seed) {
+  if (url) return ` style="background-image:url('${esc(url)}')"`;
+  return ` style="--ph-hue:${hueOf(seed !== undefined && seed !== null && seed !== '' ? seed : 'primuse')}"`;
 }
 
 function badgeOf(track) {
@@ -601,7 +620,7 @@ function songRow(track, listRef, idx) {
     ? `<span class="row-check">${icon(selected ? 'checkmark.circle.fill' : 'checkmark.circle')}</span>`
     : '';
   return `<div class="song-row${playing ? ' playing' : ''}${selected ? ' selected' : ''}" data-play="${ref}">
-    <div class="song-cover${playing ? ' is-playing' : ''}"${bgStyle(cover)}>${
+    <div class="song-cover${playing ? ' is-playing' : ''}"${bgStyle(cover, `${track.title}|${track.artist}`)}>${
       playing && state.playing ? '<span class="wave"><i></i><i></i><i></i></span>' : ''
     }</div>
     ${check}
@@ -635,7 +654,7 @@ function playlistCoverURL(p) {
 
 function coverSpan(p, cls) {
   const url = p.id === LIKED_PLAYLIST_ID ? (state.favorites.map(coverOf).find(Boolean) || null) : playlistCoverURL(p);
-  return `<div class="${cls}"${bgStyle(url)}>${url ? '' : '♪'}</div>`;
+  return `<div class="${cls}"${bgStyle(url, p && p.name)}>${url ? '' : '♪'}</div>`;
 }
 
 function playlistRow(p) {
@@ -707,7 +726,7 @@ function pageHome() {
         <div class="hscroll">${recent
           .map(
             (t, i) => `<div class="hcard" data-play="history:${i}">
-              <div class="song-cover"${bgStyle(coverOf(t))}></div>
+              <div class="song-cover"${bgStyle(coverOf(t), `history:${t.title}|${t.artist}`)}></div>
               <div class="cols"><div class="song-title">${esc(t.title)}</div><div class="song-sub">${esc(t.artist || '')}</div></div>
             </div>`
           )
@@ -718,14 +737,14 @@ function pageHome() {
   const quick = `<div class="section">
       <div class="section-head"><h3>快捷收藏</h3></div>
       <div class="qa-grid">
-        <div class="qa-item" data-page="liked"><div class="art"${bgStyle(state.favorites.map(coverOf).find(Boolean))}>${
+        <div class="qa-item" data-page="liked"><div class="art"${bgStyle(state.favorites.map(coverOf).find(Boolean), '我喜欢')}>${
           state.favorites.map(coverOf).find(Boolean) ? '' : icon('heart.fill')
         }</div><div class="nm">我喜欢</div></div>
         <div class="qa-item" data-page="playlists"><div class="art">${icon('music.note.list')}</div><div class="nm">歌单</div></div>
-        <div class="qa-item" data-page="albums"><div class="art"${bgStyle(albums[0] ? albums[0].cover : '')}>${
+        <div class="qa-item" data-page="albums"><div class="art"${bgStyle(albums[0] ? albums[0].cover : '', '专辑')}>${
           albums[0] && albums[0].cover ? '' : icon('square.stack')
         }</div><div class="nm">专辑</div></div>
-        <div class="qa-item" data-page="artists"><div class="art"${bgStyle(artists[0] ? artists[0].cover : '')}>${
+        <div class="qa-item" data-page="artists"><div class="art"${bgStyle(artists[0] ? artists[0].cover : '', '艺术家')}>${
           artists[0] && artists[0].cover ? '' : icon('person.2')
         }</div><div class="nm">艺术家</div></div>
         <div class="qa-item" data-page="history"><div class="art">${icon('clock')}</div><div class="nm">最近播放</div></div>
@@ -748,7 +767,7 @@ function pageHome() {
         <div class="hscroll">${artists
           .map(
             (a) => `<div class="qa-item" data-page="artist:${esc(a.name)}" style="width:76px">
-              <div class="art" style="width:64px;height:64px;border-radius:50%;${a.cover ? `background-image:url('${esc(a.cover)}')` : ''}">${
+              <div class="art" style="width:64px;height:64px;border-radius:50%;--ph-hue:${hueOf(`artist:${a.name}`)};${a.cover ? `background-image:url('${esc(a.cover)}')` : ''}">${
               a.cover ? '' : icon('person.2')
             }</div><div class="nm">${esc(a.name)}</div>
             </div>`
@@ -763,7 +782,7 @@ function pageHome() {
         <div class="hscroll">${albums
           .map(
             (a) => `<div class="hcard" data-page="album:${esc(a.name)}" style="width:150px">
-              <div class="song-cover"${bgStyle(a.cover)}></div>
+              <div class="song-cover"${bgStyle(a.cover, `album:${a.name}`)}></div>
               <div class="cols"><div class="song-title">${esc(a.name)}</div><div class="song-sub">${a.songs.length} 首</div></div>
             </div>`
           )
@@ -914,7 +933,7 @@ function pageAlbums() {
   const rows = albums
     .map(
       (a) => `<div class="pl-row" data-page="album:${esc(a.name)}">
-        <div class="pl-cover"${bgStyle(a.cover)}>${a.cover ? '' : '♪'}</div>
+        <div class="pl-cover"${bgStyle(a.cover, `album:${a.name}`)}>${a.cover ? '' : '♪'}</div>
         <div class="pl-body"><div class="pl-name">${esc(a.name)}</div><div class="pl-sub">${esc(a.artist || '未知艺术家')} · ${a.songs.length} 首</div></div>
         <span class="chev">${icon('chevron.right')}</span>
       </div>`
@@ -933,7 +952,7 @@ function pageArtists() {
   const rows = artists
     .map(
       (a) => `<div class="pl-row" data-page="artist:${esc(a.name)}">
-        <div class="pl-cover" style="border-radius:50%;${a.cover ? `background-image:url('${esc(a.cover)}')` : ''}">${a.cover ? '' : icon('person.2')}</div>
+        <div class="pl-cover" style="border-radius:50%;${a.cover ? `background-image:url('${esc(a.cover)}')` : `--ph-hue:${hueOf(`artist:${a.name}`)}`}">${a.cover ? '' : icon('person.2')}</div>
         <div class="pl-body"><div class="pl-name">${esc(a.name)}</div><div class="pl-sub">${a.songs.length} 首歌曲</div></div>
         <span class="chev">${icon('chevron.right')}</span>
       </div>`
@@ -958,7 +977,7 @@ function pageDetail(kind, name) {
     `<div class="page-body">
       <div class="detail-hero">
         <div class="detail-cover" style="${kind === 'artist' ? 'border-radius:50%;' : ''}${
-          g.cover ? `background-image:url('${esc(g.cover)}')` : ''
+          g.cover ? `background-image:url('${esc(g.cover)}')` : `--ph-hue:${hueOf(`${kind}:${g.name}`)}`
         }">${g.cover ? '' : icon(kind === 'album' ? 'square.stack' : 'person.2')}</div>
         <div class="detail-name">${esc(g.name)}</div><div class="detail-sub">${sub}</div>
       </div>
@@ -1205,7 +1224,7 @@ function pageSettingsRoot() {
         '资料库',
         [
           srow({ icon: 'externaldrive', label: '音乐源管理', value: `${state.servers.length} 个源`, page: 'sources' }),
-          srow({ icon: 'sparkles', color: '#af52de', label: '聚合音乐源设置', value: `${state.sources.filter((s) => s.isEnabled).length}/${state.sources.length} 条线路`, page: 'lines' }),
+          srow({ icon: 'sparkles', color: '#af52de', label: '聚合音乐源设置', value: `已加载 ${state.sources.filter((s) => s.isEnabled).length}/${state.sources.length} 条线路`, page: 'lines' }),
           srow({ icon: 'plus', color: '#1f8a5b', label: '添加服务器源', sub: '道理鱼 DaoLiYu · 账号密码只存本机', page: 'editServer' }),
           srow({ icon: 'clock', color: '#5e6b87', label: '最近播放', value: `${state.history.length} 条`, page: 'history' }),
           srow({ icon: 'chart.bar', color: '#147d8a', label: '听歌统计', page: 'stats' }),
@@ -1217,6 +1236,16 @@ function pageSettingsRoot() {
           srow({ icon: 'repeat', label: '播放模式', value: repeatLabel, attr: 'data-cycle-repeat="1"' }),
           srow({ icon: 'shuffle', label: '随机播放', attr: 'data-switch-shuffle="1"', html: switchOn(state.shuffle), chev: false }),
           srow({ icon: 'quote.bubble', label: '歌词面板自动跟随', attr: 'data-switch-lyrics-follow="1"', html: switchOn(state.settings.lyricsFollow !== false), chev: false }),
+          // 需求 8：最小化后贴着任务栏挂一条单行歌词。关掉只是把这条窗口收走，
+          // 播放器里的歌词浮层（上一行那个开关）不受影响。
+          srow({
+            icon: 'captions.bubble',
+            label: '任务栏歌词',
+            sub: '窗口最小化后，在任务栏上方单行显示当前这句',
+            attr: 'data-switch-taskbar-lyric="1"',
+            html: switchOn(state.settings.taskbarLyric !== false),
+            chev: false,
+          }),
           srow({
             icon: 'speaker.wave.2.fill',
             label: '音量',
@@ -1291,7 +1320,7 @@ function pageAppearance() {
           ([hex, name]) =>
             `<button class="swatch${state.theme.accent === `#${hex}` ? ' active' : ''}" style="background:#${hex}" data-set-accent="${hex}" title="${name}"></button>`
         ).join('')}</div>
-         <div class="srow" data-reset-accent="1"><span class="sico" style="background:var(--bg-3)">${icon('arrow.clockwise')}</span>
+         <div class="srow" data-reset-accent="1"><span class="sico" style="background:var(--cover-placeholder)">${icon('arrow.clockwise')}</span>
            <span class="slabel">使用默认主题色</span><span class="svalue">${isDarkNow() ? '深色 #54C79E' : '浅色 #147D8A'}</span></div>`
       )}
       ${group(
@@ -1328,7 +1357,7 @@ function pageSources() {
         menuItem(`data-remove-server="${esc(s.id)}"`, '删除', { danger: true }),
       ];
       return `<div class="srow" data-page="server:${esc(s.id)}" style="align-items:flex-start">
-          <span class="sico" style="background:var(--accent);width:38px;height:38px;border-radius:9px">${icon(s.useSSL ? 'globe' : 'wifi')}</span>
+          <span class="sico photo" style="width:38px;height:38px;border-radius:9px;--ring:var(--accent)">${icon(s.useSSL ? 'globe' : 'wifi')}</span>
           <span class="slabel">${esc(s.name || s.host)}
             <div class="ssub">道理鱼 DaoLiYu · ${esc(s.username || '')}</div>
             <div class="route-bar">${icon(s.useSSL ? 'globe' : 'wifi')}<code>${esc(`${s.useSSL ? 'https' : 'http'}://${s.host}${s.port ? `:${s.port}` : ''}${s.basePath || ''}`)}</code></div>
@@ -1340,12 +1369,12 @@ function pageSources() {
     .join('<div class="sdiv"></div>');
 
   const cloudCfg = (state.cloud && state.cloud.config) || {};
-  const usableCount = state.sources.filter((s) => verdictMark(s).tone === 'ok').length;
+  const cloud = loadSummary(state.sources);
   const agg = `<div class="srow" data-page="lines" style="align-items:flex-start">
-      <span class="sico" style="background:linear-gradient(135deg,var(--accent),#af52de);width:38px;height:38px;border-radius:9px">${icon('sparkles')}</span>
+      <span class="sico photo" style="width:38px;height:38px;border-radius:9px;--ring:var(--accent)">${icon('sparkles')}</span>
       <span class="slabel">聚合音乐源<div class="ssub">云端清单下发 · 无需账号</div>
         <div class="route-bar">${icon('cloud')}<span>清单</span><code>${esc(cloudCfg.manifestURL || '未设置')}</code></div></span>
-      <span class="capsule">${usableCount}/${state.sources.length} 可播</span><span class="chev">${icon('chevron.right')}</span>
+      <span class="capsule">已加载 ${cloud.loaded.length}/${state.sources.length} 条</span><span class="chev">${icon('chevron.right')}</span>
     </div>`;
 
   return (
@@ -1385,14 +1414,44 @@ function verdictMark(s) {
   return { tone: 'bad', text: '不可播' };
 }
 
+/* 需求 1 + 3 在界面上的说法：线路表里只有「服务端确认可播」的那几条真的进了播放路径，
+   其余的行照样画出来，但它们只负责回答"云端 50 条，本机为什么只加载了 14 条"。
+   `loaded` 由主进程的 isLoadable 落一次（真相只有一份，渲染层不再自己判），
+   这里只负责把"为什么没加载"归成一个能读出来的原因。 */
+function isLoaded(s) {
+  return s && s.loaded !== false;
+}
+function loadReason(s) {
+  if (isLoaded(s)) return null;
+  if (s.enabledOnServer === false) return '服务端已停用';
+  if (s.suggestDelete) return '已判不可播';
+  if (verdictMark(s).tone === 'blind') return '未检出 · 无法确认可播';
+  return '不可播';
+}
+function loadSummary(sources) {
+  const loaded = sources.filter(isLoaded);
+  const skipped = sources.filter((s) => !isLoaded(s));
+  const reasons = {};
+  skipped.forEach((s) => {
+    const k = loadReason(s);
+    reasons[k] = (reasons[k] || 0) + 1;
+  });
+  const reasonText = Object.keys(reasons)
+    .map((k) => `${k} ${reasons[k]} 条`)
+    .join(' · ');
+  return { loaded, skipped, reasonText: reasonText || '云端下发的每一条都能出声' };
+}
+
 function lineRow(s) {
   const mark = verdictMark(s);
   const v = verdictOf(s);
   const toneColor = mark.tone === 'ok' ? '#1f8a5b' : mark.tone === 'bad' ? '#c0392b' : '#5e6b87';
   const viaGateway = s.protocolType === 'lxjs';
   const suggest = mark.tone === 'bad' || Boolean(s.suggestDelete);
+  // 「未加载」是需求 1/3 的落点：能出声的才进播放路径，其它只在这儿给一个说法，不参与搜索/取流。
+  const notLoaded = s.loaded === false;
   return `<div class="srow" style="align-items:flex-start">
-      <span class="sico" style="background:${toneColor}">${icon(mark.tone === 'ok' ? 'play.circle' : mark.tone === 'bad' ? 'exclamationmark.triangle' : 'questionmark.circle')}</span>
+      <span class="sico photo" style="--ring:${toneColor}">${icon(mark.tone === 'ok' ? 'play.circle' : mark.tone === 'bad' ? 'exclamationmark.triangle' : 'questionmark.circle')}</span>
       <span class="slabel">${esc(s.name)}
         <div class="ssub">${esc(PLATFORM_LABEL[s.platform] || s.platform)} · ${esc(s.protocolType)} · 优先级 ${s.priority}${
           viaGateway ? ' · 服务端 runner 执行' : ''
@@ -1402,7 +1461,9 @@ function lineRow(s) {
           v.bytes ? ` · ${num(v.bytes)}B` : ''
         } · ${v.origin === 'local' ? '本机实测' : '服务端结论'}</div>
       </span>
+      ${notLoaded ? '<span class="capsule" style="background:rgba(94,107,135,.18);color:#9fb0d6">未加载</span>' : ''}
       ${suggest ? '<span class="capsule" style="background:rgba(192,57,43,.16);color:#e07b6f">建议删除</span>' : ''}
+      ${notLoaded && v.origin === 'local' && v.status === 'ok' ? '<span class="capsule">本机可播 · 待服务端确认</span>' : ''}
       <span class="capsule">${mark.text}</span>
     </div>`;
 }
@@ -1418,6 +1479,7 @@ function pageLines() {
     { ok: 0, bad: 0, blind: 0 }
   );
   const byTone = (tone) => state.sources.filter((s) => verdictMark(s).tone === tone);
+  const load = loadSummary(state.sources);
   const sections = [
     ['可播', byTone('ok')],
     ['未检出（不停用，也不判死）', byTone('blind')],
@@ -1442,7 +1504,7 @@ function pageLines() {
       </div>
       ${group(
         '云端清单',
-        `<div class="srow"><span class="sico" style="background:var(--bg-3)">${icon('link')}</span>
+        `<div class="srow"><span class="sico photo" style="--ring:var(--accent)">${icon('link')}</span>
             <span class="slabel">音乐源清单 URL<div class="route-bar"><code>${esc(cfg.manifestURL || '未设置')}</code></div>
               <div class="ssub">${
                 cfg.revision >= 0 ? `revision ${cfg.revision} · ` : '尚未拉取 · '
@@ -1455,9 +1517,40 @@ function pageLines() {
           <div class="sdiv"></div>
           ${srow({ icon: 'exclamationmark.triangle', color: '#c0392b', label: '建议删除', value: `${counts.bad} 条`, chev: false })}`
       )}
+      ${
+        state.sources.length
+          ? group(
+              '本机加载',
+              `${srow({
+                icon: 'play.circle',
+                color: 'var(--accent)',
+                label: '已加载 · 参与搜索与播放',
+                value: `${load.loaded.length} 条`,
+                sub: '只有服务端确认可播的线路才进播放路径（需求 1/3）',
+                chev: false,
+              })}
+          <div class="sdiv"></div>
+          ${srow({
+            icon: 'moon.zzz',
+            color: '#5e6b87',
+            label: '云端有 · 本机不加载',
+            value: `${load.skipped.length} 条`,
+            sub: load.reasonText,
+            chev: false,
+          })}`
+            )
+          : ''
+      }
+      ${
+        state.sources.length && load.loaded.length === 0
+          ? '<div class="err">本机的播放路径里一条线路都没有 —— 云端清单里还没有「可播」的源。搜索会成功返回空、播放会提示无可用线路。请在 CF 后台跑一次「检测全部可用」，或用样本池复测。</div>'
+          : ''
+      }
       ${sections || '<p class="hint">清单里还没有线路。点"刷新云端清单"从服务端拉一次。</p>'}
-      <p class="hint">音乐源的增删改在 CF 后台（<code>cf-sync-server</code>）完成，本机只读 + 刷新 —— 这就是"客户端只保存这个 URL"的意思。
+      <p class="hint">音乐源的增删改在 CF 后台（<code>cf-sync-server</code>）完成，本机只读 + 刷新 —— 这就是「客户端只保存这个 URL」的意思。
         洛雪 js 音源的脚本跑在服务端的 runner Worker 里，搜索 / 取流 / 歌词都经音乐网关，本机不落地脚本。</p>
+      <p class="hint">带「未加载」标记的源只在这一列表里给一个说法，不参与搜索、不取流：不可播的播了也是白播，未检出的是「我们没测成」而不是「它坏了」
+        —— 可在 CF 后台「体检样本池」给它所在平台补一个真实歌曲 id 再复测，一旦测出声，清单会把它送进本机的播放路径。</p>
     </div>`
   );
 }
@@ -1571,7 +1664,7 @@ function pageSync() {
                 }</div></span>
               <button class="bar-btn" data-edit-cloud-url="1" title="修改清单地址">${icon('pencil.circle')}</button></div>
             <div class="sdiv"></div>
-            <div class="srow"><span class="sico" style="background:var(--bg-3)">${icon('textformat')}</span>
+            <div class="srow"><span class="sico" style="background:var(--cover-placeholder)">${icon('textformat')}</span>
               <span class="slabel">首页标题（服务端设置）<div class="ssub">${esc(fromLabel)} · 本机唯一标识 ${esc(String(cfg.deviceId || '').slice(0, 12))}…</div></span>
               <span class="svalue">${esc(homeTitle())}</span></div>
             <div class="sdiv"></div>
@@ -1600,7 +1693,7 @@ function pageSync() {
               devices
                 .map(
                   (d) => `<div class="srow" ${d.device_id === cfg.deviceId ? '' : `data-sync-import="${esc(d.device_id)}"`}>
-                    <span class="sico" style="background:${d.device_id === cfg.deviceId ? 'var(--bg-3)' : '#0a84ff'}">${icon('moon.zzz')}</span>
+                    <span class="sico" style="background:${d.device_id === cfg.deviceId ? 'var(--cover-placeholder)' : '#0a84ff'}">${icon('moon.zzz')}</span>
                     <span class="slabel">${esc(d.device_name || d.device_id)}
                       <div class="ssub">${esc(d.platform || '')} · ${d.playlist_count} 个歌单 · ${d.song_count} 首 · ${esc(fmtRelative(d.updated_at))}</div></span>
                     ${d.device_id === cfg.deviceId ? '<span class="capsule">本机</span>' : `<span class="svalue">下载它的歌单 ›</span>`}
@@ -1808,7 +1901,11 @@ function renderMini() {
   wrap.hidden = !show;
   if (!show) return;
   const cover = coverOf(track);
-  $('mini-cover').style.backgroundImage = cover ? `url('${esc(cover)}')` : '';
+  const mini = $('mini-cover');
+  mini.style.backgroundImage = cover ? `url('${esc(cover)}')` : '';
+  // 没有封面时不再留一块灰：清空图片让 CSS 的占位渐变透出来，色相按歌名定（换歌才变色，刷新不变）
+  if (cover) mini.style.removeProperty('--ph-hue');
+  else mini.style.setProperty('--ph-hue', hueOf(`track:${track.title}|${track.artist}`));
   $('mini-title').textContent = track.title || '';
   $('mini-artist').textContent = track.artist || '';
   $('mini-play').innerHTML = icon(state.playing ? 'pause.fill' : 'play.fill');
@@ -1841,7 +1938,9 @@ function renderPlayer() {
   const cover = track ? coverOf(track) : null;
   const art = $('art');
   art.style.backgroundImage = cover ? `url('${esc(cover)}')` : '';
-  art.innerHTML = cover ? '' : '<span style="font-size:46px;opacity:.3">♪</span>';
+  if (cover) art.style.removeProperty('--ph-hue');
+  else art.style.setProperty('--ph-hue', hueOf(`nowplaying:${track && track.title}|${track && track.artist}`));
+  art.innerHTML = cover ? '' : '<span style="font-size:46px;opacity:.62;color:#fff">♪</span>';
 
   $('np-title').textContent = track ? track.title || '' : '选一首歌开始播放';
   $('np-artist').textContent = track
@@ -1947,16 +2046,19 @@ async function loadLyrics(track) {
   state.lyricRows = [];
   state.lyricIndex = -1;
   if (state.playerOpen) renderLyrics();
+  pushTaskbarLyric(true); // 换歌了：先让那条换成新歌名，别拿上一首的词顶着
   const res = await api.playback.lyrics(track);
   if (currentTrack() !== track) return; // 期间已切歌
   state.lyrics = res.ok ? res.lrc : null;
   state.lyricRows = state.lyrics ? parseLrc(state.lyrics) : [];
   if (state.playerOpen) renderLyrics();
+  pushTaskbarLyric(true); // 词到位（或确认没有词），那条要跟着换
 }
 
 function lyricStyle() {
   const scale = Number(state.theme.lyricScale) || 1;
-  return `font-size:${Math.round(26 * scale)}px`;
+  // 基准 20px（styles.css .lyric-line 同一个数），档位 0.85/1/1.2/1.5 只是乘这个基准。
+  return `font-size:${Math.round(20 * scale)}px`;
 }
 
 function renderLyrics() {
@@ -1998,6 +2100,9 @@ function updateLyricIndex() {
     prev.classList.add('past');
   }
   state.lyricIndex = idx;
+  // 任务栏那条（需求 8）：必须在下面那个"没开歌词面板就 return"之前推 ——
+  // 用户没在播放页看歌词、却把窗口最小化了，恰恰是这条功能唯一的使用场景。
+  pushTaskbarLyric();
   if (state.playerView !== 'lyrics') return;
   const node = document.getElementById(`ly-${idx}`);
   if (node) {
@@ -2007,6 +2112,30 @@ function updateLyricIndex() {
   } else {
     renderLyrics();
   }
+}
+
+/**
+ * 把"现在这一句"推给主进程（需求 8）。
+ *
+ * 分工要说死：这里只交数据，**显示与否一律由主进程判**（设置开关 + 主窗口是不是真的看不见 +
+ * 有没有在播 + 这句有没有字）。渲染层不知道最小化这件事，也不该知道。
+ * 带去重：timeupdate 一秒能来四次，同一句反复 send 会把那条窗口刷出残影。
+ */
+let lastTaskbarPush = '';
+function pushTaskbarLyric(force) {
+  const track = currentTrack();
+  const row = state.lyricIndex >= 0 ? state.lyricRows[state.lyricIndex] : null;
+  const payload = {
+    text: row ? row.text : '',
+    title: track ? track.title || '' : '',
+    artist: track ? track.artist || '' : '',
+    playing: Boolean(state.playing),
+    hasLyrics: state.lyricRows.length > 0,
+  };
+  const key = `${payload.playing}|${payload.title}|${payload.text}`;
+  if (!force && key === lastTaskbarPush) return;
+  lastTaskbarPush = key;
+  api.taskbarLyric.push(payload);
 }
 
 /* ── 播放队列（原版是 sheet，detents medium/large）───── */
@@ -2508,18 +2637,21 @@ async function refreshCloudSources({ force = false } = {}) {
   const res = await api.cloud.refresh(force);
   state.cloud.busy = false;
   state.cloud.config = res.config || state.cloud.config;
+  state.sources = await api.sources.list();
+  const loaded = loadSummary(state.sources).loaded.length;
   if (!res.ok) {
     // 拉不到绝不清空本机线路（主进程那边也是这个口径）：这里只把原因写出来。
     state.cloud.error = res.error || '云端清单拉取失败，本机继续使用缓存';
   } else {
     if (res.settings) state.cloud.settings = res.settings;
+    // 报数只报本机真的加载进播放路径的那一条口径（需求 1/3）：
+    // "服务端说可用 17 条"和用户实际能播的是两回事，界面上别给两个数让人对不上。
     if (res.changed) {
-      state.cloud.result = `清单已更新（revision ${res.revision}）· 可用 ${(res.usable || []).length} 条`;
+      state.cloud.result = `清单已更新（revision ${res.revision}）· 云端 ${state.sources.length} 条，本机加载 ${loaded} 条可播线路`;
     } else {
-      state.cloud.result = `清单没有变化（revision ${res.revision}，服务端回了 304）`;
+      state.cloud.result = `清单没有变化（revision ${res.revision}，服务端回了 304）· 本机加载 ${loaded} 条`;
     }
   }
-  state.sources = await api.sources.list();
   render();
 }
 
@@ -2544,11 +2676,11 @@ async function checkAllSources() {
   if (res.cloud) state.cloud.config = res.cloud;
   state.sources = res.sources || (await api.sources.list());
   const dead = (res.verdicts || []).filter((v) => v.status !== 'ok' && VERDICT_BLIND.indexOf(v.status) < 0);
-  state.cloud.result = `检完 ${
+  state.cloud.result = `本机检完 ${
     (res.verdicts || []).length
   } 条：可播 ${(res.verdicts || []).filter((v) => v.status === 'ok').length} 条 · 不可播 ${
     dead.length
-  } 条（已标建议删除）`;
+  } 条（服务端已标建议删除）· 当前播放路径里 ${loadSummary(state.sources).loaded.length} 条`;
   render();
 }
 
@@ -2773,6 +2905,7 @@ document.addEventListener('click', async (event) => {
       '[data-queue-playlist]', '[data-next-playlist]', '[data-clear-history]', '[data-toggle-scope]',
       '[data-filter]', '[data-clear-search]', '[data-clear-search-history]', '[data-history-search]',
       '[data-del-search-history]', '[data-cycle-repeat]', '[data-switch-shuffle]', '[data-switch-lyrics-follow]',
+      '[data-switch-taskbar-lyric]',
       '[data-cycle-appearance]', '[data-switch-cover]', '[data-switch-tray]', '[data-appearance]',
       '[data-set-accent]', '[data-reset-accent]', '[data-lyric-scale]',
       '[data-sources-check-all]', '[data-cloud-refresh]', '[data-edit-cloud-url]', '[data-toggle-form]', '[data-cancel-form]',
@@ -3090,6 +3223,16 @@ document.addEventListener('click', async (event) => {
   }
   if (d.switchTray) {
     state.settings = await api.settings.save({ ...state.settings, minimizeToTray: state.settings.minimizeToTray === false });
+    render();
+    return;
+  }
+  // 需求 8：任务栏歌词条的开关。这条只在主窗口看不见时才露脸，所以点下去当场看不到变化，
+  // 但必须把当前这句重新推一次 + 清掉上一首的"别露脸"，否则最小化后可能是空的或干脆不出来。
+  if (d.switchTaskbarLyric) {
+    const on = state.settings.taskbarLyric === false;
+    state.settings = await api.settings.save({ ...state.settings, taskbarLyric: on });
+    if (on) api.taskbarLyric.reset();
+    pushTaskbarLyric(true);
     render();
     return;
   }
@@ -3632,11 +3775,13 @@ audio.addEventListener('play', () => {
   if (state.playerOpen) renderPlayer();
   const row = document.querySelector('.song-row.playing .wave');
   if (row) row.hidden = false;
+  pushTaskbarLyric(); // 开始播了，那条才有资格露出来（需求 8）
 });
 audio.addEventListener('pause', () => {
   state.playing = false;
   renderMini();
   if (state.playerOpen) renderPlayer();
+  pushTaskbarLyric(); // 暂停 = 收走：定在原地的歌词比没有更碍事
 });
 audio.addEventListener('timeupdate', () => {
   if (state.playerOpen) renderProgress();
@@ -4072,6 +4217,35 @@ async function smokeShellPages() {
     loginWall: /退出登录|账号登录|登录 Primuse/.test(screenText()),
   };
 
+  // 需求 8 的开关：它得在「播放」这一组里、画得出来、点下去真的落盘并通知到主进程。
+  // 这里刻意走一次真点击（而不是读 data 属性）：这条开关的全部意义都在"主进程收没收"。
+  const stripRowSel = '#screen [data-switch-taskbar-lyric]';
+  const stripRow = document.querySelector(stripRowSel);
+  const rowRect = stripRow ? stripRow.getBoundingClientRect() : { width: 0, height: 0 };
+  const beforeEnabled = (await api.taskbarLyric.status()).enabled;
+  if (stripRow) stripRow.click();
+  await settle(320);
+  const flippedRow = document.querySelector(stripRowSel);
+  const afterEnabled = (await api.taskbarLyric.status()).enabled;
+  const switchAfter = flippedRow ? flippedRow.querySelector('.switch') : null;
+  if (flippedRow) flippedRow.click(); // 复位：冒烟不许把用户的设置留在翻过去的状态
+  await settle(320);
+  const restoredEnabled = (await api.taskbarLyric.status()).enabled;
+  out.settings.taskbarLyric = {
+    rowFound: Boolean(stripRow),
+    painted: rowRect.width > 60 && rowRect.height > 24,
+    inPlaybackGroup: (() => {
+      const g = [...document.querySelectorAll('#screen .settings-group')].find(
+        (n) => ((n.querySelector('.group-title') || {}).textContent || '').trim() === '播放'
+      );
+      return /任务栏歌词/.test(g ? g.textContent : '');
+    })(),
+    labelShown: /任务栏歌词/.test(stripRow ? stripRow.textContent : ''),
+    togglesMainProcess: afterEnabled !== beforeEnabled,
+    switchMatchesMain: switchAfter ? switchAfter.classList.contains('on') === afterEnabled : false,
+    restored: restoredEnabled === beforeEnabled,
+  };
+
   out.overlayLeaks = overlayLeaks();
 
   // 关于页的品牌块。断言的是"图真的解码出来了、真的画在屏幕上"，不是 img 标签在不在：
@@ -4160,6 +4334,8 @@ async function smokeCloudSources() {
   };
 
   // 3) 注入三种结论：可播 / 未检出（盲区）/ 不可播 + 建议删除。
+  //    `loaded` 一律照主进程真实下发的形状写死（需求 1/3 的 UI 侧唯一真相源是 isLoadable）：
+  //    只有服务端确认可播的那条进播放路径，另外两条只在这一列表里给一个说法。
   const mk = (id, name, extra) => ({
     id,
     name,
@@ -4168,13 +4344,14 @@ async function smokeCloudSources() {
     baseURL: `https://example.invalid/${id}`,
     priority: 10,
     isEnabled: true,
+    enabledOnServer: true,
     check: {},
     ...extra,
   });
   state.sources = [
-    mk('smoke-ok', '〔冒烟〕能出声的线路'),
-    mk('smoke-blind', '〔冒烟〕我们没测成的线路'),
-    mk('smoke-bad', '〔冒烟〕真不能播的线路', { suggestDelete: true }),
+    mk('smoke-ok', '〔冒烟〕能出声的线路', { loaded: true, check: { status: 'ok' } }),
+    mk('smoke-blind', '〔冒烟〕我们没测成的线路', { loaded: false, check: { status: 'error' } }),
+    mk('smoke-bad', '〔冒烟〕真不能播的线路', { loaded: false, suggestDelete: true, check: { status: 'audio_fail' } }),
   ];
   state.cloud.verdicts = {
     'smoke-ok': { id: 'smoke-ok', status: 'ok', detail: '晴天 / 周杰伦 · HTTP 206 audio/mpeg 65536B 命中音频魔数', bytes: 65536, origin: 'local', enabled: true },
@@ -4187,12 +4364,33 @@ async function smokeCloudSources() {
   const rowOf = (needle) => rows.find((n) => n.textContent.includes(needle)) || null;
   const capsulesOf = (node) => (node ? [...node.querySelectorAll('.capsule')].map((c) => c.textContent.trim()) : []);
   const toneOf = (node) => {
+    // 音乐源的缩略图现在是"写真封面 + 一圈结论色"（需求 4），所以结论色读边框而不是底色：
+    // 底色三档都一样（照片），真正渲染出来不一样的是那圈 inset box-shadow。
     const ico = node && node.querySelector('.sico');
-    return ico ? getComputedStyle(ico).backgroundColor : '';
+    if (!ico) return '';
+    const cs = getComputedStyle(ico);
+    return cs.boxShadow && cs.boxShadow !== 'none' ? cs.boxShadow : cs.backgroundColor;
   };
   const okRow = rowOf('〔冒烟〕能出声的线路');
   const blindRow = rowOf('〔冒烟〕我们没测成的线路');
   const badRow = rowOf('〔冒烟〕真不能播的线路');
+  // 「本机加载」那一组的两个数字也是渲染结果，不是 state 里的计数 —— 用户看得见的就是这一行字。
+  const svalueOf = (needle) => {
+    const row = [...document.querySelectorAll('#screen .srow')].find((n) => n.textContent.includes(needle));
+    if (!row) return { value: '', sub: '' };
+    return {
+      value: ((row.querySelector('.svalue') || {}).textContent || '').trim(),
+      sub: ((row.querySelector('.ssub') || {}).textContent || '').trim(),
+    };
+  };
+  const loadedRow = svalueOf('已加载 · 参与搜索与播放');
+  const skippedRow = svalueOf('云端有 · 本机不加载');
+  // 需求 4：音乐源的缩略图不许再是灰块 —— 断言它真把那张写真图解出来画上了。
+  const photoCover = (node) => {
+    const ico = node && node.querySelector('.sico.photo');
+    if (!ico) return false;
+    return /source-cover\.png/.test(getComputedStyle(ico).backgroundImage);
+  };
   out.verdicts = {
     groups: texts('#screen .group-title'),
     rowCount: rows.length,
@@ -4200,6 +4398,19 @@ async function smokeCloudSources() {
     blind: { capsules: capsulesOf(blindRow), painted: painted(blindRow), tone: toneOf(blindRow) },
     bad: { capsules: capsulesOf(badRow), painted: painted(badRow), tone: toneOf(badRow) },
     iconsPainted: rows.every((n) => painted(n.querySelector('.sico svg'), 8, 8)),
+    photoCovers: rows.every(photoCover),
+    photoCoverCount: document.querySelectorAll('#screen .sico.photo').length, // 3 条冒烟线路 + 云端清单 URL 那一行
+  };
+  out.loadPolicy = {
+    groupPresent: texts('#screen .group-title').includes('本机加载'),
+    loadedValue: loadedRow.value,
+    skippedValue: skippedRow.value,
+    skippedReason: skippedRow.sub,
+    notLoadedCapsule: {
+      ok: capsulesOf(okRow).includes('未加载'),
+      blind: capsulesOf(blindRow).includes('未加载'),
+      bad: capsulesOf(badRow).includes('未加载'),
+    },
   };
 
   // 故意停在注入后的画面上：主进程紧接着要截 smoke-ui-cloud.png。
@@ -4225,6 +4436,20 @@ async function smokeCloudSourcesCleanup() {
   out.cloudPageReachable = Boolean(document.querySelector('#screen .srow'));
   out.overlayLeaks = overlayLeaks();
   return out;
+}
+
+/**
+ * 需求 8 的取证配合段：把"当前这一句 + 正在播放"交给主进程（playing 这里必须写死 true，
+ * 冒烟的 <audio> 未必真在出声，而那条窗口的出场条件之一就是"在播"）。
+ * 之后由主进程真的最小化主窗口，看那条自己会不会露出来 —— 判据全在主进程，这里只喂数据。
+ */
+async function smokeTaskbarStripPush() {
+  const payload = { text: '第 7 行冒烟歌词', title: '冒烟 UI 探针 A', artist: '探针', playing: true, hasLyrics: true };
+  lastTaskbarPush = ''; // 绕带去重：这一句可能刚刚已经推过一遍
+  api.taskbarLyric.push(payload);
+  await settle(120);
+  const st = await api.taskbarLyric.status();
+  return { pushed: payload.text, enabled: st.enabled, received: (st.payload || {}).text === payload.text };
 }
 
 async function smokePlaylistUI() {
@@ -4416,6 +4641,17 @@ async function smokeLyricsShot() {
   render();
   await settle(420); // 等 player-in 动画（0.32s）过去，量的才是落位之后的几何
   const geo = playerGeometry();
+  // 需求 5：歌词的颜色与字号，断言的是屏幕上真的算出来的那三个数，不是 CSS 里写了什么。
+  const rgb = (s) => (String(s).match(/\d+/g) || []).slice(0, 3).map(Number);
+  const goldish = (c) => c.length === 3 && c[0] >= c[1] && c[1] > c[2] && c[0] - c[2] > 60 && c[0] > c[2] + 24;
+  const grayish = (c) => c.length === 3 && Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]) <= 10;
+  const nowNode = $('lyrics').querySelector('.lyric-line.now');
+  const idleNode = [...$('lyrics').querySelectorAll('.lyric-line')].find((n) => !n.classList.contains('now'));
+  const csNow = nowNode ? getComputedStyle(nowNode) : null;
+  const csIdle = idleNode ? getComputedStyle(idleNode) : null;
+  // 需求 8：把当前这句推给主进程，问它"那条到底在哪、该不该在"。
+  pushTaskbarLyric(true);
+  const strip = await api.taskbarLyric.status();
   return {
     ...geo,
     lyricsVisible: vis('lyrics'),
@@ -4423,6 +4659,21 @@ async function smokeLyricsShot() {
     nowLine: ($('lyrics').querySelector('.lyric-line.now') || {}).textContent || '',
     artHidden: getComputedStyle(document.querySelector('.art-area')).display === 'none',
     tabbarCovered: getComputedStyle($('app')).visibility === 'hidden',
+    lyricLook: {
+      nowColor: csNow ? csNow.color : '',
+      idleColor: csIdle ? csIdle.color : '',
+      nowFontSize: csNow ? Number.parseFloat(csNow.fontSize) : 0,
+      scale: Number(state.theme.lyricScale) || 1,
+      nowGold: csNow ? goldish(rgb(csNow.color)) : false,
+      idleGold: csIdle ? goldish(rgb(csIdle.color)) : false,
+      anyGray: [csNow, csIdle].some((cs) => cs && grayish(rgb(cs.color))),
+    },
+    taskbarStrip: {
+      enabled: strip.enabled,
+      visibleWhileMainWindowShown: strip.visible, // 主窗口看得见时这条绝不许浮出来
+      pushedText: (strip.payload || {}).text || '',
+      stripWindowExists: strip.exists, // 同一批：主窗口看得见时这条窗口连创建都不该被创建
+    },
     overlayLeaks: overlayLeaks(),
   };
 }
@@ -4716,6 +4967,7 @@ api.cloud.onUpdated((payload) => {
         if (phase === 'playlist-ui') return api.smokeReport(await smokePlaylistUI());
         if (phase === 'player-shot') return api.smokeReport(await smokePlayerShot());
         if (phase === 'lyrics-shot') return api.smokeReport(await smokeLyricsShot());
+        if (phase === 'taskbar-strip-push') return api.smokeReport(await smokeTaskbarStripPush());
         if (phase === 'playlist-cleanup') return api.smokeReport(await smokePlaylistCleanup());
         if (phase === 'playlist-clicks') return api.smokeReport(await smokePlaylistClicks());
         return api.smokeReport(await smokeShellSearch(keyword));

@@ -83,15 +83,42 @@ function gatewayBase(manifest = store.cloud.manifest()) {
   return /^https?:\/\//i.test(base) ? base.replace(/\/+$/, '') : `${origin}${base}`;
 }
 
+/** 一条云端源能不能出声（清单里 check.status 这一锤定音，判据与服务端/ Swift 三处一致）。 */
+function isPlayable(s) {
+  return Boolean(s && s.check && s.check.status === 'ok');
+}
+
+/**
+ * 需求 1 + 3：**不可播放的源不要在 app 端加载，客户端只加载"可用 / 可播"的**。
+ *
+ * 三个条件都得成立才进线路表：
+ *   enabled        —— 服务端已经停用的不必说；
+ *   !suggestDelete —— 带着"建议删除"的源就是被判过死刑的，留着只会让播放多一次注定失败的尝试；
+ *   status==='ok'  —— 这也是"未检出"那一档要挡在外面的原因：no_sample / runner_missing /
+ *                     unsupported / unchecked 都**不是**"源坏了"，可我们既没证据说它能播，
+ *                     就不该把它塞进用户的播放路径。它在服务端保持 enabled，等 CF 端拿到
+ *                     样本给出结论（后台「样本池」+「用歌曲 id 复测」就是这条通道）。
+ * 这条口径与服务端下发的 `usable` 数组是同一件事（usable = enabled && status==='ok'），
+ * 写在这儿而不是抄那个数组：清单字段才是真相，数组只是派生物，
+ * 而且本机要能自己回答"云端 50 条、我这边为什么只加载了 14 条"。
+ */
+function isLoadable(s) {
+  return Boolean(s && s.enabled) && !s.suggestDelete && isPlayable(s);
+}
+
 /** 清单里一条源 → 本机线路表的形状（字段名沿用 iPhone/Windows 侧的 protocolType/isEnabled）。 */
 function toLocalSource(s, usableSet) {
+  const loaded = isLoadable(s);
   return {
     id: s.id,
     name: s.name,
     platform: s.platform,
     protocolType: s.protocol,
     baseURL: s.baseURL || '',
-    isEnabled: Boolean(s.enabled),
+    // isEnabled 从此只有一个含义：**这条源在不在播放路径里**。服务端那位怎么标是它的事。
+    isEnabled: loaded,
+    enabledOnServer: Boolean(s.enabled),
+    loaded,
     priority: Number(s.priority) || 0,
     quality: s.quality || '320k',
     cloud: true,
@@ -106,10 +133,12 @@ function toLocalSource(s, usableSet) {
 /**
  * 清单落成线路。
  *
- * 过滤规则要说清楚：**lxjs 但没有脚本指纹的不进线路表**（走网关也解析不了，留着只会
- * 让播放变成一次注定失败的请求）；HTTP 类但没有合法 baseURL 的同样不留。
- * 其它一律照清单下发 —— 包括"检不出结果"（no_sample / unchecked）的那些，
- * 因为服务端把它们停在 enabled=1 上是有意的：观测盲区不等于源坏了。
+ * 这里只筛"**本机能不能解释这条源**"，不筛"它好不好的"：
+ *   lxjs 但没有脚本指纹的不落（走网关也解析不了，留着只会让播放变成一次注定失败的请求）；
+ *   HTTP 类但没有合法 baseURL 的同样不落。
+ * 其余**全部落成行**，包括未检出（no_sample / unchecked）和已被判不可播的那些 ——
+ * 界面要回答"云端 50 条，我这边 14 条能播，其它 36 条去哪了"，把它们从数据里抹掉就答不出来。
+ * "进不进播放路径"由上面的 `isLoadable` 决定（isEnabled=false 只展示、不搜索、不取流）。
  */
 function toLocalSources(manifest) {
   const usableSet = new Set(manifest && manifest.usable ? manifest.usable : []);
@@ -345,11 +374,24 @@ async function probeSource(source, keyword = probeKeyword()) {
 
 /**
  * 逐条过一遍（并发压到 4，第三方站点都可能慢），每条出结论就回调 —— 界面要能看着进度走。
+ *
+ * 这里**不再按 isEnabled 过滤**：未加载的那些（未检出 / 已被判不可播）恰恰是最需要本机再验一次的，
+ * 尤其 HTTP 类线路 —— 本机真能搜、真能解析，服务端那边可能只是缺样本。
+ * 但**服务端已经停用**的那些照样不占流量（老契约那条规矩留着）。
+ * 所以闸门是 `enabledOnServer`，不是 `isEnabled` —— 后者现在的意思是"在不在播放路径里"
+ * （见 isLoadable），拿它当体检闸门就等于"没测过的永远没机会被测"，需求 2 就问不出来了。
+ * 结论只用于显示，不回写线路表：能不能进播放路径由服务端体检下发的那一份说了算
+ * （音源的增删改启停只在 CF 后台，这是既定架构；两端各写一次就会给出两个答案）。
  * @param {any[]} sources
  * @param {(v:any)=>void} [onVerdict]
  */
+function checkable(s) {
+  if (!s || !s.id) return false;
+  return s.cloud ? s.enabledOnServer !== false : s.isEnabled !== false;
+}
+
 async function checkAll(sources, onVerdict) {
-  const list = sources.filter((s) => s.isEnabled);
+  const list = (sources || []).filter(checkable);
   const verdicts = [];
   let i = 0;
   const workers = Array.from({ length: Math.min(4, list.length) }, async () => {
@@ -377,6 +419,9 @@ module.exports = {
   audioContentType,
   isPlayableAudio,
   gatewayBase,
+  isPlayable,
+  isLoadable,
+  checkable,
   toLocalSources,
   probeKeyword,
   refresh,

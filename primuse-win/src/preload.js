@@ -75,6 +75,14 @@ contextBridge.exposeInMainWorld('primuse', {
     load: () => ipcRenderer.invoke('settings:load'),
   },
 
+  // 任务栏歌词条（需求 8）：渲染层只把"现在这一句是什么"推上来，
+  // 该不该显示由主进程按 设置 + 主窗口可见性 + 播放状态 判。
+  taskbarLyric: {
+    push: (payload) => ipcRenderer.send('taskbar-lyric:set', payload),
+    reset: () => ipcRenderer.send('taskbar-lyric:reset'),
+    status: () => ipcRenderer.invoke('taskbar-lyric:status'),
+  },
+
   playlists: {
     list: () => ipcRenderer.invoke('playlist:list'),
     get: (id) => ipcRenderer.invoke('playlist:get', id),

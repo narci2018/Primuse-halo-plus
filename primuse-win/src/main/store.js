@@ -55,7 +55,9 @@ function defaults() {
     playlists: [],
     queue: { items: [], index: 0, position: 0 },
     player: { volume: 0.8, repeat: 'off', shuffle: false },
-    settings: { minimizeToTray: true, platformFilter: 'all', pageSize: 100 },
+    // taskbarLyric（需求 8）：最小化后在任务栏上方显示单行歌词。默认开 —— 用户要的正是这个功能，
+    // 关它的开关就在那条歌词本体的右上角和"设置 → 播放"里。
+    settings: { minimizeToTray: true, platformFilter: 'all', pageSize: 100, taskbarLyric: true },
     // deviceId 由本机生成并持有（ownedByThisDevice），永不与 iPhone 那台设备共用，
     // 否则备份会覆盖掉他手机上的 232 首真实数据。
     sync: { serverURL: DEFAULT_SYNC_URL, deviceId: '', deviceName: '', platform: 'Windows', ownedByThisDevice: false, lastBackupAt: 0 },
