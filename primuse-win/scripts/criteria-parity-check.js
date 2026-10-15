@@ -335,6 +335,23 @@ record('占位渐变走 --cover-placeholder，且 CSS 里至少 8 处封面用�
 record('音乐源那一档用的是写真封面底图，且文件真的在渲染目录里（打包要能带上）',
   /\.sico\.photo \{[\s\S]{0,200}source-cover\.png/.test(WIN_STYLES)
     && fs.existsSync(path.join(ROOT, 'primuse-win/src/renderer/source-cover.png')), '');
+// 冒烟里「渲染层自检」那条封面门：上游给不给封面 URL 不由我们决定（公开线路经常一条
+// 都不给），所以两种过法必须都在 —— 有 URL 就验至少一张真解出尺寸，一条都不给就验
+// 彩色占位（灰块数必须 0、色相至少两种）。只留前一种，数据源哪天返工成无图，这一步就
+// 红在"渲染层自检"上、报的却是没坏的东西；只留后一种，真坏了也没人拦。
+record('封面那条门两种过法都在（有 URL 验真能加载 / 无 URL 验彩色占位）',
+  /const coverLoadsOk =[\s\S]{0,180}startsWith\('ok:'\)/.test(WIN_MAIN)
+    && /const noUpstreamArt =/.test(WIN_MAIN)
+    && /const placeholderOk = noUpstreamArt/.test(WIN_MAIN)
+    && /ui\.grayCoverTiles === 0/.test(WIN_MAIN)
+    && /\(ui\.placeholderHues \|\| 0\) >= 2/.test(WIN_MAIN)
+    && /coverLoadsOk \|\| placeholderOk/.test(WIN_MAIN)
+    && /grayCoverTiles:/.test(WIN_APP)
+    // 色相种数必须是"量出来的"，不是一个常量：写成 `placeholderHues: 0` 这种看着仍在、
+    // 实则把彩色占位那条路焊死了 —— 无图批次又会红在"渲染层自检"上。
+    && /placeholderHues: phHues\.size/.test(WIN_APP)
+    && /style\.getPropertyValue\('--ph-hue'\)/.test(WIN_APP),
+  '少任何一半，那条门要么见不到无图批次就红，要么灰块回来了也不红');
 record('结论色走那一圈内描（照片底上底色分不出三档）',
   /\.sico\.photo \{[\s\S]{0,300}box-shadow: inset 0 0 0 1\.5px var\(--ring/.test(WIN_STYLES), '');
 
@@ -437,6 +454,17 @@ record('不抢焦点、不进任务栏、不跟随主窗口节流（否则最小
   /focusable: false/.test(WIN_STRIP) && /skipTaskbar: true/.test(WIN_STRIP) && /backgroundThrottling: false/.test(WIN_STRIP), '');
 record('只贴工作区下沿，不盖任务栏',
   /workArea/.test(WIN_STRIP) && /STRIP_HEIGHT - BOTTOM_GAP/.test(WIN_STRIP), '');
+// 冒烟喂这条窗口的方式也钉一条：v1.9.18~19 那一步时红时绿，根因是它注射了一份
+// `playing:true` 的 payload 就走 —— 而主进程手里那份会被渲染层任何一次**按状态现算**
+// 的推送（换歌 / 歌词行推进 / 暂停）打回 playing:false、text:""，最小化那一秒里
+// 窗口按判据就该收着。所以喂的是 state，不是 payload。
+const stripFeed = (WIN_APP.match(/async function smokeTaskbarStripPush\(\)[\s\S]{0,1600}?\n\}/) || [''])[0];
+record('冒烟喂任务栏条靠改状态，不靠注射 payload（注射那份会被下一次状态推送打回）',
+  stripFeed.includes('state.playing = true')
+    && stripFeed.includes('pushTaskbarLyric(true)')
+    && !stripFeed.includes('api.taskbarLyric.push(')
+    && /async function smokePlaylistCleanup\(\)[\s\S]{0,300}?smokeStripBackup\.playing/.test(WIN_APP),
+  `state.playing / pushTaskbarLyric / 无注射 / cleanup 还原 —— 取到的函数体 ${stripFeed.length} 字符`);
 
 // MARK: - 15. macOS 外壳：底下那四格必须就是 iPhone 那四格
 

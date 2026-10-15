@@ -780,13 +780,24 @@ async function runSmoke() {
       };
       tick();
     });
-    const coverOk = Object.values((report.ui && report.ui.coverLoads) || {}).some((v) => String(v).startsWith('ok:'));
+    const ui = report.ui || {};
+    // 封面这一项有两种"过法"，因为上游给不给封面本来就不由我们决定：
+    //   A. 这批结果带了封面 URL —— 至少一张必须真解出尺寸（链路是通的）；
+    //   B. 一条都没带（公开线路的常态，酷狗 meting 的 type=pic 直接返回空 body）——
+    //      那就验需求 4 本尊：满屏必须是 `--ph-hue` 的彩色占位，一张灰块都不许有。
+    // 原来只认 A，于是 B 一来这一步就红，报的是"渲染层自检失败"，实际是数据源没给图 ——
+    // 一个每次都可能误报的门，最后只会让人学着忽略它。
+    const coverLoadsOk = Object.values(ui.coverLoads || {}).some((v) => String(v).startsWith('ok:'));
+    const noUpstreamArt = (ui.coverSamples || []).length === 0;
+    const placeholderOk = noUpstreamArt
+      && ui.coverTiles > 0
+      && (ui.placeholderHues || 0) >= 2
+      && ui.grayCoverTiles === 0;
     step(
       '渲染层自检',
-      Boolean(report.ui && report.ui.ready && report.ui.coverSamples && report.ui.coverSamples.length > 0 && coverOk),
-      `${JSON.stringify(report.ui)} —— 封面按平台实测（酷狗那批 meting type=pic 上游返回空 body，属数据源缺陷，与渲染无关）`
+      Boolean(ui.ready && ui.resultCount > 0 && (coverLoadsOk || placeholderOk)),
+      `${JSON.stringify(ui)} —— 封面按平台实测：有 URL 就验真能加载；一条 URL 都没有（${noUpstreamArt}）就验彩色占位（${ui.coverTiles} 格 / ${ui.placeholderHues} 种色相 / ${ui.grayCoverTiles} 格是灰的）`
     );
-    const ui = report.ui || {};
     step(
       'iPhone 外壳已接线（底部四 tab / 胶囊迷你条 / 全屏播放浮层 / 批量条 / 行内 ⋯）',
       Boolean(

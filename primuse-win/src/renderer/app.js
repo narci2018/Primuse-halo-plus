@@ -4032,6 +4032,7 @@ function shellEvidence() {
 
 let smokePlaylistProbe = null; // { id, snap } —— 主进程截图后用 phase:'playlist-cleanup' 收走
 let smokeQueueRestore = null; // 冒烟跑前用户的真实队列；截图用的内存探针队列必须由 cleanup 换回来
+let smokeStripBackup = null; // { playing } —— 任务栏歌词条那一步为喂状态临时改的那一项
 let smokeCloudSnapshot = null; // 注入三种体检结论前的线路列表 —— 截图后由 phase:'cloud-sources-cleanup' 换回来
 
 function snapshotNav() {
@@ -4113,6 +4114,11 @@ async function smokeShellSearch(keyword) {
     await settle(1400);
   }
   const ime = await imeProbe();
+  // 这批结果到底有没有带封面 URL —— 公开线路经常一条都不给（酷狗 meting 的 type=pic
+  // 直接返回空 body）。那种情况下"能不能加载"没法验，能验的是屏幕上没有死灰块：
+  // 每个 `.song-cover` 都得是 `--ph-hue` 出来的彩色渐变（需求 4 的那条判据）。
+  const coverTiles = [...document.querySelectorAll('#screen .song-cover')];
+  const phHues = new Set(coverTiles.map((n) => n.style.getPropertyValue('--ph-hue')).filter(Boolean));
   return {
     ready: state.results.length > 0,
     rows: document.querySelectorAll('#screen .song-row').length,
@@ -4121,6 +4127,13 @@ async function smokeShellSearch(keyword) {
     chips: document.querySelectorAll('#screen .chip').length,
     coverSamples: sample.map((s) => s.platform),
     coverLoads,
+    coverTiles: coverTiles.length,
+    placeholderHues: phHues.size,
+    // 计算后背景既没有 url() 也没有渐变的格子 = 真的是灰块（0 才算过）
+    grayCoverTiles: coverTiles.filter((n) => {
+      const bi = getComputedStyle(n).backgroundImage;
+      return !bi || bi === 'none';
+    }).length,
     ime,
     ...shellEvidence(),
   };
@@ -4439,17 +4452,43 @@ async function smokeCloudSourcesCleanup() {
 }
 
 /**
- * 需求 8 的取证配合段：把"当前这一句 + 正在播放"交给主进程（playing 这里必须写死 true，
- * 冒烟的 <audio> 未必真在出声，而那条窗口的出场条件之一就是"在播"）。
- * 之后由主进程真的最小化主窗口，看那条自己会不会露出来 —— 判据全在主进程，这里只喂数据。
+ * 需求 8 的取证配合段：把渲染层摆成"真的在播、真的有第 7 句"，再交给主进程。
+ * 之后由主进程真的最小化主窗口，看那条自己会不会露出来 —— 判据全在主进程，这里只喂状态。
+ *
+ * 为什么不能只注射一份 payload 就走（v1.9.18 起这一步时红时绿的根因）：
+ * `pushTaskbarLyric()` 是拿 `state.playing` / `state.lyricRows[state.lyricIndex]`
+ * **现算**的，换歌、歌词行推进、暂停都会喊它一声；注射进去的那份 `playing:true`
+ * 跟渲染层的真实状态（没出声 ⇒ false、歌词已被清 ⇒ text:""）不一致，于是最小化那
+ * 1 秒内任意一次自动推送都会把主进程的 lastPayload 打回"没在播"，窗口按判据就该
+ * 收着 —— 冒烟看到的是一条根本没露出来。所以这里改的是**状态**，不是那份 payload。
  */
 async function smokeTaskbarStripPush() {
-  const payload = { text: '第 7 行冒烟歌词', title: '冒烟 UI 探针 A', artist: '探针', playing: true, hasLyrics: true };
+  if (!state.queue.length) {
+    state.queue = [
+      { kind: 'aggregated', platform: 'netease', rawID: 'smoke-ui-a', title: '冒烟 UI 探针 A', artist: '探针', duration: 200 },
+    ];
+    state.index = 0;
+    state.order = [0];
+  }
+  if (!state.lyricRows.length) {
+    state.lyrics = Array.from({ length: 16 }, (_, i) => `[00:${String(i).padStart(2, '0')}:00]第 ${i + 1} 行冒烟歌词`).join('\n');
+    state.lyricRows = parseLrc(state.lyrics);
+  }
+  smokeStripBackup = { playing: state.playing };
+  state.playing = true; // <audio> 并不真的出声，出场条件里的"在播"由这里的状态说话
+  state.lyricIndex = 6;
   lastTaskbarPush = ''; // 绕带去重：这一句可能刚刚已经推过一遍
-  api.taskbarLyric.push(payload);
+  pushTaskbarLyric(true);
   await settle(120);
   const st = await api.taskbarLyric.status();
-  return { pushed: payload.text, enabled: st.enabled, received: (st.payload || {}).text === payload.text };
+  const p = st.payload || {};
+  return {
+    pushed: p.text,
+    enabled: st.enabled,
+    // 回读主进程手里那份：文本与"在播"两项都得是渲染层现在的真实状态推出来的，
+    // 而不是注射进去的。后面自动推送重算出来的也是这一份，才不会把窗口收走。
+    received: p.text === '第 7 行冒烟歌词' && p.playing === true && p.hasLyrics === true,
+  };
 }
 
 async function smokePlaylistUI() {
@@ -4679,6 +4718,13 @@ async function smokeLyricsShot() {
 }
 
 async function smokePlaylistCleanup() {
+  if (smokeStripBackup) {
+    // 任务栏那一步为了让"在播"这个条件是真的，把 state.playing 写成过 true；
+    // 这里换回冒烟之前的值，免得后面的断言看到一份假播放状态。
+    // （lyricIndex 不用还 —— 下面几行本来就要把歌词整套清掉。）
+    state.playing = smokeStripBackup.playing;
+    smokeStripBackup = null;
+  }
   state.playerView = null;
   state.lyrics = null;
   state.lyricRows = [];
