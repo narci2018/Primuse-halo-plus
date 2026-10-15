@@ -20,3 +20,4 @@ tests/.eval-probe/
 # 设备歌单换源工具的落盘：pre-image、报告、单设备只读快照 —— 全是用户数据，不入库
 .repoint-*
 .device-*-backup.json
+.cf-ui/

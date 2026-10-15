@@ -148,6 +148,14 @@ if (dead) {
 const noScriptField = (m?.sources || []).every((s) => !s.script || !s.scriptText);
 check("清单里不含脚本正文（只有 scriptHash，源码不外泄）", noScriptField, `字段样例 ${Object.keys(m?.sources?.[0] || {}).join("/")}`);
 
+// ── 6. 后台「✏️ 编辑歌单详情」的写接口：只验门禁，不带令牌（一行真数据都不碰）──
+// 这条请求一定在 checkAdmin 里就被拒掉，DB 一次都没访问，所以它仍然符合"本脚本无写操作"的约定。
+// 现网要回 503 而不是 401，说明 Pages 后台漏配了 SOURCES_ADMIN_TOKEN —— 那也是要人来看的。
+const editGate = await post("edit", { deviceId: "verify-live-no-such-device", playlistId: "x", deleteSongIndexes: [0] }, "sync-playlists");
+check("action=edit 已上线且无令牌即拒 401（门禁生效，编辑功能不会向陌生人敞开）",
+  editGate.status === 401 && editGate.json?.code === 401,
+  `HTTP ${editGate.status} · ${String(editGate.json?.error || "").slice(0, 120)}`);
+
 console.log(`\n==== 现网只读验证：${pass} 通过 / ${fails.length} 失败 ====`);
 for (const f of fails) console.log(`  ❌ ${f}`);
 process.exit(fails.length ? 1 : 0);

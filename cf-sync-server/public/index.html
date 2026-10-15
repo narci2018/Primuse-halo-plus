@@ -366,6 +366,39 @@
     }
     .search-input:focus { border-color: var(--accent); }
 
+    /* ── 歌单条目编辑器（✏️ 编辑歌单详情）── */
+    .edit-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .edit-song-table th, .edit-song-table td { vertical-align: middle; }
+    .edit-song-table input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      vertical-align: middle;
+    }
+    .edit-song-table tr.is-selected td { background: rgba(59, 130, 246, 0.12); }
+    .edit-song-table tr.is-deleted td { opacity: 0.45; text-decoration: line-through; }
+    .edit-song-table td.cell-changed { color: #e6c068; font-weight: 600; }
+    .patch-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 10px 14px;
+    }
+    .patch-grid .form-group { margin-bottom: 8px; }
+    .patch-box {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      background: #0f1422;
+    }
+
     /* ── 音乐源管理（后台）── */
     .admin-row {
       display: flex;
@@ -556,6 +589,96 @@
       <div class="modal-footer">
         <button class="btn btn-secondary btn-sm" onclick="exportCurrentPlaylistsJSON()">📥 导出歌单 JSON</button>
         <button class="btn btn-secondary btn-sm" onclick="closeModal('detailModal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 1.5 编辑歌单详情模态框（走服务端 action=edit：选中 → 删除 / 修改 → 一次写回）-->
+  <div id="editModal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 980px;">
+      <div class="modal-header">
+        <h3 id="editTitle">编辑歌单详情</h3>
+        <button class="modal-close" onclick="closeModal('editModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-help" style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); padding: 10px; border-radius: 6px; color: #fbbf24;">
+          💡 这里改的是<b>云端备份</b>：删掉的歌、改过的字段，只有设备上点「从云端恢复歌单」才会落到本机；
+          而设备下一次<b>上传备份</b>会用它本地的数据把这里整行覆盖回去。所以流程是：
+          <b>先让设备退出/别再上传 → 这里改 → 设备上从云端恢复</b>。改动要先「暂存」再点右下角「保存到云端」才写入。
+        </div>
+
+        <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end;">
+          <div class="form-group" style="flex: 1 1 320px; margin-bottom: 10px;">
+            <label class="form-label">要编辑的歌单</label>
+            <select id="editPlaylistSelect" class="form-select" onchange="onEditPlaylistChange()"></select>
+          </div>
+          <div class="form-group" style="flex: 1 1 260px; margin-bottom: 10px;">
+            <label class="form-label">管理令牌（写云端必须带，只存本标签页）</label>
+            <input type="password" id="editToken" class="form-input" placeholder="SOURCES_ADMIN_TOKEN">
+          </div>
+        </div>
+
+        <div class="edit-toolbar">
+          <label style="font-size: 13px; color: #cbd5e1; display: flex; align-items: center; gap: 6px;">
+            <input type="checkbox" id="editSelectAll" onchange="toggleAllEditRows(this.checked)">全选这个歌单
+          </label>
+          <button class="btn btn-secondary btn-sm" onclick="toggleAllEditRows(false)">清空选择</button>
+          <button class="btn btn-danger btn-sm" onclick="stageDeleteSelected()">🗑 删除选中（暂存）</button>
+          <button class="btn btn-sm" onclick="openPatchForm()">✏️ 修改选中</button>
+          <button class="btn btn-secondary btn-sm" onclick="undoStaged()">↩ 撤销全部暂存</button>
+          <span id="editSelectionInfo" class="form-help" style="margin: 0;">先勾行：可单选、多选，也可以全选。</span>
+        </div>
+
+        <input type="text" id="editSongSearch" class="search-input" placeholder="🔍 先筛再选：按歌名 / 歌手 / 专辑 / 音源过滤当前歌单" oninput="filterEditSongs()">
+
+        <div id="editPatchBox" class="patch-box" style="display: none;">
+          <div class="form-label" style="margin-bottom: 10px;">
+            修改选中的 <b id="editPatchTargetCount">0</b> 行 —— 留空的项不改
+            <label style="font-weight: 400; color: #cbd5e1; margin-left: 12px;">
+              <input type="checkbox" id="editAllowBlank">留空也算改成空值（曲名除外）
+            </label>
+          </div>
+          <div class="patch-grid">
+            <div class="form-group"><label class="form-label">曲名</label><input type="text" id="pfTitle" class="form-input"></div>
+            <div class="form-group"><label class="form-label">艺术家</label><input type="text" id="pfArtist" class="form-input"></div>
+            <div class="form-group"><label class="form-label">专辑</label><input type="text" id="pfAlbum" class="form-input"></div>
+            <div class="form-group"><label class="form-label">时长（秒）</label><input type="text" id="pfDuration" class="form-input" placeholder="例如 269"></div>
+            <div class="form-group"><label class="form-label">封面 URL</label><input type="text" id="pfCover" class="form-input"></div>
+            <div class="form-group">
+              <label class="form-label">音源类型</label>
+              <select id="pfKind" class="form-select">
+                <option value="">— 不改 —</option>
+                <option value="aggregated">在线线路（聚合源）</option>
+                <option value="server">自建服务器源（道理鱼那类）</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">平台（在线线路）</label>
+              <select id="pfPlatform" class="form-select"><option value="">— 不改 —</option></select>
+            </div>
+            <div class="form-group"><label class="form-label">歌曲 ID（rawID）</label><input type="text" id="pfRawID" class="form-input"></div>
+            <div class="form-group"><label class="form-label">源 ID（服务器源）</label><input type="text" id="pfSourceID" class="form-input"></div>
+            <div class="form-group"><label class="form-label">源名称</label><input type="text" id="pfSourceName" class="form-input"></div>
+          </div>
+          <div class="form-help">
+            改了「平台 / 歌曲 ID / 音源类型」就等于<b>换源</b>：服务端会按客户端认的三种身份键重写
+            <code>id</code>、<code>filePath</code>、<code>sourceId</code>（<code>agg_平台_歌曲ID</code> / <code>/aggregated/平台/歌曲ID.mp3</code> / <code>dly_源ID_歌曲ID</code>），
+            否则客户端拉回去还是按老身份解析，等于白改。
+          </div>
+          <div class="edit-toolbar" style="margin-top: 10px;">
+            <button class="btn btn-sm" onclick="applyPatchToSelected()">✅ 应用到选中行</button>
+            <button class="btn btn-secondary btn-sm" onclick="hidePatchForm()">收起</button>
+          </div>
+        </div>
+
+        <div id="editPendingSummary" class="form-help">还没暂存任何改动。</div>
+        <div id="editSongsContainer" style="max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;">
+          <div class="empty-tip">正在准备…</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('editModal')">取消</button>
+        <button id="btnSaveEdit" class="btn btn-sm" onclick="saveEdit()">💾 保存到云端</button>
       </div>
     </div>
   </div>
@@ -836,6 +959,7 @@
 
               <div class="device-actions">
                 <button class="btn btn-sm" onclick="showDetail('${safeId}')">🔍 查看歌单详情</button>
+                <button class="btn btn-sm" onclick="openEditDialog('${safeId}')" style="background:#7c3aed;">✏️ 编辑歌单详情</button>
                 <button class="btn btn-secondary btn-sm" onclick="openCopyDialog('${safeId}')">📋 复制歌单到...</button>
                 <button class="btn btn-success btn-sm" onclick="openMergeDialog('${safeId}')">🔀 合并歌单到...</button>
                 <button class="btn btn-danger btn-sm" style="margin-left:auto;" onclick="deleteDevice('${safeId}', '${escapeHtml(name)}')">🗑️ 删除</button>
@@ -972,6 +1096,484 @@
       downloadAnchor.click();
       downloadAnchor.remove();
     }
+
+    /* ══════════════ 编辑歌单详情（服务端 action=edit）══════════════
+       只在后台用：勾行 → 暂存"删除/修改" → 一次 POST 写回云端。
+       下面 songIdentityOf() 的解析顺序必须与服务端 functions/api/sync-playlists.js
+       里的 readSongIdentity()、以及两个客户端的反解函数逐条对齐
+       （Win: src/main/sync.js:fromWireSong / iOS: PlaylistSyncService.swift:song(fromWire:)）——
+       两边漂一格的后果是"表格里看着改对了、云端其实改错了身份"。 */
+    const EDIT_PLATFORMS = [
+      ["qq", "QQ 音乐"], ["netease", "网易云音乐"], ["kugou", "酷狗音乐"],
+      ["kuwo", "酷我音乐"], ["migu", "咪咕音乐"], ["bilibili", "哔哩哔哩"], ["custom", "自定义源"],
+    ];
+    let editState = null;
+
+    const editSongsOf = (pl) => (pl && (Array.isArray(pl.songs) ? pl.songs : Array.isArray(pl.tracks) ? pl.tracks : [])) || [];
+    const editCurrentPlaylist = () => (editState ? editState.playlists[editState.plIdx] : null);
+    const editCurrentSongs = () => editSongsOf(editCurrentPlaylist());
+
+    function editSongIdentityOf(song) {
+      const id = String((song && song.id) || "");
+      const path = String((song && song.filePath) || "");
+      let m = id.match(/^dly_(.+?)_(.+)$/);
+      if (m) return { kind: "server", sourceID: m[1], rawID: m[2] };
+      m = id.match(/^agg_([A-Za-z0-9]+)_(.+)$/);
+      if (m) return { kind: "aggregated", platform: m[1].toLowerCase(), rawID: m[2] };
+      m = path.match(/^\/aggregated\/([A-Za-z0-9]+)\/(.+?)\.[A-Za-z0-9]+$/);
+      if (m) return { kind: "aggregated", platform: m[1].toLowerCase(), rawID: m[2] };
+      m = path.match(/^\/server\/([^/]+)\/(.+)$/);
+      if (m) return { kind: "server", sourceID: m[1], rawID: m[2] };
+      const kind = String((song && song.kind) || "").toLowerCase() === "server" ? "server" : "aggregated";
+      return {
+        kind,
+        platform: kind === "aggregated" ? String((song && song.platform) || "custom") : undefined,
+        sourceID: kind === "server" ? String((song && (song.sourceID || song.sourceId)) || "") : undefined,
+        rawID: String((song && song.rawID) || id),
+      };
+    }
+
+    /** 第 i 行"改完会长成这样"的身份：先取云端现状，再叠上暂存的补丁。 */
+    function editStagedIdentity(i) {
+      const base = editSongIdentityOf(editCurrentSongs()[i]);
+      const patch = (editState.patches.get(i) || {});
+      const next = { ...base };
+      if (patch.kind) next.kind = patch.kind;
+      if (patch.platform) next.platform = patch.platform;
+      if (patch.rawID) next.rawID = String(patch.rawID).trim();
+      if (patch.sourceID) next.sourceID = String(patch.sourceID).trim();
+      return { base, next };
+    }
+
+    function editIdentityLabel(ident) {
+      if (ident.kind === "server") return `服务器源 · ${ident.sourceID || "?"} · ${ident.rawID || "?"}`;
+      return `在线线路 · ${ident.platform || "custom"} · ${ident.rawID || "?"}`;
+    }
+
+    /** 身份键的最终落点（服务端就是这么重算的，界面先给个预览，免得保存了才知道）*/
+    function editDerivedIdLabel(ident) {
+      return ident.kind === "server"
+        ? `dly_${ident.sourceID}_${ident.rawID}`
+        : `agg_${ident.platform}_${ident.rawID}`;
+    }
+
+    async function openEditDialog(encodedId) {
+      const deviceId = decodeURIComponent(encodedId);
+      const container = document.getElementById("editSongsContainer");
+      document.getElementById("editTitle").textContent = "正在读取云端歌单…";
+      document.getElementById("editSongSearch").value = "";
+      document.getElementById("editToken").value = getToken();
+      document.getElementById("editPendingSummary").textContent = "还没暂存任何改动。";
+      hidePatchForm();
+      container.innerHTML = '<div class="empty-tip">正在从云端读取歌单与曲目数据…</div>';
+      openModal("editModal");
+
+      try {
+        const res = await fetch(`/api/sync-playlists?deviceId=${encodeURIComponent(deviceId)}`);
+        const json = await res.json();
+        if (json.code !== 0 || !json.data) {
+          container.innerHTML = `<div class="empty-tip" style="color:#ef4444;">${json.error || json.message || "读取失败"}</div>`;
+          return;
+        }
+
+        const d = json.data;
+        const pls = d.playlists || [];
+        const refs = pls.map((p, i) => String(p.id || p.name || i));
+        editState = {
+          deviceId,
+          deviceName: d.deviceName || deviceId,
+          updatedAt: Number(d.updatedAt) || 0,
+          playlists: pls,
+          plIdx: 0,
+          selected: new Set(),
+          patches: new Map(),
+          deleted: new Set(),
+        };
+
+        const select = document.getElementById("editPlaylistSelect");
+        select.innerHTML = "";
+        pls.forEach((p, i) => {
+          const opt = document.createElement("option");
+          opt.value = String(i);
+          opt.textContent = `${p.name || "未命名歌单"}（${editSongsOf(p).length} 首）`;
+          select.appendChild(opt);
+        });
+
+        document.getElementById("editTitle").textContent = `✏️ 编辑 ${editState.deviceName} 的歌单`;
+
+        if (!pls.length) {
+          container.innerHTML = '<div class="empty-tip">这台设备在云端还没有任何歌单可编辑。</div>';
+          select.disabled = true;
+          return;
+        }
+        select.disabled = false;
+        select.value = "0";
+        if (new Set(refs).size !== refs.length) {
+          container.innerHTML = '<div class="empty-tip" style="color:#fbbf24;">⚠️ 这台设备上有同名或同 id 的歌单，服务端只会命中第一个。先复制/合并把名字理顺，再回来编辑。</div>';
+          return;
+        }
+        renderEditTable();
+      } catch (err) {
+        container.innerHTML = `<div class="empty-tip" style="color:#ef4444;">加载失败: ${err.message}</div>`;
+      }
+    }
+
+    function onEditPlaylistChange() {
+      if (!editState) return;
+      const hasStaged = editState.patches.size || editState.deleted.size;
+      if (hasStaged && !confirm("切换歌单会丢掉当前歌单里还没保存的暂存改动，确认切换？")) {
+        document.getElementById("editPlaylistSelect").value = String(editState.plIdx);
+        return;
+      }
+      editState.plIdx = Number(document.getElementById("editPlaylistSelect").value) || 0;
+      editState.selected.clear();
+      editState.patches.clear();
+      editState.deleted.clear();
+      renderEditTable();
+    }
+
+    function renderEditTable() {
+      const container = document.getElementById("editSongsContainer");
+      if (!editState) return;
+      const songs = editCurrentSongs();
+      const pl = editCurrentPlaylist();
+      if (!pl || !(Array.isArray(pl.songs) || Array.isArray(pl.tracks))) {
+        container.innerHTML = '<div class="empty-tip">这首歌单里没有曲目数组（songs/tracks 都不是数组），服务端不敢改写，这里也不提供编辑。</div>';
+        updateEditSummary();
+        return;
+      }
+      if (!songs.length) {
+        container.innerHTML = '<div class="empty-tip">这首歌单已经是空的。要往里加歌请在设备上操作后再上传备份。</div>';
+        updateEditSummary();
+        return;
+      }
+
+      let h = `
+        <table class="song-table edit-song-table">
+          <thead>
+            <tr>
+              <th style="width:34px;"></th>
+              <th style="width:36px;">#</th>
+              <th>歌曲名称</th>
+              <th>艺术家</th>
+              <th>专辑</th>
+              <th style="width:56px;">时长</th>
+              <th style="width:230px;">音源身份（可换源）</th>
+              <th style="width:56px;">标记</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+      songs.forEach((s, i) => {
+        const patch = editState.patches.get(i) || {};
+        const view = { ...s, ...patch };
+        const { base, next } = editStagedIdentity(i);
+        const identityDirty = JSON.stringify(base) !== JSON.stringify(next);
+        const deleted = editState.deleted.has(i);
+        const changedCell = (name, value) =>
+          `<td${patch[name] !== undefined ? ' class="cell-changed"' : ""}>${escapeHtml(value === null || value === undefined || value === "" ? "-" : String(value))}</td>`;
+        const search = [view.title, view.artist, view.album, editIdentityLabel(next)]
+          .map((x) => String(x || "").toLowerCase()).join(" ");
+
+        h += `
+          <tr class="edit-song-row${deleted ? " is-deleted" : ""}${editState.selected.has(i) ? " is-selected" : ""}"
+              data-edit-index="${i}" data-search="${escapeHtml(search)}"
+              onclick="if(event.target.tagName!=='INPUT'){toggleEditRow(${i}, !editState.selected.has(${i}))}">
+            <td><input type="checkbox" ${editState.selected.has(i) ? "checked" : ""} onchange="toggleEditRow(${i}, this.checked)"></td>
+            <td style="color:var(--muted);">${i + 1}</td>
+            ${changedCell("title", view.title || "未知曲目")}
+            ${changedCell("artist", view.artist)}
+            ${changedCell("album", view.album)}
+            ${changedCell("duration", formatDuration(view.duration))}
+            <td${identityDirty ? ' class="cell-changed"' : ""} title="${escapeHtml(editDerivedIdLabel(next))}">
+              ${escapeHtml(editIdentityLabel(next))}${identityDirty ? `<br><span style="font-size:10px;color:var(--muted);">→ ${escapeHtml(editDerivedIdLabel(next))}</span>` : ""}
+            </td>
+            <td>${deleted ? `<button class="btn btn-secondary btn-sm" style="padding:1px 6px;" onclick="event.stopPropagation();restoreRow(${i})">↩</button>` : ""}</td>
+          </tr>`;
+      });
+
+      h += "</tbody></table>";
+      container.innerHTML = h;
+      // 顺序有讲究：applyEditFilter 里会带参数刷新摘要，先它再刷新会被"整单行数"覆盖掉筛选计数。
+      updateEditSummary();
+      applyEditFilter();
+    }
+
+    function toggleEditRow(index, on) {
+      if (!editState) return;
+      if (editState.deleted.has(index)) return;
+      if (on) editState.selected.add(index);
+      else editState.selected.delete(index);
+      const row = document.querySelector(`#editSongsContainer tr[data-edit-index="${index}"]`);
+      if (row) {
+        row.classList.toggle("is-selected", on);
+        const box = row.querySelector('input[type="checkbox"]');
+        if (box && box.checked !== on) box.checked = on;
+      }
+      const all = document.getElementById("editSelectAll");
+      if (all) all.checked = false;
+      updateEditSummary();
+    }
+
+    /** 全选按"当前筛选下可见的行"算：先筛（比如筛 qq）再全选再删，正是换源清理的用法。 */
+    function toggleAllEditRows(on) {
+      if (!editState) return;
+      const rows = document.querySelectorAll("#editSongsContainer tr.edit-song-row");
+      rows.forEach((row) => {
+        // 取消选择要连被筛掉的行一起清，不然"筛一下选一批、换个词又选一批"会越攒越多。
+        if (on && row.style.display === "none") return;
+        const i = Number(row.getAttribute("data-edit-index"));
+        if (editState.deleted.has(i)) return;
+        if (on) editState.selected.add(i);
+        else editState.selected.delete(i);
+      });
+      renderEditTable();
+    }
+
+    function restoreRow(index) {
+      if (!editState) return;
+      editState.deleted.delete(index);
+      renderEditTable();
+    }
+
+    /**
+     * 把选中行标成"待删除"。这里只暂存，云端要到「💾 保存到云端」才动，
+     * 所以删错了就地 ↩ 恢复，或者整批 undoStaged 丢掉，都不用担心手滑。
+     * 同时被暂存过修改的行直接丢掉那份修改：删除赢，留着只会让人以为还要改它。
+     */
+    function stageDeleteSelected() {
+      if (!editState) return;
+      const indexes = [...editState.selected];
+      if (!indexes.length) { alert("先勾选要删的歌（可以用筛选 + 全选批量选）。"); return; }
+      indexes.forEach((i) => {
+        editState.deleted.add(i);
+        editState.patches.delete(i);
+        editState.selected.delete(i);
+      });
+      document.getElementById("editSelectAll").checked = false;
+      clearPatchInputs();
+      hidePatchForm();
+      renderEditTable();
+    }
+
+    function undoStaged() {
+      if (!editState) return;
+      if (!editState.patches.size && !editState.deleted.size) { alert("没有暂存的改动。"); return; }
+      if (!confirm(`确认丢掉全部暂存改动（改 ${editState.patches.size} 行 / 删 ${editState.deleted.size} 行）？云端还没动过。`)) return;
+      editState.patches.clear();
+      editState.deleted.clear();
+      editState.selected.clear();
+      renderEditTable();
+    }
+
+    function filterEditSongs() {
+      applyEditFilter();
+    }
+
+    function applyEditFilter() {
+      const query = (document.getElementById("editSongSearch").value || "").trim().toLowerCase();
+      const rows = document.querySelectorAll("#editSongsContainer tr.edit-song-row");
+      let visible = 0;
+      rows.forEach((row) => {
+        const i = Number(row.getAttribute("data-edit-index"));
+        // 已经暂存过改动/删除的行永远留在眼前：按"qq"筛完改平台，改完的行就不含 qq 了，
+        // 纯按关键词筛会把刚动过的两行直接变没 —— 用户只会以为改动丢了。
+        const staged = editState.patches.has(i) || editState.deleted.has(i);
+        const hit = staged || !query || (row.getAttribute("data-search") || "").includes(query);
+        row.style.display = hit ? "" : "none";
+        if (hit) visible += 1;
+      });
+      if (query) document.getElementById("editSelectAll").checked = false;
+      updateEditSummary(visible, rows.length, query);
+    }
+
+    function updateEditSummary(visible, total, query) {
+      if (!editState) return;
+      const songs = editCurrentSongs();
+      const v = visible === undefined ? songs.length : visible;
+      const t = total === undefined ? songs.length : total;
+      const selected = editState.selected.size;
+      document.getElementById("editSelectionInfo").textContent =
+        `${query ? `筛选后 ${v}/${t} 行，` : `${t} 行，`}已选 ${selected} 行 · 暂存改 ${editState.patches.size} 行 / 删 ${editState.deleted.size} 行`;
+
+      const bits = [];
+      if (editState.deleted.size) bits.push(`删 ${editState.deleted.size} 行`);
+      if (editState.patches.size) bits.push(`改 ${editState.patches.size} 行`);
+      const summary = document.getElementById("editPendingSummary");
+      if (!bits.length) {
+        summary.textContent = "还没暂存任何改动（云端数据没动）。";
+        summary.style.color = "";
+      } else {
+        summary.textContent = `已暂存：${bits.join("、")}，还没写入云端。点右下角「💾 保存到云端」才生效。`;
+        summary.style.color = "#e6c068";
+      }
+      document.getElementById("editPatchTargetCount").textContent = String(selected);
+    }
+
+    function openPatchForm() {
+      if (!editState) return;
+      if (!editState.selected.size) { alert("先勾选要修改的行：可单选、多选，或用「全选」。"); return; }
+      document.getElementById("editPatchBox").style.display = "block";
+      updateEditSummary();
+    }
+
+    function hidePatchForm() {
+      document.getElementById("editPatchBox").style.display = "none";
+      clearPatchInputs();
+    }
+
+    function clearPatchInputs() {
+      ["pfTitle", "pfArtist", "pfAlbum", "pfDuration", "pfCover", "pfRawID", "pfSourceID", "pfSourceName"]
+        .forEach((id) => {
+          const el = document.getElementById(id);
+          el.value = "";
+          el.dataset.touched = "";
+        });
+      document.getElementById("pfKind").value = "";
+      document.getElementById("pfPlatform").value = "";
+    }
+
+    function applyPatchToSelected() {
+      if (!editState) return;
+      const allowBlank = document.getElementById("editAllowBlank").checked;
+      const fields = {};
+      const grabText = (inputId, name, allowEmpty) => {
+        const el = document.getElementById(inputId);
+        const value = el.value.trim();
+        if (value) { fields[name] = value; return; }
+        // 只有"用户真的动过这个框又清空了"才算改成空值 —— 否则十个框里没碰过的那些会被一起清空。
+        if (allowEmpty && allowBlank && el.dataset.touched === "1") fields[name] = "";
+      };
+      // 文本类：勾了「留空也算改成空值」才允许把专辑/艺术家这类清空（曲名除外，服务端会拒）。
+      grabText("pfTitle", "title", false);
+      grabText("pfArtist", "artist", true);
+      grabText("pfAlbum", "album", true);
+      grabText("pfCover", "coverURL", true);
+      grabText("pfSourceName", "sourceName", true);
+      const duration = document.getElementById("pfDuration").value.trim();
+      if (duration) {
+        const n = Number(duration);
+        if (!Number.isFinite(n) || n < 0 || n > 86400) { alert("时长得是 0–86400 之间的秒数。"); return; }
+        fields.duration = n;
+      } else if (allowBlank && document.getElementById("pfDuration").dataset.touched === "1") {
+        fields.duration = "";
+      }
+      const kind = document.getElementById("pfKind").value;
+      if (kind) fields.kind = kind;
+      const platform = document.getElementById("pfPlatform").value;
+      if (platform) fields.platform = platform;
+      const rawID = document.getElementById("pfRawID").value.trim();
+      if (rawID) fields.rawID = rawID;
+      const sourceID = document.getElementById("pfSourceID").value.trim();
+      if (sourceID) fields.sourceID = sourceID;
+
+      if (!Object.keys(fields).length) {
+        alert("没有要改的内容：上面至少填一项（或勾上「留空也算改成空值」再留空，把字段清成空）。");
+        return;
+      }
+
+      const targets = [...editState.selected].filter((i) => !editState.deleted.has(i)).sort((a, b) => a - b);
+      if (!targets.length) { alert("选中的行都被标记成删除了，先把它们恢复。"); return; }
+      if ((fields.kind || fields.platform || fields.rawID || fields.sourceID) && targets.length > 1 && !rawID) {
+        if (!confirm(`你要把 ${targets.length} 行改成同一个平台/歌曲 ID —— 这会让它们变成同一首歌（换源通常是逐首改的）。确认继续？`)) return;
+      }
+
+      targets.forEach((i) => editState.patches.set(i, { ...(editState.patches.get(i) || {}), ...fields }));
+      // 应用完就清空勾选：暂存已经落在那几行了，勾还留着的话，下一步随手点一行去删除
+      // 会把上一批一起删掉（我自己在这儿踩过：想删 1 行，结果删了 4 行）。
+      editState.selected.clear();
+      document.getElementById("editSelectAll").checked = false;
+      clearPatchInputs();
+      hidePatchForm();
+      renderEditTable();
+    }
+
+    async function editApiPost(body) {
+      const typed = (document.getElementById("editToken").value || "").trim();
+      const token = typed || getToken();
+      if (token && typed) sessionStorage.setItem(TOKEN_KEY, typed);
+      const res = await fetch("/api/sync-playlists?action=edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(body),
+      });
+      let json = null;
+      try { json = await res.json(); } catch { /* 非 JSON 按失败处理 */ }
+      if (!json) throw new Error(`服务端没返回 JSON（HTTP ${res.status}）`);
+      const err = new Error(json.error || json.message || `HTTP ${res.status}`);
+      err.code = json.code;
+      err.status = res.status;
+      if (json.code !== 0) throw err;
+      return json.data;
+    }
+
+    async function saveEdit() {
+      if (!editState) return;
+      const st = editState;
+      const pl = editCurrentPlaylist();
+      const playlistId = String((pl && (pl.id || pl.name)) || "");
+      const edits = [...st.patches.entries()]
+        .filter(([i]) => !st.deleted.has(i))
+        .sort((a, b) => a[0] - b[0])
+        .map(([i, fields]) => ({ songIndexes: [i], fields }));
+      const deleteSongIndexes = [...st.deleted].sort((a, b) => a - b);
+
+      if (!edits.length && !deleteSongIndexes.length) { alert("没有暂存的改动，先选行再删除/修改。"); return; }
+      const lines = [];
+      if (deleteSongIndexes.length) lines.push(`删 ${deleteSongIndexes.length} 行`);
+      if (edits.length) lines.push(`改 ${edits.length} 行`);
+      if (!confirm(`确认把「${pl.name || playlistId}」的 ${lines.join("、")} 写入云端？\n（云端这份改动要设备上点「从云端恢复歌单」才落到本机）`)) return;
+
+      const btn = document.getElementById("btnSaveEdit");
+      btn.disabled = true;
+      btn.textContent = "正在写入…";
+      try {
+        const data = await editApiPost({
+          deviceId: st.deviceId,
+          playlistId,
+          expectedUpdatedAt: st.updatedAt,
+          edits,
+          deleteSongIndexes,
+        });
+        alert(`✅ 已写入云端：删 ${data.removedCount} 行、改 ${data.patchedCount} 行；这首歌单现在 ${data.remainingSongCount} 首，设备共 ${data.songCount} 首。`);
+        editState = null;
+        closeModal("editModal");
+        loadDevices();
+        if (document.getElementById("detailModal").classList.contains("active")) {
+          showDetail(encodeURIComponent(st.deviceId));
+        }
+      } catch (e) {
+        if (e.code === 401 || e.status === 401) {
+          alert("❌ 管理令牌缺失或不对：上面「管理令牌」填一次即可（和音源管理用的是同一个令牌）。");
+        } else if (e.code === 409) {
+          alert(`❌ 云端在你编辑期间又被改过（多半是设备刚上传了备份）。\n关掉编辑窗口重新打开，按最新数据再改一次。\n${e.message}`);
+          closeModal("editModal");
+          loadDevices();
+        } else {
+          alert("❌ 保存失败：" + e.message);
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "💾 保存到云端";
+      }
+    }
+
+    // 平台下拉在脚本尾部一次性填好（DOM 静态部分留空，避免中文文案散在两处）
+    (function fillEditPlatformSelect() {
+      const sel = document.getElementById("pfPlatform");
+      EDIT_PLATFORMS.forEach(([value, label]) => {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = `${label}（${value}）`;
+        sel.appendChild(opt);
+      });
+      // "动过又清空"才算改成空值，靠这个标记区分"没碰"和"碰过"。
+      ["pfTitle", "pfArtist", "pfAlbum", "pfDuration", "pfCover", "pfRawID", "pfSourceID", "pfSourceName"]
+        .forEach((id) => {
+          const el = document.getElementById(id);
+          el.addEventListener("input", () => { el.dataset.touched = "1"; });
+        });
+    })();
 
     // 2. 复制歌单流程
     function openCopyDialog(encodedSourceId) {

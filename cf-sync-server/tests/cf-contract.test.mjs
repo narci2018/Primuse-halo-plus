@@ -160,6 +160,35 @@ async function main() {
   const legacyHash = sha1(legacy);
   record("老端点 sync-playlists.js 存在且可读", existsSync(legacy), legacyHash);
 
+  // ── 1.5 后台页面：每个按钮都得有对应函数 ──────────────────────────────
+  // 「编辑歌单详情」上线时，删除按钮的 onclick 写的是 stageDeleteSelected()，
+  // 而那个函数我压根没写过 —— 页面照样能打开、契约测试照样全绿，只有真去点那一下
+  // 才发现是个死按钮。本地没有 DOM，退而求其次按名字对齐兜住这一类。
+  const panelHtml = readFileSync(path.join(ROOT, "public/index.html"), "utf8");
+  const declared = new Set();
+  for (const m of panelHtml.matchAll(/function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)) declared.add(m[1]);
+  for (const m of panelHtml.matchAll(/(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:\(|function)/g)) declared.add(m[1]);
+  const BUILTINS = new Set([
+    "alert", "confirm", "prompt", "if", "for", "while", "switch", "catch", "return", "this", "event",
+    "Number", "String", "Boolean", "Array", "Object", "JSON", "Date", "Math", "parseInt", "parseFloat",
+    "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent", "setTimeout", "setInterval",
+    "requestAnimationFrame", "fetch", "localStorage", "sessionStorage", "navigator", "console", "window", "document",
+  ]);
+  const called = new Set();
+  for (const attr of panelHtml.matchAll(/on(?:click|change|input|submit)="([^"]*)"/g)) {
+    for (const id of attr[1].matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)) {
+      const before = attr[1][id.index - 1];
+      if (before === "." || before === "function") continue;
+      called.add(id[1]);
+    }
+  }
+  const undefinedHandlers = [...called].filter((n) => !declared.has(n) && !BUILTINS.has(n));
+  record(
+    "后台页面里 onclick/onchange/oninput 调到的函数都有定义（死按钮这类）",
+    undefinedHandlers.length === 0,
+    `扫到 ${called.size} 个调用，未定义：${undefinedHandlers.join(", ") || "无"}`
+  );
+
   // Windows 上 npx 是 .cmd，必须走 shell；PORT 是上面 Number() 过的，没有注入面。
   // 本地 D1 每次清空：断言里有"seed 恰好 9 条""删除内置线路"这类状态相关项，
   // 留状态会让第二次运行必然变红——那是测试的问题，不是被测代码的问题。
@@ -230,6 +259,132 @@ async function main() {
 
     const deleted = await req(`/api/sync-playlists?deviceId=${devId}`, { method: "DELETE" });
     record("老端点 DELETE 设备仍可用", deleted.json?.code === 0, JSON.stringify(deleted.json?.data));
+
+    // ── 2.5 action=edit：后台「✏️ 编辑歌单详情」（多选/全选 → 删除、修改）──────
+    // 种子用的歌单形状必须是**客户端真会上来的那三种**：身份只在 id / filePath 里，
+    // 没有裸 platform/rawID 字段。用例要是自己造一个"带 platform 字段"的歌单，
+    // 就等于测了一份线上不存在的形状。
+    const editDev = "CF-TEST-DEVICE-EDIT";
+    const editSeed = [
+      {
+        id: "ep1",
+        name: "编辑用例单",
+        createdAt: 1,
+        updatedAt: 2,
+        songs: [
+          { id: "agg_qq_1001", title: "老歌一", artist: "歌手甲", album: "专辑甲", duration: 200, filePath: "/aggregated/qq/1001.mp3", sourceId: "system-aggregated-music" },
+          { id: "agg_qq_1002", title: "老歌二", artist: "歌手乙", album: "专辑乙", duration: 240, filePath: "/aggregated/qq/1002.mp3", sourceId: "system-aggregated-music" },
+          { id: "dly_src1_9001", title: "服务器歌", artist: "歌手丙", album: "专辑丙", duration: 180, filePath: "/server/src1/9001", sourceId: "src1" },
+        ],
+      },
+      { id: "ep2", name: "另一单", createdAt: 1, updatedAt: 2, songs: [{ id: "agg_netease_5", title: "别碰我", artist: "歌手丁" }] },
+    ];
+    const EDIT_POST = (body, token = ADMIN) =>
+      req("/api/sync-playlists?action=edit", { method: "POST", body, token: token === null ? undefined : token });
+    const playlistOf = (data, ref) => (data?.playlists || []).find((p) => p.id === ref || p.name === ref);
+
+    const seedEdit = await req("/api/sync-playlists", { method: "POST", body: { deviceId: editDev, deviceName: "编辑用例机", platform: "Windows", playlists: editSeed } });
+    record("编辑用例：种子歌单先备份上去（2 单 / 4 首）", seedEdit.json?.code === 0 && seedEdit.json.data.playlistCount === 2 && seedEdit.json.data.songCount === 4, JSON.stringify(seedEdit.json?.data || seedEdit.json?.error));
+
+    const editNoToken = await EDIT_POST({ deviceId: editDev, playlistId: "ep1", deleteSongIndexes: [0] }, null);
+    record("编辑接口无令牌被拒（401：改的是用户真数据，和音源写接口同一道门禁）", editNoToken.status === 401 && editNoToken.json?.code === 401, JSON.stringify(editNoToken.json?.error || editNoToken.status));
+
+    const afterReject = await req(`/api/sync-playlists?deviceId=${editDev}`);
+    record("被拒的编辑请求云端一行没动（还是 4 首）", afterReject.json?.data?.songCount === 4 && (playlistOf(afterReject.json?.data, "ep1")?.songs || []).length === 3, JSON.stringify(afterReject.json?.data?.songCount));
+
+    const editEmpty = await EDIT_POST({ deviceId: editDev, playlistId: "ep1" });
+    record("没给 edits 也没给删除 → 400（不许空提交把 updated_at 刷掉）", editEmpty.status === 400 && /至少/.test(String(editEmpty.json?.error || "")), String(editEmpty.json?.error));
+
+    const seedUpdatedAt = afterReject.json?.data?.updatedAt;
+    const patched = await EDIT_POST({
+      deviceId: editDev,
+      playlistId: "ep1",
+      expectedUpdatedAt: seedUpdatedAt,
+      edits: [
+        { songIndexes: [0, 1], fields: { platform: "netease", artist: "改过的歌手" } },
+        { songKeys: ["id:dly_src1_9001"], fields: { title: "服务器歌改名" } },
+      ],
+    });
+    record("批量修改 + 按键定位的修改一次提交成功", patched.json?.code === 0 && patched.json.data.patchedCount === 3, JSON.stringify(patched.json?.data || patched.json?.error));
+
+    const afterPatch = await req(`/api/sync-playlists?deviceId=${editDev}`);
+    const ep1 = playlistOf(afterPatch.json?.data, "ep1");
+    const ep2 = playlistOf(afterPatch.json?.data, "ep2");
+    record("换源后重算了客户端认的 id（agg_平台_歌曲ID）", ep1?.songs?.[0]?.id === "agg_netease_1001" && ep1?.songs?.[1]?.id === "agg_netease_1002", JSON.stringify((ep1?.songs || []).map((s) => s.id)));
+    record("换源后 filePath 与 sourceId 一起改对（客户端靠这两条解析直链）", ep1?.songs?.[0]?.filePath === "/aggregated/netease/1001.mp3" && ep1?.songs?.[0]?.sourceId === "system-aggregated-music", JSON.stringify(ep1?.songs?.[0]?.filePath));
+    record("批量改把艺术家两行都改到了", ep1?.songs?.[0]?.artist === "改过的歌手" && ep1?.songs?.[1]?.artist === "改过的歌手", JSON.stringify((ep1?.songs || []).map((s) => s.artist)));
+    record("按 songKeys 定位的行只改了曲名，身份没被误动", ep1?.songs?.[2]?.title === "服务器歌改名" && ep1?.songs?.[2]?.id === "dly_src1_9001" && ep1?.songs?.[2]?.filePath === "/server/src1/9001", JSON.stringify(ep1?.songs?.[2]));
+    record("编辑只命中指定歌单，另一单一个字节没动", ep2?.songs?.[0]?.title === "别碰我" && ep2?.songs?.length === 1, JSON.stringify(ep2?.songs));
+    record("改完设备总点数没漏（2 单 / 4 首，歌单 updatedAt 与行 updated_at 都推进了）",
+      afterPatch.json?.data?.playlistCount === 2 && afterPatch.json?.data?.songCount === 4
+        && Number(ep1?.updatedAt) > 2 && Number(afterPatch.json?.data?.updatedAt) > seedUpdatedAt,
+      JSON.stringify({ pl: ep1?.updatedAt, row: afterPatch.json?.data?.updatedAt }));
+
+    const conflict = await EDIT_POST({ deviceId: editDev, playlistId: "ep1", expectedUpdatedAt: seedUpdatedAt, deleteSongIndexes: [0] });
+    record("拿旧的 updated_at 提交 → 409（设备中途又上传过备份时不覆盖它）", conflict.status === 409 && conflict.json?.code === 409, JSON.stringify(conflict.json?.data || conflict.json?.error));
+
+    const fresh = await req(`/api/sync-playlists?deviceId=${editDev}`);
+    const badIndex = await EDIT_POST({ deviceId: editDev, playlistId: "ep1", expectedUpdatedAt: fresh.json?.data?.updatedAt, deleteSongIndexes: [99] });
+    record("下标越界报 400 且带行数（防止删错行还不吭声）", badIndex.status === 400 && /超出范围/.test(String(badIndex.json?.error || "")), String(badIndex.json?.error));
+
+    const badField = await EDIT_POST({ deviceId: editDev, playlistId: "ep1", expectedUpdatedAt: fresh.json?.data?.updatedAt, edits: [{ songIndexes: [0], fields: { id: "hacked" } }] });
+    record("直接改 id / filePath 这类派生字段被拒（身份只能由平台+歌曲ID 推导）", badField.status === 400 && /不支持修改的字段/.test(String(badField.json?.error || "")), String(badField.json?.error));
+
+    const badPlatform = await EDIT_POST({ deviceId: editDev, playlistId: "ep1", expectedUpdatedAt: fresh.json?.data?.updatedAt, edits: [{ songIndexes: [0], fields: { platform: "spam" } }] });
+    record("平台不在客户端词表里 → 400 并把可用值报出来", badPlatform.status === 400 && /不认识/.test(String(badPlatform.json?.error || "")) && /bilibili/.test(String(badPlatform.json?.error || "")), String(badPlatform.json?.error));
+
+    const halfSwitch = await EDIT_POST({ deviceId: editDev, playlistId: "ep1", expectedUpdatedAt: fresh.json?.data?.updatedAt, edits: [{ songIndexes: [0], fields: { kind: "server" } }] });
+    record("只切「服务器源」却不给源 ID → 400（切一半会写出客户端认不出的身份）", halfSwitch.status === 400 && /源 ID/.test(String(halfSwitch.json?.error || "")), String(halfSwitch.json?.error));
+
+    const noSuchPl = await EDIT_POST({ deviceId: editDev, playlistId: "根本没有这个单", expectedUpdatedAt: fresh.json?.data?.updatedAt, deleteSongIndexes: [0] });
+    record("歌单不存在 → 404（按 id 或歌单名都找不到就算没有）", noSuchPl.status === 404 && noSuchPl.json?.code === 404, String(noSuchPl.json?.error));
+
+    const switched = await EDIT_POST({
+      deviceId: editDev,
+      playlistId: "ep1",
+      expectedUpdatedAt: fresh.json?.data?.updatedAt,
+      edits: [{ songIndexes: [0], fields: { kind: "server", sourceID: "src2", rawID: "88" } }],
+    });
+    const afterSwitch = await req(`/api/sync-playlists?deviceId=${editDev}`);
+    const switchedSong = playlistOf(afterSwitch.json?.data, "ep1")?.songs?.[0];
+    record("在线线路改成自建服务器源：id/filePath/sourceId 全换成 dly_ 那套，互斥的旧 platform 删掉",
+      switched.json?.code === 0 && switchedSong?.id === "dly_src2_88" && switchedSong?.filePath === "/server/src2/88"
+        && switchedSong?.sourceId === "src2" && switchedSong?.platform === undefined,
+      JSON.stringify(switchedSong));
+
+    const deletedRows = await EDIT_POST({ deviceId: editDev, playlistId: "ep1", deleteSongIndexes: [1, 2] });
+    const afterDelete = await req(`/api/sync-playlists?deviceId=${editDev}`);
+    const ep1AfterDel = playlistOf(afterDelete.json?.data, "ep1");
+    record("全选式批量删除（下标按打开时的顺序）删对了行",
+      deletedRows.json?.code === 0 && deletedRows.json.data.removedCount === 2
+        && (ep1AfterDel?.songs || []).length === 1 && ep1AfterDel.songs[0].id === "dly_src2_88",
+      JSON.stringify({ removed: deletedRows.json?.data?.removedCount, left: (ep1AfterDel?.songs || []).map((s) => s.id) }));
+    record("删完重算设备歌曲总数（ep1 剩 1 首 + ep2 那 1 首 = 2，不是种子时的 4）", afterDelete.json?.data?.songCount === 2, JSON.stringify(afterDelete.json?.data?.songCount));
+
+    // tracks 兜底：老客户端上传过的形状用 tracks 存曲目，写回必须还写回 tracks，
+    // 不能新起一个 songs 键 —— 那样 GET 读 songs 优先，两份数据就分家了。
+    const tracksDev = "CF-TEST-DEVICE-TRACKS";
+    await req("/api/sync-playlists", { method: "POST", body: { deviceId: tracksDev, deviceName: "tracks 形状机", platform: "Windows", playlists: [{ id: "tp1", name: "老形状", tracks: [{ id: "agg_kuwo_7", title: "老形状歌" }] }] } });
+    const tracksEdit = await EDIT_POST({ deviceId: tracksDev, playlistId: "tp1", edits: [{ songIndexes: [0], fields: { platform: "netease" } }] });
+    const tracksBack = await req(`/api/sync-playlists?deviceId=${tracksDev}`);
+    const tp1 = playlistOf(tracksBack.json?.data, "tp1");
+    record("tracks 形状的歌单写回还写 tracks（不新增 songs 键造成两份数据）",
+      tracksEdit.json?.code === 0 && Array.isArray(tp1?.tracks) && tp1.songs === undefined && tp1.tracks[0].id === "agg_netease_7",
+      JSON.stringify({ hasSongs: Array.isArray(tp1?.songs), first: tp1?.tracks?.[0]?.id }));
+
+    // 只有 filePath、id 是历史脏值的行：改平台时按 filePath 反解身份，顺手把 id 修对。
+    const legacyDev = "CF-TEST-DEVICE-LEGACYID";
+    await req("/api/sync-playlists", { method: "POST", body: { deviceId: legacyDev, deviceName: "脏 id 机", platform: "Windows", playlists: [{ id: "lp1", name: "脏 id 单", songs: [{ id: "random-uuid-ish", title: "认不出身份的", filePath: "/aggregated/kuwo/777.mp3" }] }] } });
+    const legacyEdit = await EDIT_POST({ deviceId: legacyDev, playlistId: "lp1", edits: [{ songIndexes: [0], fields: { platform: "migu" } }] });
+    const legacyBack = await req(`/api/sync-playlists?deviceId=${legacyDev}`);
+    const legacySong = playlistOf(legacyBack.json?.data, "lp1")?.songs?.[0];
+    record("id 是脏值的行按 filePath 反解出平台+歌曲ID，改平台时顺手把 id 修成 agg_ 形状",
+      legacyEdit.json?.code === 0 && legacySong?.id === "agg_migu_777" && legacySong?.filePath === "/aggregated/migu/777.mp3",
+      JSON.stringify(legacySong));
+
+    await req(`/api/sync-playlists?deviceId=${editDev}`, { method: "DELETE" });
+    await req(`/api/sync-playlists?deviceId=${tracksDev}`, { method: "DELETE" });
+    await req(`/api/sync-playlists?deviceId=${legacyDev}`, { method: "DELETE" });
 
     // ── 3. manifest 契约（新）────────────────────────────────────────────
     const man = await req("/api/music-sources");

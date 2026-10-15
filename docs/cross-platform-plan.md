@@ -2550,3 +2550,152 @@ MacMiniaturizedLyrics.swift:234:22: error: type 'NSWindow' has no member 'didOcc
 要装 Mac 版的人请拿 1.9.24，1.9.23 那条 Release 上永远不会有 dmg。
 
 
+
+
+## 32. CF 后台多了「编辑歌单详情」：一次只动服务端的改动，和三个只有真点一遍才现形的 bug（2026-10-16）
+
+用户提的是后台功能，不是 App 功能，原话说得很直白：
+
+> **CF功能优化，歌单维护中"查看歌单详情"按钮旁边增加一个"编辑歌单详情"，可以单选也可以多选甚至全选歌曲，
+> 可以删除，可以修改。**
+
+我第一轮理解偏了（去查 App），他一句话纠回来：**CF是服务端，跟app没关系，是歌单维护的功能，你忘记了吗？**
+所以本轮 `primuse/`、`primuse-win/` 一个字节都没动，版本号仍是 v1.9.24 / build 86，
+全部改动落在 `cf-sync-server/`：`functions/api/sync-playlists.js`（+343 行）、`public/index.html`（+190 行左右）、
+`tests/cf-contract.test.mjs`（+125 行）、`tests/edit-mutations.mjs`（新增）、`scripts/verify-live.mjs`（+1 项现网门禁检查）。
+
+### 32.1 "修改一首歌"在这套系统里其实是重写三个字符串
+
+云端的一条曲目只有七个字段：`id / title / artist / album / duration / filePath / sourceId`。
+**音源身份不在任何结构化字段里，它藏在字符串里**，而两个客户端是拿正则去反解这些字符串的：
+
+- Windows：`primuse-win/src/main/sync.js:fromWireSong`
+- iOS / macOS：`primuse/Primuse/Services/Playlist/PlaylistSyncService.swift:song(fromWire:)`
+
+它们认的四条形态（顺序也不能改，先 id 后路径）：`dly_{源ID}_{歌曲ID}`、`agg_{平台}_{歌曲ID}`、
+`/aggregated/{平台}/{歌曲ID}.mp3`、`/server/{源ID}/{歌曲ID}`。这条规矩此前存在**四处**：Win、Swift、
+服务端的 `readSongIdentity`、后台页面上的 `editSongIdentityOf`。
+
+结论很硬：后台若只改 `sourceId` 或只改 `platform`，客户端拉回去仍按老 `id` 前缀解析，
+屏幕上"改好了"，播放还是死的 —— 这正是 §29 那批 QQ 死条目难缠的根因。所以 `action=edit` 改到
+`kind / platform / rawID / sourceID` 任一项时，服务端**把 id、filePath、sourceId 三个一起重算**，
+输出与两个客户端的正则严格对齐；改不动的部分（老端点 backup / copy / merge / delete 的形状）一个字节没变，
+`tests/cf-contract.test.mjs` 开头那条 sha1 记录仍在钉它。
+
+### 32.2 互斥的裸字段必须删掉，不然同一行会被读成两种意思
+
+换源工具（`scripts/repoint-dead-songs.mjs`）里 `platformOf` 是**先读 `s.platform`** 再回落别的来源的；
+后台编辑又会写 `kind`。第一版把在线线路改成自建服务器源之后，行里留着上一世的 `platform:"netease"`，
+于是同一行在换源工具眼里是"在线线路"、在后台眼里是"服务器源"。修法在 `writeSongIdentity`：
+
+```js
+if (ident.kind === "server") { delete song.platform; ... }   // 服务器源不留 platform
+delete song.sourceID;                                        // 在线线路不留 sourceID
+```
+
+契约测试里对应一条正向断言：切成服务器源后 `switchedSong?.platform === undefined`。
+
+### 32.3 `action=edit` 的对外契约
+
+写在老端点的 `onRequest` 里（`action === "edit"` 分支），与音源写接口同等门禁：`checkAdmin()`，
+没配令牌 503 拒、令牌错 401 拒，**fail-closed**。请求体：
+
+```
+{ deviceId, playlistId 或 playlistName, expectedUpdatedAt,
+  edits: [ { songIndexes:[..] 或 songKeys:[..], fields:{...} } ],
+  deleteSongIndexes: [..], deleteSongKeys: [..] }
+```
+
+服务端逐条守的门：`edits` 与两个删除列表全空 → 400；批量上限 500 改 / 2000 删；
+设备或歌单找不到 → 404；下标越界 → 400 且**把行数和合法区间报出来**（"超出范围（这首歌单现在 3 行，合法下标 0–2）"）；
+白名单外的字段（比如有人手工构造 `fields:{id:"hacked"}`）→ 400「不支持修改的字段」；
+平台不在词表 → 400 并把词表打出来（qq/netease/kugou/kuwo/migu/bilibili/custom）；
+改成服务器源却不给 `sourceID` → 400，禁止半切。
+
+两处与"别把用户数据搞丢"直接相关的实现细节：
+
+1. **写回用哪一键，就用哪一键读出来的那键**（`songs` 优先，回落 `tracks`）。固定写 `songs`
+   会让老形状的 `tracks` 歌单变成 `{songs:[新], tracks:[旧]}` 两份数据，客户端 GET 只读一份，
+   另一份永世不见天日。
+2. **乐观并发**：`expectedUpdatedAt` 与行里的 `updated_at` 不一致 → 409。因为设备端随时可能
+   整行覆盖式上传备份；后台开着一页旧数据、隔十分钟点保存，不该把这台设备刚上传的新备份盖掉。
+
+提交完顺手把 `playlist_count / song_count / updated_at / playlists_json` 一起更新，
+返回值给 `removedCount / patchedCount / remainingSongCount` 等，让页面能说清"动了多少"。
+
+### 32.4 后台的两段式编辑：暂存在页面上，一次 POST 才落云端
+
+「🔍 查看歌单详情」旁边加了紫色的「✏️ 编辑歌单详情」。弹窗里所有操作**只暂存**，
+金色单元格标出改过的行、删除行整行划线并给 ↩ 恢复，右下角「💾 保存到云端」才发一个 POST。
+选择支持三种口径：勾一行、勾多行、`全选这个歌单`（勾选框），也可以先在筛选框里打个 `qq`
+再全选 —— **筛选命中音源身份文本**，所以"筛 qq → 全选 → 删除/换源"这条olive那类清理路径是现成的。
+顶部那条琥珀色提示把最要紧的坑写在界面上：改的是云端备份，设备上如果还留着旧存档，
+得先让设备退出 → 这里改 → 设备上"从云端恢复"，否则会被本机存档盖回来。
+
+修改框十项：曲名 / 艺术家 / 专辑 / 时长 / 封面 / 音源类型 / 平台 / 歌曲 ID / 源 ID / 源名称，
+留空即不改；勾了「留空也算改成空值」时，只有**用户真的动过又清空**的那个框才算改成空
+（靠 `dataset.touched` 记），否则十个没碰过的框会被一起清成空。
+批量把多行改成同一个平台/歌曲 ID 会二次确认，因为那等于把 N 行捏成同一首歌。
+
+### 32.5 三个只有真点一遍才现形的 bug
+
+按记忆里那条"断言渲染结果，不是断言属性"，这轮没有停在契约测试上：本地另起
+`wrangler pages dev`（独立 `--persist-to .cf-ui`，绝不碰线上 `halo-music-db`），种一台
+`UI-TEST-DEVICE`（两条歌单，一条 `songs` 形状含 qq/netease/自建服务器源，一条故意 `tracks` 形状），
+再用 CDP 真点。三处都是点出来的：
+
+1. **死按钮**：「🗑 删除选中（暂存）」的 `onclick="stageDeleteSelected()"` 我写了，函数**压根没实现**。
+   页面照样打开、契约测试照样全绿，只有点它的人才知道是死的 —— 控制台一句 ReferenceError。补齐实现后，
+   把这条做成静态看守（32.6）。
+2. **改完音源，刚改的行当场消失**：按 `qq` 筛出两行、全选、把平台改成 netease —— 应用后筛选条件
+   还在，这两行的身份文本里已经没有 `qq` 了，`applyEditFilter` 把它们判成不匹配，屏幕上一片空，
+   而摘要写着"已暂存：改 2 行"。看着就像改动丢了。修法是让**已暂存的行永不被筛选藏起来**
+   （`staged || 关键词命中`）。
+3. **想删 1 行、结果删了 4 行**：`applyPatchToSelected` 之后勾选状态不清，我（以及任何顺着
+   "先改一批、再点一行删"直觉走的人）点下一行去删除时，上一批的勾选还在，`stageDeleteSelected`
+   把四行全标了删除，而且删除会把那些行的暂存修改一并抹掉。现在应用修改后即清空勾选并收起表单。
+
+这三条都补了渲染级证据：`getComputedStyle` 的 `display`/`text-decoration-line`、行的 `is-selected`
+/`is-deleted` 类、金色单元格数量、`elementFromPoint` 命中 `editModal`（弹层在最上层），
+保存后再 `fetch` 回读云端 —— `agg_qq_5001/5002` 真的变成 `agg_netease_5001/5002`（含 `filePath`、
+`sourceId`），第 3 行曲名改成"晴天（改过）"，第 4 行那首服务器源歌曲被删、`song_count` 从 5 落到 4，
+`tracks` 形状那条歌单改平台后**仍然只在 `tracks` 里**（`hasSongs:false`）。
+唯一没做到的：本机内嵌浏览器拿不到可见 surface，`take_screenshot` 失败，所以视觉结论来自
+computed style + 几何 + 点击流 + 云端回读，不来自像素图。
+
+### 32.6 看守：18 条契约 + 5 个变异 + 1 条静态死按钮检查
+
+- `tests/cf-contract.test.mjs` 新增「2.5 action=edit」段，18 条断言覆盖：无令牌 401 **且云端未变**、
+  空提交 400、按下标批量改、按去重键改、换源后重算 `id`、别的歌单逐字节不动、计数与 `updatedAt` 前进、
+  过期 `expectedUpdatedAt` → 409、下标越界 400 带行数、白名单外字段 400、非法平台 400 带词表、
+  半切服务器源 400、歌单不存在 404、切成服务器源后 `platform` 被删、多行删除后剩下的正是该留的、
+  `tracks` 形状仍写 `tracks`、脏 uuid 型 id 从 `filePath` 反解修复。全套 **101 项 0 失败**。
+- `tests/edit-mutations.mjs`（`npm run test:edit:mutate`）把 5 个"写坏了还全绿"的假设逐条注入：
+  必填选中项的判定、换源后 `id` 重算、409 那个 `if`、songsKey 恒写 `songs`、去掉 `delete song.platform`。
+  结果 `5 个变异都被抓住`，还原逐字节一致、还原后看守全绿。
+- 契约测试开头加了一条静态看守：扫 `public/index.html` 里所有 `onclick/onchange/oninput` 调用的函数名，
+  断言都在页面脚本里有定义（跳过 `alert`/`Number` 这类内建与 `x.y()` 形式）。反向验证过：
+  把 `stageDeleteSelected` 的定义改名，这条立刻变 `FAIL | ... 未定义：stageDeleteSelected`。
+- `scripts/verify-live.mjs` 加第 6 段：现网对 `action=edit` 发一个假设备的写请求，**必须 401**，
+  这样"编辑接口上线了但门禁没生效"会被现网检查抓到；整个脚本仍然只读，不往用户数据里写任何东西。
+
+### 32.7 两件流程上的自我纠偏
+
+1. **只改签名不改判据**：`resolveRows` 加 `required` 参数时，我改了函数签名和调用点，却没把
+   `required` 接进那句 `if (!hit.size) throw`，于是"只改不删"的提交照样报"没有选中任何歌曲" ——
+   连着两轮跑出同样 12 条红。中途还有一次 Edit 报告成功但文件里那行根本没变，从那以后凡是
+   "必须改变行为"的编辑，改完都重新 grep 那一行确认落地。
+2. **`node --check` 说 OK 不等于能跑**：测试文件里 `fields: { id: "hacked" }] }` 这种花括号/方括号
+   写反，`node --check tests/cf-contract.test.mjs` 回的是 OK，真正跑起来才在模块加载期报
+   SyntaxError（后台任务那两次"失败"连断言都没执行到）。此后以真跑为准。
+
+### 32.8 落地状态与仍然留给用户的事
+
+已 `wrangler pages deploy`（deployment `8b1892db`），`verify:live` **19 通过 / 0 失败**（含新的 401 门禁项），
+`check:live` 退出码 0（13 条源真能出声、0 条被判不可用、4 条仍是 migu 样本池那类观测盲区，与本轮无关）。
+iPhone / Windows / macOS 三个客户端零改动，老端点响应形状未变。
+
+olive 那批 QQ 条目现在有了图形化出口：后台打开 olive 的设备 → ✏️ 编辑歌单详情 → 筛 `qq` → 逐条换源或直接
+全选删除 → 保存。§29 那个只在命令行里做的迁移，日常可以手点完成；命令行工具仍保持默认 dry-run、
+不接 CI、不进 npm scripts。待用户拍的仍是那 16 条到底删不删，以及 §55 本机存档那一轮补做（需要他先退出 Primuse）。
+

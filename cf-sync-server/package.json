@@ -8,6 +8,7 @@
     "dev": "wrangler pages dev public",
     "test:match": "node tests/song-match.test.mjs",
     "test:match:mutate": "node tests/song-match.mutations.mjs",
+    "test:edit:mutate": "node tests/edit-mutations.mjs",
     "test": "node tests/song-match.test.mjs && node tests/cf-contract.test.mjs",
     "test:offline": "node tests/song-match.test.mjs && node tests/cf-contract.test.mjs --no-net",
     "test:runner": "node tests/runner-e2e.mjs",
