@@ -935,10 +935,28 @@ record('这条是独立的一条，不是把桌面歌词那块多行面板拿来
     && !SWIFT_MAC_LYRIC.includes('DesktopLyricsView'),
   `视图体量=${macViewBlock.length} 字符`);
 
-record('判显隐只有一处：渲染侧只交数据（Windows 不许建窗口、macOS 视图不许 orderFront/orderOut）',
+record('判显隐只有一处：显示与隐藏一律由"主进程/控制器"决定（Windows 渲染侧不许建窗口，macOS 视图不许 orderFront/orderOut）',
   !/new BrowserWindow/.test(WIN_STRIP_VIEW) && !/shouldShow/.test(WIN_STRIP_VIEW)
     && !/orderFront|orderOut/.test(macViewBlock)
-    && macViewBlock.includes('onPush(') && WIN_APP.includes('api.taskbarLyric.push('), '');
+    && WIN_APP.includes('api.taskbarLyric.push('), '');
+
+// 这一条是 v1.9.23 那条"最小化后根本没有歌词条"的根因看守。
+// 旧写法：面板只在"有词可推"时才创建，而推词的 SwiftUI 视图只活在那个面板里 ——
+// 面板不建 → 视图不存在 → 一句词都推不过来 → 第五个条件永远为假 → 面板永远不建。
+// Windows 那边没这个死锁，因为它那条 BrowserWindow 是启动就建好、只 hide 不 close。
+// 所以断言"词与播放状态是控制器自己观察来的"，并且视图里既不许取词也不许建窗口。
+// 一律先 stripLineComments：这些名字在注释里也出现过，拿注释当证据的话，
+// 把 `withObservationTracking` 那行删掉看守照样绿（第一版就是这么漏过去的）。
+const macCtrlBlock = stripLineComments(braceBlock(SWIFT_MAC_LYRIC, SWIFT_MAC_LYRIC.indexOf('final class MacMiniaturizedLyricsController')));
+const macViewCode = stripLineComments(macViewBlock);
+record('macOS 的歌词条不依赖"面板先存在"：控制器自己观察播放器并自己取词（否则死锁，真机上一条都不露）',
+  macCtrlBlock.includes('withObservationTracking')
+    && macCtrlBlock.includes('player.currentTime')
+    && macCtrlBlock.includes('LyricsLoader.load')
+    && macCtrlBlock.includes('func syncPayload()')
+    && !macViewCode.includes('LyricsLoader')
+    && !macViewCode.includes('.task('),
+  `控制器含观察=${macCtrlBlock.includes('withObservationTracking')}，视图仍自己取词=${macViewCode.includes('LyricsLoader')}`);
 
 // 本机没有 Swift 工具链，名字拼错要等 CI 跑 15 分钟才红（v1.9.23 就这么死过一次：
 // `NSWindow.didCloseNotification` / `didOcclusionStateNotification` 都不存在）。
