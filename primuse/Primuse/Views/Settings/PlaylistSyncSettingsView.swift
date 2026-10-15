@@ -204,12 +204,25 @@ struct PlaylistSyncSettingsView: View {
             do {
                 let res = try await PlaylistSyncService.shared.restore(serverURL: serverURL, library: library)
                 isProcessing = false
-                feedbackAlertTitle = "恢复成功"
-                feedbackAlertMessage = "已从云端拉取并同步 \(res.playlistCount) 个歌单（共 \(res.songCount) 首歌曲）到本地！"
+                // 报的是**本机落下多少**，不是云端有多少。以前这里直接念服务端计数，
+                // 于是出现过"已同步 237 首"而屏幕上一个都没有。
+                feedbackAlertTitle = res.filledPlaylists > 0 ? "拉取完成" : "云端没有可落地的歌单"
+                var lines = [
+                    "云端：\(res.serverPlaylistCount) 个歌单 / \(res.serverSongCount) 首",
+                    "本机：\(res.filledPlaylists) 个歌单已有内容，本轮新入单 \(res.addedSongs) 首",
+                    "对账：本机原本就有 \(res.matchedSongs) 首，新落成在线曲目 \(res.materializedSongs) 首",
+                ]
+                if res.skippedSongs > 0 {
+                    lines.append("认不出形状、又没标题没身份，没能落地：\(res.skippedSongs) 首")
+                }
+                if res.deviceName != nil {
+                    lines.append("来源设备：\(res.deviceName ?? "")")
+                }
+                feedbackAlertMessage = lines.joined(separator: "\n")
                 showingFeedbackAlert = true
             } catch {
                 isProcessing = false
-                feedbackAlertTitle = "恢复失败"
+                feedbackAlertTitle = "拉取失败"
                 feedbackAlertMessage = error.localizedDescription
                 showingFeedbackAlert = true
             }

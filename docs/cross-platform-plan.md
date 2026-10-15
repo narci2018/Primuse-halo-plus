@@ -2128,7 +2128,74 @@ drop-duplicate 2  难念的经 / 沿途有你 —— 同歌单排在后面的那
 在本机模式里也走一遍（本机形状靠 `platform:rawID` 认，和云端同源）。
 `map.dedupe` 这次是空的（三道闸都在去重兜底之前就把重复拦住了），字段留着是给以后写坏时留痕的。
 
+### 29.8 Mac 上「从云端恢复歌单」拉回 0 首：restore 只肯认本机已有的歌（v1.9.21 / build 83）
 
+用户 2026-10-15 的截图：Mac 版资料库写着 **6 个歌单**，可每一格都是 0 —— 我喜欢的 0 首、
+歌曲 0 首、目录 0 首，只有"歌单"那一格是 6。他同时说：这台设备（`MacBook Air (3)` /
+`F4EEAD97-8BD7-54CF-879F-F3F67D8BE5F5`）在云上明明有 237 首，"我复制了 237 首歌，不是 0"。
 
+只读 GET 复核，他说的是对的，一个字都不用争：
 
+```
+deviceId F4EEAD97-… name MacBook Air (3) platform macOS playlists 6 songs 237
+  我喜欢 1 · 经典 223 · 神咒 2 · 佛经 7 · 欧美 2 · 日韩 2   （id 全是 agg_*）
+```
 
+**根因在 `PlaylistSyncService.restore()`，不在云端、也不在他的操作。** 旧实现（:159-183）
+先把 `library.visibleSongs` 做成索引，云端每一条**只有匹配上本机已有歌曲**才会进歌单，
+匹配不上就静默丢掉；而且弹窗念的是**服务端**的 `playlistCount` / `songCount`，
+于是出现了"已同步 6 个歌单（共 237 首）"而屏幕上一个都没有。
+
+这台 Mac 没扫描过任何本地曲库，`visibleSongs` 是空的，237 条全部匹配失败 →
+`createPlaylist(name:songIDs: [])` 建出 6 个空歌单。iPhone 上看不出这个洞，
+因为那些歌本来就是这台机器加进去的；**换任何一台"曲库靠在线源"的设备都会撞上。**
+
+Windows 端早就为这一点有意分叉过，注释就写在 `primuse-win/src/main/sync.js:21-24`：
+"Swift 的 restore 是按 id / title+artist 匹配到本地资料库已有歌曲，而 Windows 首版没有
+本地歌曲表 —— 照抄会得到一堆空歌单。因此 Windows 把云端条目直接落成自包含的歌单成员。"
+这一轮就是把同一套语义搬回 Swift，并且把三端计数分开报。
+
+改动四件事：
+
+1. **两遍循环**。第一遍把每条云端条目解析成本机 songID：本机有 → 用；曲名+歌手对得上 → 用；
+   都不对 → `song(fromWire:)` 落一条自包含的在线曲目（认 `agg_{platform}_{rawID}`、
+   `/aggregated/{platform}/{rawID}.mp3`、`dly_{sourceID}_{rawID}` 三种键，字段形状照
+   `AggregatedSongItem.toPrimuseSong`，这样本机以后自己从聚合搜索加进来的同一首歌是同一个 id）。
+2. **先 `registerSongsIfNeeded` 再动歌单**。这是硬顺序：`add(songIDs:toPlaylist:)` 和
+   `createPlaylist(name:songIDs:)` 都会把 `songIndexByID` 查不到的 id 静默过滤掉
+   （MusicLibrary.swift:5099 / 5127）—— 先建单再加歌等于把歌丢掉，正是原来那个洞的另一半。
+3. **建单用云端的 id**（`ensurePlaylist(id:name:)` 而不是 `createPlaylist`）。后者另发一个
+   UUID，下次再拉又对不上号，多端 / 重装永远收敛不回来。同名匹配仍保留，不造重复歌单。
+4. **反馈文案只报本机战果**：`RestoreResult` 把"云端多少"和"本机落下多少 / 原本就有 /
+   这轮新落 / 认不出"分开带回设置页。
+
+同一首歌挂在两个歌单里（`我喜欢` + `经典`）这一条，现网数据里就有：237 行 → 236 个不同身份。
+所以第二遍遇到已在本轮新建表里的 id 必须照样进单，且 `knownIDs` 故意不在这里加 ——
+它代表"这一轮开始之前本机就有"，否则计数会说谎。
+
+**验证**：这台机器没有 Swift 编译器（`which swift` 空），CI 才是编译器，所以能离线跑的账全部
+离线跑完 —— 把 `song(fromWire:)` + 两遍循环照抄成 JS，喂**现网那 237 首**：
+
+```
+[场景 A · 空资料库 = 他截图那一幕] 我喜欢 1 · 经典 223 · 神咒 2 · 佛经 7 · 欧美 2 · 日韩 2
+  进单 237 行 · 有内容歌单 6 · 静默丢掉 0 · 同单重复 id 0 · 236 个不同身份只落一次
+[场景 B · 再拉一遍（等价 iPhone）] 一条都不重复落地 · 237 全按 id 对上 · 幂等
+[往返]  再备份回去不会改写云端任何一条的 id / filePath / sourceId
+15 项，全绿
+```
+
+变异照旧要做：把"认不出就落地"整条拿掉（= 旧行为），场景 A 立刻红成
+`进单 0`、`有内容歌单 0`、`静默丢掉 237` —— 和用户报的现象一字不差。看守红得读得懂，
+才说明它守的就是这个洞。
+
+**没在这一版里做的事**：他问"能否界面不要跟 Win 看齐"。先答事实 —— 外壳已经是同一套
+（`MacTabBar.swift:5-19` 明写它对齐 Windows 的 `TABS` 与 iPhone 的 `TabView`），所以这不是重写，
+剩下的是四处页面级差异：资料库 hub 的分区（Mac 多出 智能推荐 / 流派 / 目录 / 电台，
+加上红色"我喜欢"大卡和"添加快捷收藏"）、标题栏搜索占位文案（`search_placeholder_universal`
+= "搜索本地库 + Apple Music"，Win 是"歌曲、艺术家、专辑、歌词"）、底栏迷你播放器
+（Win 是一条窄 pill，Mac 是三列全控制条）、以及 Win 有而 Apple 侧没有的
+**云端设备列表 + 跨设备导入**。分区默认值这一项我没顺手改：`PrimuseTests/
+LibraryDisplayConfigurationTests.swift:53-61` 正断言 `defaultSectionOrder.first == .recommendations`，
+`MinimalNavigationPolicy` 又拿可见分区推首页落点，而 macOS 界面在这台机器上看不见、
+改完没法目测 —— 一个"看着像 0"的功能修复，不该和一次没法验证的视觉改动同车发出去。
+列为任务 #58，下一版带着他的截图来对。
