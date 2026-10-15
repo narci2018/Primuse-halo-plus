@@ -394,25 +394,32 @@ struct LibraryView: View {
             #if os(iOS)
             .minimalNavigationRoot()
             #endif
+            #if os(macOS)
+            // 主窗口的系统 toolbar 是隐藏的，`.navigationTitle` 在 Mac 上画不出来，
+            // 页名改由正文顶部的固定标题行承担（见 `MacLibraryPageTitle`）。
+            .safeAreaInset(edge: .top, spacing: 0) {
+                MacLibraryPageTitle(title: rootSection?.title ?? "library_title")
+            }
+            #endif
             .navigationDestination(for: LibrarySection.self) { section in
                 sectionDestination(section)
             }
             .navigationDestination(for: Album.self) { album in
-                AlbumDetailView(album: album)
+                AlbumDetailView(album: album, onMacInlineBack: detailPop)
                     .onAppear {
                         persistedPageID = "album:\(album.id)"
                         onActiveSectionChange(.albums)
                     }
             }
             .navigationDestination(for: Artist.self) { artist in
-                ArtistDetailView(artist: artist)
+                ArtistDetailView(artist: artist, onMacInlineBack: detailPop)
                     .onAppear {
                         persistedPageID = "artist:\(artist.id)"
                         onActiveSectionChange(.artists)
                     }
             }
             .navigationDestination(for: Playlist.self) { playlist in
-                PlaylistDetailView(playlist: playlist)
+                PlaylistDetailView(playlist: playlist, onMacInlineBack: detailPop)
                     .onAppear {
                         persistedPageID = "playlist:\(playlist.id)"
                         onActiveSectionChange(.playlists)
@@ -467,6 +474,22 @@ struct LibraryView: View {
         }
     }
 
+    /// 详情页的内联返回。macOS 的主窗口把系统 toolbar 整条藏了
+    /// （`MacDetailContainer` 里那句 `.toolbar(.hidden, for: .windowToolbar)`），
+    /// 没有系统返回键可依赖，所以给详情页传一个真正的 pop；iPhone 保持原来的
+    /// `nil`，那边导航栏上有系统返回键，`onMacInlineBack == nil` 时详情视图
+    /// 也就不会画自己那个返回圆钮。
+    private var detailPop: (() -> Void)? {
+        #if os(macOS)
+        return {
+            guard !navigationPath.isEmpty else { return }
+            navigationPath.removeLast()
+        }
+        #else
+        return nil
+        #endif
+    }
+
     @ViewBuilder
     private var rootContent: some View {
         if let rootSection {
@@ -485,6 +508,14 @@ struct LibraryView: View {
             #if os(iOS)
             .minimalNavigationRoot()
             .navigationBarBackButtonHidden(appNavigationMode == .minimal)
+            #endif
+            #if os(macOS)
+            // 从资料库 hub 点进分区（全部歌曲 / 专辑 / 歌单 …）后同样没有系统
+            // 导航栏，分区名走同一根固定标题行；「返回」由窗口标题栏的
+            // `PMTitleBar` chevron 提供（`MacContentView` 的 `showsTitleBarBack`）。
+            .safeAreaInset(edge: .top, spacing: 0) {
+                MacLibraryPageTitle(title: section.title)
+            }
             #endif
             .onAppear {
                 persistedPageID = "section:\(section.rawValue)"
