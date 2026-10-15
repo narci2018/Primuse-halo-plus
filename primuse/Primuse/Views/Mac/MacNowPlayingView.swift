@@ -82,8 +82,10 @@ struct MacNowPlayingView: View {
     /// Keep lyric rows on a stable layout size and only apply a subtle active
     /// scale at render time. The previous 30/22 (fullscreen 44/28) ratio made
     /// every line takeover feel like a large zoom even though it was animated.
-    private static let lyricsBaseSize: CGFloat = 25
-    private static let lyricsBaseSizeFS: CGFloat = 32
+    /// 20 与 iOS 的 `lyricsLayoutBaseSize`(20) / Windows 的 `.lyric-line`(20px) 对齐；
+    /// 全屏档按同一比例从 32 收到 26。
+    private static let lyricsBaseSize: CGFloat = 20
+    private static let lyricsBaseSizeFS: CGFloat = 26
     private static let lyricsActiveVisualScale: CGFloat = 1.10
     /// Match the iOS lyrics motion: the row highlight and the scroll position
     /// travel on the same smooth curve, so a line change reads as one gesture.
@@ -118,6 +120,18 @@ struct MacNowPlayingView: View {
     }
     private var playerFaintColor: Color {
         usesLightPlayerAppearance ? .black.opacity(0.46) : .white.opacity(0.5)
+    }
+    /// 歌词专用金色 —— 与 iOS 的 `NowPlayingAppearance.lyricGold` / Windows 的
+    /// `--gold`、`--gold-now` 逐位同值（浅色 #D99A2B / #B8860B，深色 #E6C068 / #FFD75E）。
+    /// 刻意不改动 `playerPrimaryColor`：那一支还管着按钮、标题等整块播放页的前景。
+    private var lyricGold: Color {
+        usesLightPlayerAppearance ? Color(hex: "D99A2B") : Color(hex: "E6C068")
+    }
+    private var lyricGoldNow: Color {
+        usesLightPlayerAppearance ? Color(hex: "B8860B") : Color(hex: "FFD75E")
+    }
+    private var lyricGoldPending: Color {
+        (usesLightPlayerAppearance ? Color(hex: "B8860B") : Color(hex: "E6C068")).opacity(0.72)
     }
     private var playerGlassFill: Color {
         usesLightPlayerAppearance ? .black.opacity(0.07) : .white.opacity(0.12)
@@ -869,8 +883,8 @@ struct MacNowPlayingView: View {
                 line: line,
                 fontSize: fontSize,
                 weight: weight,
-                activeColor: playerPrimaryColor,
-                inactiveColor: playerSecondaryColor,
+                activeColor: isActive ? lyricGoldNow : lyricGold,
+                inactiveColor: lyricGoldPending,
                 writingDirection: lyricsWritingDirection,
                 timeAt: { date in player.interpolatedTime(at: date) },
                 isPlaybackActive: player.isPlaybackActive,
@@ -883,7 +897,7 @@ struct MacNowPlayingView: View {
         } else {
             Text(line.text)
                 .font(.system(size: fontSize, weight: weight))
-                .foregroundStyle(playerPrimaryColor)
+                .foregroundStyle(isActive ? lyricGoldNow : lyricGold)
                 .lineSpacing(2)
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)

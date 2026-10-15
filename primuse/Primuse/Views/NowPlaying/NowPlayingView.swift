@@ -85,6 +85,17 @@ private struct NowPlayingAppearance {
     var inactiveSyllableOpacity: Double {
         usesIncreasedContrast ? 0.58 : (isLight ? 0.46 : 0.42)
     }
+
+    /// 歌词金色 — 与 Windows 渲染层的 `--gold` / `--gold-now` 逐位同值
+    /// (浅色 #D99A2B / #B8860B, 深色 #E6C068 / #FFD75E)。用户要的是"不要灰色、要金色",
+    /// 两端必须同一个金, 否则同一首歌在两台设备上是两种颜色。
+    var lyricGold: Color {
+        isLight ? Color(hex: "D99A2B") : Color(hex: "E6C068")
+    }
+
+    var lyricGoldNow: Color {
+        isLight ? Color(hex: "B8860B") : Color(hex: "FFD75E")
+    }
 }
 
 #if os(iOS)
@@ -5184,7 +5195,9 @@ struct LyricsScrollView: View {
     private static let lyricsMaxScale: Double = 1.8
     /// Keep every row on one stable layout size. Current-line emphasis is a
     /// render-layer scale, so a takeover does not reflow the surrounding rows.
-    private static let lyricsLayoutBaseSize: CGFloat = 26
+    /// 20pt 与 Windows 渲染层 `.lyric-line { font-size: 20px }` 对齐（原来是 26，
+    /// 用户要求"稍微缩小点"）；`lyricsFontScale` 的 0.7..1.8 相对倍率保持不变。
+    private static let lyricsLayoutBaseSize: CGFloat = 20
     private static let lyricsHorizontalPadding: CGFloat = 24
 
     private var visualActivityPolicy: NowPlayingVisualActivityPolicy {
@@ -5240,7 +5253,7 @@ struct LyricsScrollView: View {
         let resolvedOpacity = min(max(opacity, 0), 1)
         switch lyricsColorMode {
         case .defaultColor:
-            return AnyShapeStyle(appearance.primary.opacity(resolvedOpacity))
+            return AnyShapeStyle(appearance.lyricGoldNow.opacity(resolvedOpacity))
         case .custom:
             return AnyShapeStyle(
                 lyricsColor(
@@ -5271,6 +5284,13 @@ struct LyricsScrollView: View {
                 )
             )
         }
+    }
+
+    /// 非当前行、以及字级歌词里还没扫到的那截所用的底色。默认色模式下跟着金色走
+    /// （透明度阶梯不变，仍是 past/future 那两组）；用户显式选了自定义色或渐变时
+    /// 不抢戏 —— 渐变逐行铺开会糊成一片，那种模式下仍用主文本色。
+    private var lyricBaseColor: Color {
+        lyricsColorMode == .defaultColor ? appearance.lyricGold : appearance.primary
     }
 
     private func lyricsColor(from storedHex: String, fallback: String) -> Color {
@@ -6027,8 +6047,8 @@ struct LyricsScrollView: View {
                 weight: weight,
                 activeStyle: isActive
                     ? currentLyricStyle(opacity: activeOpacity)
-                    : AnyShapeStyle(appearance.primary.opacity(activeOpacity)),
-                inactiveColor: appearance.primary.opacity(inactiveOpacity),
+                    : AnyShapeStyle(lyricBaseColor.opacity(activeOpacity)),
+                inactiveColor: lyricBaseColor.opacity(inactiveOpacity),
                 textAlignment: textAlignment,
                 writingDirection: lyricsWritingDirection,
                 timeAt: { date in player.interpolatedTime(at: date) },
@@ -6062,12 +6082,12 @@ struct LyricsScrollView: View {
             return currentLyricStyle()
         }
         if dimmedByAmbient {
-            return AnyShapeStyle(appearance.primary)
+            return AnyShapeStyle(lyricBaseColor)
         }
         return AnyShapeStyle(
             index < currentLineIndex
-                ? appearance.primary.opacity(appearance.pastLyricOpacity)
-                : appearance.primary.opacity(appearance.futureLyricOpacity)
+                ? lyricBaseColor.opacity(appearance.pastLyricOpacity)
+                : lyricBaseColor.opacity(appearance.futureLyricOpacity)
         )
     }
 
