@@ -21,7 +21,39 @@ enum LibrarySection: String, CaseIterable, Codable, Hashable, Identifiable, Send
         }
     }
 
+    /// Windows 那份 `HUB_ROWS`（`primuse-win/src/renderer/app.js:832-840`）里这一行的图标与颜色；
+    /// 不在那六行之内的返回 nil，沿用 iPhone 本来的取值。
+    ///
+    /// Mac 的资料库要第一眼就像 Windows 的资料库，图标和配色是最直接的判据，
+    /// 所以把它们逐行取 Windows 的原值，而不是让 Mac 继续用 `music.mic` / 红色歌单。
+    private var windowsHubIcon: String? {
+        switch self {
+        case .songs: return "music.note"
+        case .albums: return "square.stack"
+        case .artists: return "person.2"
+        case .playlists: return "music.note.list"
+        case .favorites: return "heart.fill"
+        case .statistics: return "chart.bar"
+        default: return nil
+        }
+    }
+
+    private var windowsHubColor: Color? {
+        switch self {
+        case .songs: return Color(red: 10 / 255, green: 132 / 255, blue: 255 / 255)      // #0a84ff
+        case .albums: return Color(red: 175 / 255, green: 82 / 255, blue: 222 / 255)     // #af52de
+        case .artists: return Color(red: 255 / 255, green: 149 / 255, blue: 0 / 255)     // #ff9500
+        case .playlists: return Color(red: 31 / 255, green: 138 / 255, blue: 91 / 255)   // #1f8a5b
+        case .favorites: return Color(red: 255 / 255, green: 45 / 255, blue: 85 / 255)   // #ff2d55
+        case .statistics: return Color(red: 20 / 255, green: 125 / 255, blue: 138 / 255) // #147d8a
+        default: return nil
+        }
+    }
+
     var icon: String {
+        #if os(macOS)
+        if let windows = windowsHubIcon { return windows }
+        #endif
         switch self {
         case .recommendations: return "sparkles"
         case .favorites: return "heart.fill"
@@ -37,6 +69,9 @@ enum LibrarySection: String, CaseIterable, Codable, Hashable, Identifiable, Send
     }
 
     var color: Color {
+        #if os(macOS)
+        if let windows = windowsHubColor { return windows }
+        #endif
         switch self {
         case .recommendations: return Color(red: 0.71, green: 0.48, blue: 0.40)
         case .favorites: return .pink

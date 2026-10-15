@@ -2232,6 +2232,13 @@ Mac 上只会更靠近 Windows，不会冒出他没要的行。收敛点选在 `
 用 `#if os(macOS)` 包住，而不是放进 `LibraryDisplayConfiguration` —— 因为
 `ContentView`（iPhone 的极简导航）也拿同一个函数推首页落点，那边一个字都不许变。
 
+图标与配色也逐行取 Windows `HUB_ROWS` 的原值：新增 `LibrarySection.windowsHubIcon` / `windowsHubColor`
+两个映射（`music.note` #0a84ff、`square.stack` #af52de、`person.2` #ff9500、`music.note.list` #1f8a5b、
+`heart.fill` #ff2d55、`chart.bar` #147d8a），只在 `icon` / `color` 两个 computed property 顶部各被读一次，
+并且各包在 `#if os(macOS)` 里。iPhone 本来的取值一行没动（艺术家仍是 `music.mic`、歌单仍是红、
+我喜欢仍是 `.pink`），所以"Mac 像 Windows"不会顺着共用代码漂成"iPhone 也变了"。
+这一处是第二轮补的：第一轮只对齐了六行的名单与顺序，屏幕上图标形状还是 iPhone 那套 —— 一眼看去仍不像同一个 app。
+
 「我喜欢」这一格两端语义本来就不是一个东西：iPhone 的 `LibrarySection.favorites.title` 是
 `library_quick_access`（"快捷收藏"，它是一张卡的区块名），Windows 那一行就是歌单本名。所以
 Mac 上标题走 `hubRowTitle` = `playlist_liked_name`（我喜欢），副标题走 `categoryCountText` = "N 首歌曲"，
@@ -2281,7 +2288,10 @@ Mac 上标题走 `hubRowTitle` = `playlist_liked_name`（我喜欢），副标�
 
 - 编译由 CI 承担：推 main 跑 preflight（约 2 分钟，只查 FFmpeg 符号链接与 XcodeGen 出 scheme，**不编译 Swift**），
   真正编译要等 `v*` tag 的那次 macOS 构建。也就是说 30.3 / 30.4 的 Swift 代码在 v1.9.22 构建绿之前，
-  属于"照 API 事实逐个核对过签名、但没有编译器验证过"的状态。逐个核对过的点：
+  属于"照 API 事实逐个核对过签名、但没有编译器验证过"的状态。已验证的一半：v1.9.21 那次 tag 构建
+  `Build PrimuseMac (Apple Silicon)` = success（约 27 分钟），Release 上五个产物齐（dmg 72.2MB / zip 64.0MB /
+  ipa 105.2MB / Setup exe 88.3MB / Portable exe 88.0MB），所以 §29.8 那套 `restore()` 的两遍落地代码
+  **确实过编译**、Mac 装得上；没验证的仍是界面长相与 Swift 版跨设备导入的运行时行为。逐个核对过的点：
   `LibrarySection.title: LocalizedStringKey`、`likedPlaylist: Playlist`、
   `library.songCount(forPlaylist:) -> Int`（MusicLibrary.swift:4593）、
   `library.ensurePlaylist(id:name:)`（:4712）、`NavigationLink(value:)` 对应的
@@ -2290,5 +2300,16 @@ Mac 上标题走 `hubRowTitle` = `playlist_liked_name`（我喜欢），副标�
 - `PrimuseTests` 里那套 Swift 单元测试**CI 从来不跑**（`.github/workflows/*.yml` 里没有 `xcodebuild test`）。
   所以我没有为这两处改动新写 Swift 测试 —— 写了也只会是一条"永远绿的测试"，比没有更糟。
   真正的看守是 §29.8 那套可离线跑的 JS 账（数据落地逻辑），以及他手上的截图。
+- 这一轮另加了一条**本机就能跑、且在 CI 里跑**的看守：`primuse-win/scripts/criteria-parity-check.js`
+  第 16 组，16 项静态断言，把"Mac 的 hub 是不是 Windows 那个 hub"和"跨设备导入的字段是不是 CF 那几列"
+  钉成可执行的 —— 它读的是三端源码文本，不起 App、不联网，所以 Mac 上没有 Xcode 也拦得住漂移：
+  六行的名单/顺序/图标/配色逐行等于 `app.js` 的 `HUB_ROWS`（去掉 `history`）、`macOSAlignedSections`
+  只在 `#if os(macOS)` 里被调用一次、`windowsHubIcon/Color` 各只有 2 个引用点（多一个就是漂到 iPhone 了）、
+  「我喜欢」在 Mac 分支跳 `likedPlaylist` 而 iPhone 分支仍是 `quickAccessSection`、
+  CodingKeys 的 7 个 key = CF 那条 `SELECT device_id, … LIMIT 50` 的 7 列、列表请求两端都不带 `deviceId`、
+  `restore` 体内没有 POST、`registerSongsIfNeeded` 的下标必须早于 `library.add(songIDs:)`、
+  `agg_` / `dly_` / `/aggregated/` 三种形状两端都认、`dly_` 那段正则两端**逐字相同**。
+  两项验证过能红：把 `.statistics` 挪到六行首位 → 只有"名单与顺序"那条红；
+  把 `#af52de` 的绿通道 82 改成 83 → 只有"配色逐行同源"那条红。改完即还原，本地 `109 项通过，0 项失败`。
 - 界面效果由他验。需要他回传两样东西：资料库页截图（看六行对不对）、
   设置页「云端设备」列表截图（看设备名 / 计数 / 时间有没有解码出来）。

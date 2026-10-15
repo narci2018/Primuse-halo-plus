@@ -16,7 +16,7 @@
  *     （对不上 = Swift 解出来整份是 nil，界面上"线路凭空没了"）；
  *   - 观测盲区名单：`未检出` 不停用这条规则，服务端 / Windows 渲染层 / Swift 三份必须同源。
  *
- * 2026-10-15 起还钉这四件（都是"两端各写一遍、写歪了没人报错"的那类）：
+ * 2026-10-15 起还钉这六件（都是"两端各写一遍、写歪了没人报错"的那类）：
  *   11. 加载闸门：只有服务端确认可播的源进播放路径 —— Windows 与 Swift 必须是同一口径，
  *       且收口只有一处（Windows 是 aggregated.enabledSources()，渲染层只读 loaded 不再自己判）；
  *   12. 封面占位色：色相表 + FNV-1a 常数 + UTF-16 迭代口径两端一致，音乐源那一档的写真底图文件在位；
@@ -25,6 +25,9 @@
  *   15. macOS 外壳：底下那四格就是 iPhone 的 TabView 与 Windows 的 .tabbar —— 同一组
  *       tab、同一组图标、同一个云端首页名；三栏侧栏壳不得复活；侧栏原来装的目的地
  *       （分区在资料库页内、源与工具在设置页里）得有落点，返回有后手。
+ *   16. macOS 的资料库 hub 向 Windows 看齐（2026-10-15 的口径变更，见 plan §30）：六行的
+ *       名单/顺序/图标/配色逐行等于 Windows 的 HUB_ROWS，iPhone 那份默认取值一行没动；
+ *       跨设备导入的字段的形状逐列等于 CF 那条列表 SQL 与 Windows 的 devices()。
  *
  * 用法：node scripts/criteria-parity-check.js
  */
@@ -71,6 +74,10 @@ const WIN_PRELOAD = read('primuse-win/src/preload.js');
 const WIN_STRIP_PRELOAD = read('primuse-win/src/preload-lyric.js');
 const WIN_STRIP = read('primuse-win/src/main/taskbar-lyric.js');
 const WIN_MAIN = read('primuse-win/src/main/main.js');
+const WIN_SYNC = read('primuse-win/src/main/sync.js');
+const CF_SYNC_API = read('cf-sync-server/functions/api/sync-playlists.js');
+const SWIFT_SYNC = read('primuse/Primuse/Services/Playlist/PlaylistSyncService.swift');
+const SWIFT_SYNC_VIEW = read('primuse/Primuse/Views/Settings/PlaylistSyncSettingsView.swift');
 
 // MARK: - 断言器（与 cloud-sources-contract-test.js 同一形状）
 
@@ -604,6 +611,193 @@ record('迷你条在上、tab 贴窗口底边，两边同一叠放次序（同�
   insetAt >= 0 && bottomFirst >= 0
     && bottomStack.indexOf('MacTabBar(') > bottomFirst,
   '顺序反了或 tab 掉出这一叠，就变成 tab 压在迷你条上面，跟 Windows/iPhone 都不一样');
+
+// MARK: - 16. macOS 的资料库 hub 向 Windows 看齐 + 跨设备导入的三方契约
+
+group('16. Mac 资料库 hub = Windows 资料库 hub；云端设备列表 = CF 那列 = Windows devices()');
+
+// Windows 那份 hub 的七行：ref / 中文文案 / SF Symbol / 色值 / 计数表达式（app.js:832-840）。
+const winHubAt = WIN_APP.indexOf('const HUB_ROWS = [');
+const winHubBlock = WIN_APP.slice(winHubAt, WIN_APP.indexOf('];', winHubAt) + 1);
+const winHubRows = Array.from(
+  winHubBlock.matchAll(/\['([a-z]+)',\s*'([^']*)',\s*'([a-z._0-9]+)',\s*'(#[0-9a-fA-F]{6})'/g)
+).map((m) => ({ ref: m[1], label: m[2], icon: m[3], color: m[4].toLowerCase() }));
+
+// Mac 侧只搬「Apple 已有分区」的那六行，`最近播放` 有意没搬（要新增 LibrarySection 分支
+// 和三处 switch + 16 份本地化，那是单独一轮）。ref → LibrarySection 的对应关系写死在这里，
+// 任何一端改名就会在这里断掉，而不是在屏幕上悄悄少一行。
+const MAC_HUB_REF_TO_CASE = {
+  songs: 'songs', albums: 'albums', artists: 'artists',
+  playlists: 'playlists', liked: 'favorites', history: 'history', stats: 'statistics',
+};
+const macOrderAt = SWIFT_LIBRARY.indexOf('static let macOSAlignedSectionOrder');
+const macOrderArrAt = macOrderAt < 0 ? -1 : SWIFT_LIBRARY.indexOf('= [', macOrderAt);
+const macHubCases = macOrderArrAt < 0
+  ? []
+  : (SWIFT_LIBRARY.slice(macOrderArrAt, SWIFT_LIBRARY.indexOf(']', macOrderArrAt)).match(/\.[a-z]+/g) || [])
+    .map((s) => s.slice(1));
+const expectedMacCases = winHubRows.filter((r) => r.ref !== 'history').map((r) => MAC_HUB_REF_TO_CASE[r.ref]);
+const winHubSix = winHubRows.filter((r) => r.ref !== 'history');
+
+record('六行的名单与顺序逐行等于 Windows 那七行去掉「最近播放」',
+  winHubRows.length === 7 && macHubCases.length === 6
+    && macHubCases.join(',') === expectedMacCases.join(','),
+  `mac=${macHubCases.join('/')} 期望=${expectedMacCases.join('/')}`);
+record('Win 的「最近播放」是有意没搬，不是顺序写漏（Win 仍是七行含 history、Mac 仍不含 history）',
+  winHubRows.length === 7 && winHubRows.some((r) => r.ref === 'history')
+    && !macHubCases.includes('history'),
+  `win=${winHubRows.length} 行、mac 含 history=${macHubCases.includes('history')} —— 这一行要新增分区分支和三处 switch、16 份本地化，等用户拍板再做`);
+
+// 图标与配色逐行取 Windows 的原值。抽的是 `windowsHubIcon` / `windowsHubColor` 那两个
+// macOS 专用的映射，不是 LibrarySection 本来的取值 —— 后者归 iPhone，一动就改到 iPhone。
+const macHubIconBlock = braceBlock(SWIFT_LIBRARY, SWIFT_LIBRARY.indexOf('private var windowsHubIcon'));
+const macHubIcons = Object.fromEntries(Array.from(
+  macHubIconBlock.matchAll(/case \.([a-z]+): return "([a-z._0-9]+)"/g)
+).map((m) => [m[1], m[2]]));
+const macHubColorBlock = braceBlock(SWIFT_LIBRARY, SWIFT_LIBRARY.indexOf('private var windowsHubColor'));
+const macHubColors = Object.fromEntries(Array.from(
+  macHubColorBlock.matchAll(/case \.([a-z]+): return Color\(red: (\d+) \/ 255, green: (\d+) \/ 255, blue: (\d+) \/ 255\)/g)
+).map((m) => [m[1], `#${[m[2], m[3], m[4]].map((v) => Number(v).toString(16).padStart(2, '0')).join('')}`]));
+
+const iconDrift = winHubSix
+  .filter((r) => macHubIcons[MAC_HUB_REF_TO_CASE[r.ref]] !== r.icon)
+  .map((r) => `${r.ref}:${r.icon}→${macHubIcons[MAC_HUB_REF_TO_CASE[r.ref]]}`);
+record('图标逐行同源（Mac 不再用 music.mic / square.stack.fill 那套 iPhone 取值）',
+  Object.keys(macHubIcons).length === 6 && iconDrift.length === 0,
+  iconDrift.length ? iconDrift.join(' ') : winHubSix.map((r) => r.icon).join('/'));
+
+const colorDrift = winHubSix
+  .filter((r) => macHubColors[MAC_HUB_REF_TO_CASE[r.ref]] !== r.color)
+  .map((r) => `${r.ref}:${r.color}→${macHubColors[MAC_HUB_REF_TO_CASE[r.ref]]}`);
+record('配色逐行同源（六行的十六进制值和 Windows 完全一样）',
+  Object.keys(macHubColors).length === 6 && colorDrift.length === 0,
+  colorDrift.length ? colorDrift.join(' ') : winHubSix.map((r) => r.color).join('/'));
+
+record('iPhone 那一遍一行没动（默认取值仍是 music.mic/.pink/.red，覆盖只在 macOS 分支里）',
+  /case \.artists: return "music\.mic"/.test(SWIFT_LIBRARY)
+    && /case \.favorites: return \.pink/.test(SWIFT_LIBRARY)
+    && /case \.playlists: return \.red/.test(SWIFT_LIBRARY)
+    && (SWIFT_LIBRARY.match(/windowsHubIcon/g) || []).length === 2
+    && (SWIFT_LIBRARY.match(/windowsHubColor/g) || []).length === 2
+    && /#if os\(macOS\)\s*\n\s*if let windows = windowsHubIcon \{ return windows \}\s*\n\s*#endif/.test(SWIFT_LIBRARY)
+    && /#if os\(macOS\)\s*\n\s*if let windows = windowsHubColor \{ return windows \}\s*\n\s*#endif/.test(SWIFT_LIBRARY),
+  '这两个映射只在 #if os(macOS) 里被读一次；多一个引用点就是 iPhone 也跟着变了');
+
+record('六行的收敛只发生在 macOS 编译分支里（iPhone 的首页落点共用同一份配置，不许被带着变）',
+  (SWIFT_LIBRARY.match(/macOSAlignedSections\(/g) || []).length === 2
+    && /#if os\(macOS\)[\s\S]{0,500}?return LibraryDisplayConfiguration\.macOSAlignedSections\(sections\)\s*\n\s*#else\s*\n\s*return sections\s*\n\s*#endif/.test(SWIFT_LIBRARY),
+  '一处定义 + 一处调用；调用点必须在 #if os(macOS) 里、且 #else 原样返回');
+
+// hub 里「我喜欢」那一行：Windows 是纯行、点进去是这张歌单；iPhone 是那张红色大卡 +
+// 快捷收藏入口。两种语义共用一个 LibrarySection，所以跳转、标题、计数三处都得分支。
+// 整行注释先剔掉再比 —— 这段的注释里本来就写着 `quickAccessSection`，不剔就会把
+// 「注释里提到」当成「代码里走了这条路」，那条反向断言永远红。
+const stripLineComments = (text) => text.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+const hubForEach = braceBlock(SWIFT_LIBRARY, SWIFT_LIBRARY.indexOf('ForEach(visibleLibrarySections)'));
+const hubMacAt = hubForEach.indexOf('#if os(macOS)');
+const hubElseAt = hubForEach.indexOf('#else', hubMacAt);
+const hubMacNav = stripLineComments(hubForEach.slice(hubMacAt, hubElseAt));
+const hubIphoneNav = stripLineComments(hubForEach.slice(hubElseAt));
+record('Mac 上「我喜欢」点进去是那张歌单本身，iPhone 仍走快捷收藏大卡',
+  hubMacAt >= 0 && hubElseAt > hubMacAt
+    && /section == \.favorites/.test(hubMacNav)
+    && /NavigationLink\(value: likedPlaylist\)\s*\{\s*\n\s*libraryCategoryRow\(section\)/.test(hubMacNav)
+    && !/quickAccessSection/.test(hubMacNav)
+    && /quickAccessSection/.test(hubIphoneNav) && !/likedPlaylist/.test(hubIphoneNav),
+  `mac 分支有 likedPlaylist=${/likedPlaylist/.test(hubMacNav)}，iphone 分支有 quickAccess=${/quickAccessSection/.test(hubIphoneNav)}`);
+
+const hubTitleBlock = braceBlock(SWIFT_LIBRARY, SWIFT_LIBRARY.indexOf('private func hubRowTitle'));
+record('Mac 那一行念「我喜欢」（playlist_liked_name），iPhone 仍念区块名（library_quick_access）',
+  /#if os\(macOS\)[\s\S]{0,200}?section == \.favorites[\s\S]{0,120}?Text\("playlist_liked_name"\)[\s\S]{0,200}?#else\s*\n\s*Text\(section\.title\)\s*\n\s*#endif/.test(hubTitleBlock),
+  '详情页标题就是 playlist_liked_name，hub 用同一个词才不跳戏');
+
+const cntAt = SWIFT_LIBRARY.indexOf('private func categoryCountText');
+const cntFav = (SWIFT_LIBRARY.slice(cntAt).match(/case \.favorites:([\s\S]*?)case \.folders:/) || ['', ''])[1];
+record('Mac 那一行的计数是本机 liked 歌单的歌数，不是「添加快捷收藏」那句话',
+  /#if os\(macOS\)[\s\S]{0,300}?library\.songCount\(forPlaylist: MusicLibrary\.likedSongsPlaylistID\)[\s\S]{0,200}?#else\s*\n\s*return String\(localized: "library_quick_access"\)\s*\n\s*#endif/.test(cntFav),
+  'Windows 那行是「N 首歌曲」；iPhone 那行本来就是入口卡标题，两个语义不能共用一个字符串');
+
+// 跨设备导入：字段名以服务端那条列表 SQL 为准，Windows 与 Swift 都必须照它解码。
+const cfListSql = (CF_SYNC_API.match(/SELECT (device_id[^"]*?) FROM device_playlists ORDER BY updated_at DESC LIMIT 50/) || ['', ''])[1];
+const cfListCols = cfListSql ? cfListSql.split(',').map((s) => s.trim()) : [];
+const keysAt = SWIFT_SYNC.indexOf('private enum CodingKeys');
+const keyBlock = keysAt < 0 ? '' : SWIFT_SYNC.slice(keysAt, SWIFT_SYNC.indexOf('}', keysAt));
+const swiftListKeys = Array.from(keyBlock.matchAll(/case\s+(\w+)(?:\s*=\s*"([a-z_]+)")?/g)).map((m) => m[2] || m[1]);
+record('设备列表的字段名三方同源：CF 下发哪几列，Swift 就解哪几个 key，Windows 就读 data.devices',
+  cfListCols.length === 7
+    && cfListCols.every((c) => swiftListKeys.includes(c)) && swiftListKeys.length === 7
+    && CF_SYNC_API.includes('devices: rows?.results')
+    && /let devices: \[CloudDeviceSummary\]/.test(SWIFT_SYNC)
+    && /return \(data && data\.devices\) \|\| \[\];/.test(WIN_SYNC),
+  `cf=${cfListCols.join('/')} swift=${swiftListKeys.join('/')} —— 对不上就是界面上一台设备都不显示，而 HTTP 是 200`);
+
+const listFn = (SWIFT_SYNC.match(/func listCloudDevices\([\s\S]*?\n    \}/) || ['', ''])[0];
+const winDevicesAt = WIN_SYNC.indexOf('async function devices');
+const winImportAt = WIN_SYNC.indexOf('async function importFromDevice');
+const winDevicesFn = WIN_SYNC.slice(winDevicesAt, winImportAt);
+const winImportFn = WIN_SYNC.slice(winImportAt, WIN_SYNC.indexOf('/**', winImportAt + 10) > 0
+  ? WIN_SYNC.indexOf('/**', winImportAt + 10)
+  : winImportAt + 1200);
+record('列表请求两端同形：GET、不带 deviceId 参数、空表不当成错误',
+  listFn.length > 200
+    && /request\.httpMethod = "GET"/.test(listFn) && !/name: "deviceId"/.test(listFn)
+    && listFn.includes('envelope.data?.devices ?? []')
+    && /method: 'GET'/.test(winDevicesFn)
+    && winDevicesFn.includes('endpoint(config.serverURL)') && !winDevicesFn.includes('{ deviceId'),
+  `Swift 列表函数 ${listFn.length} 字符（自己带 deviceId query=${/name: "deviceId"/.test(listFn)}），Win 那台带参=${winDevicesFn.includes('{ deviceId')}`);
+
+// 下载别人那一份时：query 里是对方机器码、header 里报本机，本机机器码一个字节都不变，
+// 而且绝不 POST 回去 —— 这一步写歪的代价是把对方那台设备的备份覆盖掉。
+// restore 的函数体后面还要用来查落库顺序，先抽一次。
+const restoreBody = braceBlock(SWIFT_SYNC, SWIFT_SYNC.search(/func restore\([^)]*\)[\s\S]{0,120}\{/));
+record('跨设备下载只读不写：两端都不发 POST，Swift 的 X-Device-ID 报的是本机',
+  restoreBody.length > 2000
+    && /request\.setValue\(ownDeviceID, forHTTPHeaderField: "X-Device-ID"\)/.test(restoreBody)
+    && /queryItems\.removeAll \{ \$0\.name == "deviceId" \|\| \$0\.name == "device_id" \}/.test(restoreBody)
+    && /queryItems\.append\(URLQueryItem\(name: "deviceId", value: targetDeviceID\)\)/.test(restoreBody)
+    && !restoreBody.includes('httpMethod = "POST"') && !listFn.includes('httpMethod = "POST"')
+    && !winImportFn.includes("method: 'POST'"),
+  `restore 体 ${restoreBody.length} 字符、import ${winImportFn.length} 字符，两处 POST=${restoreBody.includes('POST') || winImportFn.includes('POST')}`);
+
+const rowBlock = SWIFT_SYNC_VIEW.slice(
+  SWIFT_SYNC_VIEW.indexOf('private func cloudDeviceRow'),
+  SWIFT_SYNC_VIEW.indexOf('private func rowSubtitle')
+);
+const selfAt = rowBlock.indexOf('if isSelf {');
+const rowElseAt = rowBlock.indexOf('} else {', selfAt);
+record('自己那一份不会被「下载它的歌单」再下一遍（Mac 该行只有「本机」标记，Win 直接抛错）',
+  selfAt >= 0 && rowElseAt > selfAt
+    && /本机/.test(rowBlock.slice(selfAt, rowElseAt)) && !/importFromCloudDevice\(device\)/.test(rowBlock.slice(selfAt, rowElseAt))
+    && /importFromCloudDevice\(device\)/.test(rowBlock.slice(rowElseAt))
+    && /if \(id === config\.deviceId\) throw new Error\(/.test(WIN_SYNC),
+  'Mac 靠不显示按钮、Win 靠抛错；两边都得有，点了才会没反应而不是把本机刷成别人的');
+
+// 拉取落库的顺序：先注册曲目，再写歌单。库里没有的 id 会被 add(songIDs:) 静默过滤，
+// 顺序反了就正是 v1.9.21 之前那个「弹窗说 237 首、屏幕上一个都没有」。
+const registerAt = restoreBody.indexOf('library.registerSongsIfNeeded');
+const firstAddAt = restoreBody.indexOf('library.add(songIDs:');
+record('拉取落库：先注册曲目、后写歌单，且弹窗念的是本机落下多少而不是云端计数',
+  registerAt >= 0 && firstAddAt > registerAt
+    && /addedSongs \+= max\(after - before, 0\)/.test(restoreBody)
+    && /if after > 0 \{ filledPlaylists \+= 1 \}/.test(restoreBody)
+    && /res\.filledPlaylists/.test(SWIFT_SYNC_VIEW) && /res\.addedSongs/.test(SWIFT_SYNC_VIEW)
+    && /res\.materializedSongs/.test(SWIFT_SYNC_VIEW),
+  `register=${registerAt} firstAdd=${firstAddAt}（add 会静默丢掉库里没有的 id，反序就是 0 首）`);
+
+// 云端条目的身份形状：两端都靠 agg_/dly_ 两个前缀 + `/aggregated/` 路径退路反解真实音频。
+const wireShapes = (t) => ['agg', 'dly'].filter((p) => new RegExp(`\\^${p}_`).test(t));
+record('两端都认 agg_ / dly_ 两种 id 和 /aggregated/ 路径这条退路（缺一头就是拉到本地也放不出声）',
+  wireShapes(WIN_SYNC).join(',') === 'agg,dly' && wireShapes(SWIFT_SYNC).join(',') === 'agg,dly'
+    && SWIFT_SYNC.includes('/aggregated/') && SWIFT_SYNC.includes('(platform.rawValue)')
+    && WIN_SYNC.includes('/aggregated/'),
+  `win=${wireShapes(WIN_SYNC).join('/')} swift=${wireShapes(SWIFT_SYNC).join('/')}`);
+
+// dly_ 那条在两端是**逐字相同**的一段正则 —— 非贪婪的源 id 加贪婪的 rawID。
+// 谁把它改成贪婪（`(.+)_(.+)`），源 id 里带下划线的道理鱼就会解析错，rawID 少一截。
+const winDlyPattern = (WIN_SYNC.match(/\/(\^dly_\(\.\+\?\)_\(\.\+\)\$)\//) || [])[1] || '';
+record('dly_ 的正则两端字面一致（源 id 非贪婪、rawID 贪婪）',
+  winDlyPattern !== '' && SWIFT_SYNC.includes(winDlyPattern),
+  `win=${JSON.stringify(winDlyPattern)} swift 含同一段=${winDlyPattern !== '' && SWIFT_SYNC.includes(winDlyPattern)}`);
 
 // MARK: - 汇总
 
