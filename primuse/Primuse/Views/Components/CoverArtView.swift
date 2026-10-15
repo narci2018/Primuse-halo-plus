@@ -4,6 +4,9 @@ struct CoverArtView: View {
     let data: Data?
     var size: CGFloat = 48
     var cornerRadius: CGFloat = 8
+    /// 无图时占位封面的取色身份。默认值刻意与 `CachedArtworkView` 的兜底身份同名，
+    /// 这样没传身份的调用点也只是"固定那一档色"，不会退回灰色材质底。
+    var identity: String = "placeholder:music.note"
 
     var body: some View {
         Group {
@@ -15,13 +18,12 @@ struct CoverArtView: View {
                 #if os(macOS)
                 MacDefaultArtwork()
                 #else
-                ZStack {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(.ultraThinMaterial)
-                    Image(systemName: "music.note")
-                        .font(.system(size: size * 0.4))
-                        .foregroundStyle(.secondary)
-                }
+                CoverPlaceholder(
+                    identity: identity,
+                    size: size,
+                    cornerRadius: cornerRadius,
+                    glyphScale: 0.4
+                )
                 #endif
             }
         }

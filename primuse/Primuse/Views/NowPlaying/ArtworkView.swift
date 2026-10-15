@@ -3,6 +3,8 @@ import SwiftUI
 struct ArtworkView: View {
     let data: Data?
     var cornerRadius: CGFloat = 16
+    /// 见 `CoverArtView.identity`：只在"没有封面"时用来取占位色。
+    var identity: String = "placeholder:music.note"
 
     var body: some View {
         Group {
@@ -14,13 +16,12 @@ struct ArtworkView: View {
                 #if os(macOS)
                 MacDefaultArtwork()
                 #else
-                ZStack {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(.ultraThinMaterial)
-                    Image(systemName: "music.note")
-                        .font(.system(size: 60))
-                        .foregroundStyle(.secondary)
-                }
+                // 240 × 0.25 = 60pt 音符，与改动前的固定 60pt 一致。
+                CoverPlaceholder(
+                    identity: identity,
+                    size: 240,
+                    cornerRadius: cornerRadius
+                )
                 #endif
             }
         }

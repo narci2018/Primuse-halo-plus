@@ -510,20 +510,12 @@ struct CachedArtworkView: View {
     }
 
     private var symbolicPlaceholder: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .fill(
-                    LinearGradient(
-                        colors: placeholderColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            Image(systemName: placeholderIcon)
-                .font(.system(size: (size ?? 200) * 0.25))
-                .foregroundStyle(.white.opacity(0.92))
-                .shadow(color: .black.opacity(0.28), radius: 1.5, y: 1)
-        }
+        CoverPlaceholder(
+            identity: placeholderIdentity,
+            icon: placeholderIcon,
+            size: size ?? 200,
+            cornerRadius: cornerRadius
+        )
     }
 
     /// 占位封面的身份串：优先用这张图自己的 ID，一个都没有时退回占位图标名。
@@ -564,10 +556,6 @@ struct CachedArtworkView: View {
             Color(hue: startHue, saturation: 0.745, brightness: 0.924),
             Color(hue: endHue, saturation: 0.876, brightness: 0.730),
         ]
-    }
-
-    private var placeholderColors: [Color] {
-        Self.placeholderColors(for: placeholderIdentity)
     }
 
     /// Composite cache key — different sized views share the underlying disk
@@ -1977,5 +1965,47 @@ private actor InFlightFetchTracker {
         if cancelIfUnused {
             entry.task.cancel()
         }
+    }
+}
+
+/// 没有封面图时唯一该用的占位。
+///
+/// 以前这套八色渐变只有 `CachedArtworkView` 自己用得上，于是 `CoverArtView`、
+/// `ArtworkView`、`PlaylistArtworkView`、搜索结果里的聚合行、资料库的叠封预览
+/// 各自留着一块 `.ultraThinMaterial` / `Color.secondary.opacity(0.1~0.15)` 的灰底：
+/// 同一张没有封面的专辑，在 Windows 上是彩色的，在 iPhone 上却是灰的。
+/// 这些地方现在都走这里，色值仍由 `CachedArtworkView.placeholderColors(for:)`
+/// 决定 —— 同一张色相表、同一个 32 位 FNV，两端才会同色。
+struct CoverPlaceholder: View {
+    /// 取色用的身份串。约定与 Windows 端 `bgStyle(url, seed)` 的种子对齐：
+    /// 聚合搜索结果用 `\(title)|\(artist)`，本地图库用 `album:` / `artist:` / `song:` 前缀。
+    let identity: String
+    var icon: String = "music.note"
+    var size: CGFloat = 44
+    var cornerRadius: CGFloat = 8
+    var continuous: Bool = false
+    var glyphScale: CGFloat = 0.25
+
+    var body: some View {
+        ZStack {
+            shape.fill(
+                LinearGradient(
+                    colors: CachedArtworkView.placeholderColors(for: identity),
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            Image(systemName: icon)
+                // 下限 10pt：再小就只是一个点，占位图标就不成其为图标了。
+                .font(.system(size: max(size * glyphScale, 10)))
+                .foregroundStyle(.white.opacity(0.92))
+                .shadow(color: .black.opacity(0.28), radius: 1.5, y: 1)
+        }
+    }
+
+    private var shape: RoundedRectangle {
+        continuous
+            ? RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            : RoundedRectangle(cornerRadius: cornerRadius)
     }
 }

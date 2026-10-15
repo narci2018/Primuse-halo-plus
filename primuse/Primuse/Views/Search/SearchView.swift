@@ -1789,19 +1789,24 @@ struct SearchView: View {
                         if let image = phase.image {
                             image.resizable().aspectRatio(contentMode: .fill)
                         } else {
-                            Color.secondary.opacity(0.15)
+                            // 没封面的聚合结果不再铺一块灰：种子用 `标题|歌手`，
+                            // 与 Windows 端歌行 `bgStyle(cover, `${title}|${artist}`)` 同一个口径。
+                            CoverPlaceholder(
+                                identity: "\(songItem.title)|\(songItem.artist)",
+                                size: 44,
+                                cornerRadius: 6
+                            )
                         }
                     }
                     .frame(width: 44, height: 44)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 } else {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.secondary.opacity(0.15))
-                        .frame(width: 44, height: 44)
-                        .overlay {
-                            Image(systemName: "music.note")
-                                .foregroundStyle(.secondary)
-                        }
+                    CoverPlaceholder(
+                        identity: "\(songItem.title)|\(songItem.artist)",
+                        size: 44,
+                        cornerRadius: 6
+                    )
+                    .frame(width: 44, height: 44)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {

@@ -780,11 +780,13 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func categoryPreview(_ section: LibrarySection) -> some View {
+        // 叠封预览的底版也要按身份取色：空歌单/空专辑不该是一块灰。
+        let previewSeed = "library:\(String(describing: section))"
         switch section {
         case .favorites, .folders, .statistics:
             EmptyView()
         case .recommendations:
-            overlappingPreview(previewSongs) { song in
+            overlappingPreview(previewSongs, seed: previewSeed) { song in
                 CachedArtworkView(
                     coverRef: song.coverArtFileName,
                     songID: song.id,
@@ -796,7 +798,7 @@ struct LibraryView: View {
                 )
             }
         case .songs:
-            overlappingPreview(previewSongs) { song in
+            overlappingPreview(previewSongs, seed: previewSeed) { song in
                 CachedArtworkView(
                     coverRef: song.coverArtFileName,
                     songID: song.id,
@@ -810,6 +812,7 @@ struct LibraryView: View {
         case .albums:
             artworkPreview(
                 previewAlbums,
+                seed: previewSeed,
                 placeholderIcon: "square.stack",
                 cornerRadius: 7
             ) { album in
@@ -823,6 +826,7 @@ struct LibraryView: View {
         case .artists:
             artworkPreview(
                 previewArtists,
+                seed: previewSeed,
                 placeholderIcon: "music.mic",
                 cornerRadius: 18
             ) { artist in
@@ -834,7 +838,7 @@ struct LibraryView: View {
                 )
             }
         case .genres:
-            overlappingPreview(previewGenreSongs) { song in
+            overlappingPreview(previewGenreSongs, seed: previewSeed) { song in
                 CachedArtworkView(
                     coverRef: song.coverArtFileName,
                     songID: song.id,
@@ -846,11 +850,11 @@ struct LibraryView: View {
                 )
             }
         case .playlists:
-            overlappingPreview(previewPlaylists) { playlist in
+            overlappingPreview(previewPlaylists, seed: previewSeed) { playlist in
                 playlistArtwork(playlist, size: 36, cornerRadius: 7)
             }
         case .radio:
-            overlappingPreview(previewRadioStations) { station in
+            overlappingPreview(previewRadioStations, seed: previewSeed) { station in
                 RadioStationArtworkView(station: station, size: 36, cornerRadius: 7)
             }
         }
@@ -998,12 +1002,12 @@ struct LibraryView: View {
 
     private func overlappingPreview<Item: Identifiable, Content: View>(
         _ items: [Item],
+        seed: String,
         @ViewBuilder content: @escaping (Item) -> Content
     ) -> some View {
         HStack(spacing: -10) {
             if items.isEmpty {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.secondary.opacity(0.1))
+                CoverPlaceholder(identity: seed, size: 36, cornerRadius: 7, continuous: true)
                     .frame(width: 36, height: 36)
             } else {
                 ForEach(items) { item in
@@ -1020,17 +1024,20 @@ struct LibraryView: View {
 
     private func artworkPreview<Item: Identifiable, Content: View>(
         _ items: [Item],
+        seed: String,
         placeholderIcon: String,
         cornerRadius: CGFloat,
         @ViewBuilder content: @escaping (Item) -> Content
     ) -> some View {
         ZStack(alignment: .trailing) {
             ZStack {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.secondary.opacity(0.1))
-                Image(systemName: placeholderIcon)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.tertiary)
+                CoverPlaceholder(
+                    identity: seed,
+                    icon: placeholderIcon,
+                    size: 36,
+                    cornerRadius: cornerRadius,
+                    continuous: true
+                )
             }
             .frame(width: 36, height: 36)
 

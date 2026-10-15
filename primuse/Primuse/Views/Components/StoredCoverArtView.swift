@@ -422,20 +422,21 @@ struct PlaylistArtworkView: View {
         #endif
     }
 
+    /// 占位身份与 Windows 端同一个口径：那边是 `bgStyle(url, playlist.name)`，
+    /// 这里也用歌单名做种子；名字为空才退回 id。
+    private var placeholderIdentity: String {
+        let name = currentPlaylist.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "playlist:\(currentPlaylist.id)" : name
+    }
+
     private var symbolicPlaceholder: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.secondary.opacity(0.18), Color.secondary.opacity(0.32)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            Image(systemName: placeholderIcon)
-                .font(.system(size: max(size * 0.25, 10), weight: .medium))
-                .foregroundStyle(.secondary)
-        }
+        CoverPlaceholder(
+            identity: placeholderIdentity,
+            icon: placeholderIcon,
+            size: size,
+            cornerRadius: cornerRadius,
+            continuous: true
+        )
     }
 
     @ViewBuilder
@@ -1524,8 +1525,15 @@ struct StoredCoverArtView: View {
 
     @State private var data: Data?
 
+    /// 磁盘文件名本身就是稳定身份：没有封面时按它取占位色，同一首歌在两台设备上
+    /// 拿到的是同一档颜色（而不是各自随机）。
+    private var coverIdentity: String {
+        guard let fileName, fileName.isEmpty == false else { return "placeholder:music.note" }
+        return "file:\(fileName)"
+    }
+
     var body: some View {
-        CoverArtView(data: data, size: size, cornerRadius: cornerRadius)
+        CoverArtView(data: data, size: size, cornerRadius: cornerRadius, identity: coverIdentity)
             .task(id: fileName) {
                 data = await loadData(for: fileName)
             }
@@ -1538,8 +1546,13 @@ struct StoredArtworkView: View {
 
     @State private var data: Data?
 
+    private var coverIdentity: String {
+        guard let fileName, fileName.isEmpty == false else { return "placeholder:music.note" }
+        return "file:\(fileName)"
+    }
+
     var body: some View {
-        ArtworkView(data: data, cornerRadius: cornerRadius)
+        ArtworkView(data: data, cornerRadius: cornerRadius, identity: coverIdentity)
             .task(id: fileName) {
                 data = await loadData(for: fileName)
             }
