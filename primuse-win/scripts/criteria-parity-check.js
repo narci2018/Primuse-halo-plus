@@ -84,6 +84,9 @@ const WIN_STRIP_VIEW = read('primuse-win/src/renderer/taskbar-lyric-view.js');
 const SWIFT_MAC_LYRIC = read('primuse/Primuse/Views/Mac/MacMiniaturizedLyrics.swift');
 const SWIFT_MAC_SOURCES = read('primuse/Primuse/Views/Mac/MacSourcesView.swift');
 const SWIFT_MAC_MENUBAR = read('primuse/Primuse/App/MacMenuBarController.swift');
+const SWIFT_MAC_PHONE = read('primuse/Primuse/Views/Mac/MacPhoneLayout.swift');
+const SWIFT_MAC_BOTTOMBAR = read('primuse/Primuse/Views/Mac/MacBottomBar.swift');
+const SWIFT_MAC_HOME = read('primuse/Primuse/Views/Mac/MacHomeView.swift');
 
 // MARK: - 断言器（与 cloud-sources-contract-test.js 同一形状）
 
@@ -1024,6 +1027,117 @@ record('Mac 搜索页不许藏在线的错误态：有错误就算"有内容"，
     && oneLine(SWIFT_SEARCH).includes('case .online: macAggregatedMusicSection')
     && oneLine(SWIFT_SEARCH).includes('macFilterChip( .online, title: "在线 ·'),
   `hasAny=${hasAnyBlock.replace(/\s+/g, ' ').slice(0, 120)}`);
+
+// —— 用户 2026-10-16 拍板：macOS 打开就像 iPhone 竖屏（选项「固定手机比例窗口」）。
+// 这一组钉的不是审美，是几何事故：393 宽里放不下的东西不会报错，它会直接被挤出
+// 窗口 —— 上一轮"投放/音量/迷你播放器凭空不见了"就是这么来的（plan §19）。
+// 所以每一句都对应一个具体症状，改回宽窗口时必须一起改这一组，不许只改代码。
+group('18. macOS 竖屏形态：窗口钉在 393×852，Mac 独有控件一个不删');
+
+const phoneLayoutCode = stripLineComments(SWIFT_MAC_PHONE);
+record('尺寸只有一份来源：393×852 写在 MacPhoneLayout 上，形态判据读常量而不是运行时量出来的宽度',
+  /static let width: CGFloat = 393/.test(phoneLayoutCode)
+    && /static let height: CGFloat = 852/.test(phoneLayoutCode)
+    && /static let isPhoneForm: Bool = width <= 460/.test(phoneLayoutCode),
+  phoneLayoutCode.replace(/\s+/g, ' ').slice(0, 140));
+
+record('窗口不给拖大：defaultSize 用那份常量、resizability 走 .contentSize，1280×820 那套不许回来',
+  /defaultSize\(width: MacPhoneLayout\.width, height: MacPhoneLayout\.height\)/.test(SWIFT_APP)
+    && /windowResizability\(MacPhoneLayout\.isPhoneForm \? \.contentSize : \.contentMinSize\)/.test(SWIFT_APP)
+    && !/defaultSize\(width: 1280/.test(SWIFT_APP),
+  `defaultSize=${/defaultSize\(width: (\d+|MacPhoneLayout\.width)/.exec(SWIFT_APP)?.[1]}`);
+
+// `.defaultSize` 只在"没有存档 frame"时才生效，而 frameAutosaveName 里存的是
+// v1.9.20 那会儿的 1280×820 —— 光改 defaultSize，老用户升级完窗口还是宽的，
+// 里面的三列布局又露出一半。必须还有一次 setContentSize。
+const pinBlock = stripLineComments(braceBlock(SWIFT_MAC_SHELL, SWIFT_MAC_SHELL.indexOf('private func pinPhoneWindowSizeIfNeeded')));
+record('存档的宽窗口 frame 会被强制改回 393（setContentSize + center），并且只改一次',
+  pinBlock.includes('MacPhoneLayout.isPhoneForm')
+    && pinBlock.includes('window.setContentSize(target)')
+    && pinBlock.includes('didPinPhoneWindowSize = true')
+    && pinBlock.includes('.fullScreen')
+    && SWIFT_MAC_SHELL.includes('pinPhoneWindowSizeIfNeeded(in: window)'),
+  pinBlock.replace(/\s+/g, ' ').slice(0, 160));
+
+// 全屏播放（原窗 + 独立窗）都要 `.contentSize` 让路，否则 SwiftUI 的封顶把
+// 系统全屏的那一步顶回去 = 点「全屏播放」没反应。
+const phoneMaxBlock = stripLineComments(braceBlock(SWIFT_MAC_SHELL, SWIFT_MAC_SHELL.indexOf('private var phoneContentMaxWidth')));
+const realFullScreenNotifications = ['willEnterFullScreenNotification', 'willExitFullScreenNotification']
+  .every((n) => SWIFT_MAC_SHELL.includes(`NSWindow.${n}`));
+record('进全屏时上限放开：根封顶读 !isWindowFullScreen，且进出全屏各有监听（用的通知名得是真的）',
+  phoneMaxBlock.includes('!isWindowFullScreen')
+    && phoneMaxBlock.includes('MacPhoneLayout.isPhoneForm')
+    && realFullScreenNotifications
+    && SWIFT_MAC_SHELL.includes('.frame(maxWidth: phoneContentMaxWidth, maxHeight: phoneContentMaxHeight)'),
+  phoneMaxBlock.replace(/\s+/g, ' ').slice(0, 140));
+
+// 并排的队列侧栏在 393 里没有位置：它会把正文挤没，用户看到的是"队列打开后
+// 整个首页不见了"。改成整块覆盖。
+const queueOverlayLine = (SWIFT_MAC_SHELL.split('\n').find((l) => l.includes('MacQueuePanel(onClose')) || '');
+record('队列在竖屏是整块覆盖，不是并排那一条 380 侧栏',
+  queueOverlayLine.includes('MacQueuePanel(onClose')
+    && SWIFT_MAC_SHELL.includes('maxWidth: .infinity, maxHeight: .infinity')
+    && !/\.frame\(width: 380\)/.test(SWIFT_MAC_SHELL),
+  `MacQueuePanel 行="${oneLine(queueOverlayLine).slice(0, 80)}"`);
+
+const macPhoneRow = stripLineComments(braceBlock(SWIFT_MAC_BOTTOMBAR, SWIFT_MAC_BOTTOMBAR.indexOf('private var phoneRow')));
+const macWideRow = stripLineComments(braceBlock(SWIFT_MAC_BOTTOMBAR, SWIFT_MAC_BOTTOMBAR.indexOf('private var wideRow')));
+const macMorePopover = stripLineComments(braceBlock(SWIFT_MAC_BOTTOMBAR, SWIFT_MAC_BOTTOMBAR.indexOf('private var phoneMorePopover')));
+record('底栏竖屏那一行里没有 260 三列（那一套留在 wideRow），Mac 独有的控件全收进一个浮层：音量/随机/重复/迷你/全屏/投放一个不少',
+  macPhoneRow.length > 0 && !macPhoneRow.includes('frame(width: 260')
+    && macWideRow.includes('frame(width: 260')
+    && macMorePopover.includes('phoneVolumeControl')
+    && !macMorePopover.includes('airPlayShown')
+    && macMorePopover.includes('player.shuffleEnabled.toggle()')
+    && macMorePopover.includes('cycleRepeat()')
+    && macMorePopover.includes('onMiniPlayer()')
+    && macMorePopover.includes('onFullScreen()')
+    && macMorePopover.includes('castShown = true'),
+  `phoneRow 长度=${macPhoneRow.length}，浮层里缺=${['phoneVolumeControl', 'shuffleEnabled.toggle', 'cycleRepeat', 'onMiniPlayer', 'onFullScreen', 'castShown'].filter((k) => !macMorePopover.includes(k)).join('/') || '无'}`);
+
+// 竖屏那一行不渲染 rightColumn，挂在它上面的两个浮层面板就没了宿主 —— 之前是"点不到投放"。
+// 音量行里那枚喇叭同理：popover 套 popover 一点就关外层，面板出不来。
+record('投放与输出设备在竖屏都有宿主（phoneMoreControls 自己带 popover），浮层里不再套浮层',
+  /phoneMoreControls[\s\S]{0,600}\.popover\(isPresented: \$castShown/.test(stripLineComments(SWIFT_MAC_BOTTOMBAR))
+    && /phoneMoreControls[\s\S]{0,900}\.popover\(isPresented: \$phoneAudioOutShown/.test(stripLineComments(SWIFT_MAC_BOTTOMBAR))
+    && stripLineComments(SWIFT_MAC_BOTTOMBAR).includes('CastDevicePickerSheet()')
+    && stripLineComments(SWIFT_MAC_BOTTOMBAR).includes('phoneVolumeControl'),
+  '找不到 castShown / phoneAudioOutShown 那层 popover 就是竖屏点不开投放与输出设备');
+
+const titleBarPhone = stripLineComments(braceBlock(SWIFT_MAC_TITLEBAR, SWIFT_MAC_TITLEBAR.indexOf('private var phoneRow')));
+record('标题栏竖屏：搜索框吃满剩余宽度（居中那条 min 240 只在 wideRow），并且留了一段能拖窗口的地方',
+  titleBarPhone.includes('.frame(maxWidth: .infinity)')
+    && !titleBarPhone.includes('minWidth: 240')
+    && titleBarPhone.includes('PMWindowDragRegion')
+    && titleBarPhone.includes('PMStandardWindowButtonArea'),
+  titleBarPhone.replace(/\s+/g, ' ').slice(0, 140));
+
+record('设置页内嵌不再要 620 最小宽、也没有 196 侧栏：分区做成可横滑 pill，目的地行挪到正文底部',
+  !SWIFT_MAC_SETTINGS.includes('embedded ? 196 : 200')
+    && !SWIFT_MAC_SETTINGS.includes('minWidth: 620')
+    && SWIFT_MAC_SETTINGS.includes('embeddedCategoryStrip')
+    && braceBlock(SWIFT_MAC_SETTINGS, SWIFT_MAC_SETTINGS.indexOf('private var embeddedCategoryStrip')).includes('ScrollView(.horizontal')
+    && braceBlock(SWIFT_MAC_SETTINGS, SWIFT_MAC_SETTINGS.indexOf('private var contentPane')).includes('embeddedDestinationRows')
+    && SWIFT_MAC_SETTINGS.includes('hInset: embedded ? 16 : 32'),
+  '内嵌侧栏或 620 下限回来了 = 设置页右边又被顶出窗口');
+
+record('首页与来源页的左右留白按形态收（393 里 36pt 留白会把正文压到 321），字号也跟着收',
+  braceBlock(SWIFT_MAC_HOME, SWIFT_MAC_HOME.indexOf('private var pageHInset')).includes('MacPhoneLayout.isPhoneForm ? 16 : PMSpace.xxxl')
+    && braceBlock(SWIFT_MAC_SOURCES, SWIFT_MAC_SOURCES.indexOf('private var pageHInset')).includes('MacPhoneLayout.isPhoneForm ? 16 : PMSpace.xxxl')
+    && !SWIFT_MAC_SOURCES.includes('.padding(.horizontal, PMSpace.xxxl)')
+    && !SWIFT_MAC_HOME.includes('.padding(.horizontal, PMSpace.xxxl)')
+    && SWIFT_MAC_SOURCES.includes('MacPhoneLayout.isPhoneForm ? 24 : 32'),
+  '两处 xxxl 留白还在 = 卡片里那排按钮放不下');
+
+// 正在播放页：竖屏放不下"封面 380 + 歌词 560"那一排，改成上下堆叠。
+const npPhoneBlock = stripLineComments(braceBlock(SWIFT_MAC_PLAYER, SWIFT_MAC_PLAYER.indexOf('MacPhoneLayout.isPhoneForm && !isWindowFullScreen')));
+record('正在播放页竖屏是上下堆叠（封面在上、歌词在下），封面尺寸收到 264；电台页同一套',
+  npPhoneBlock.includes('artworkPane')
+    && npPhoneBlock.includes('lyricsPane')
+    && SWIFT_MAC_PLAYER.includes('MacPhoneLayout.isPhoneForm ? 264 : 380')
+    && SWIFT_MAC_PLAYER.includes('if MacPhoneLayout.isPhoneForm && !isWindowFullScreen')
+    && SWIFT_MAC_PLAYER.includes('radioArtwork(size: 240)'),
+  npPhoneBlock.replace(/\s+/g, ' ').slice(0, 140));
 
 // MARK: - 汇总
 

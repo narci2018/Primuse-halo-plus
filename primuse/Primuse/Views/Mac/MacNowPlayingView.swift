@@ -159,6 +159,22 @@ struct MacNowPlayingView: View {
                             .padding(.horizontal, 48)
                     } else if player.isLiveRadio {
                         radioNowPlaying
+                    } else if MacPhoneLayout.isPhoneForm && !isWindowFullScreen {
+                        // 竖屏形态：原来是「左封面 380 + 右歌词」两栏，380 + 40 的间距
+                        // + 56×2 的内缩 = 532，比整窗还宽 139 —— 歌词那一栏整个被推到
+                        // 窗口外面，屏幕上就只剩一张封面。iPhone 的「正在播放」本来就是
+                        // 上下叠：封面在上、歌词在下，这里照它做。
+                        VStack(spacing: 16) {
+                            artworkPane
+                                .frame(maxWidth: .infinity)
+                                .layoutPriority(1)
+
+                            lyricsPane
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 56)
+                        .padding(.bottom, 20)
                     } else {
                         HStack(alignment: .center, spacing: isWindowFullScreen ? 80 : 40) {
                             artworkPane
@@ -300,93 +316,117 @@ struct MacNowPlayingView: View {
         }
     }
 
+    @ViewBuilder
     private var radioNowPlaying: some View {
-        HStack(spacing: isWindowFullScreen ? 90 : 54) {
-            if let station = player.currentRadioStation {
-                let size: CGFloat = isWindowFullScreen ? 520 : 380
-                RadioStationArtworkView(
-                    station: station,
-                    size: size,
-                    cornerRadius: isWindowFullScreen ? 24 : 18
-                )
-                .shadow(color: .black.opacity(0.30), radius: 28, y: 14)
+        if MacPhoneLayout.isPhoneForm && !isWindowFullScreen {
+            // 竖屏形态：电台页原来也是两栏 —— 380 的台标 + 54 的间距 + 72×2 的内缩
+            // = 578，超出整窗 185pt，右侧的台名/停止按钮整个在屏幕外。
+            VStack(spacing: 20) {
+                radioArtwork(size: 240)
+
+                radioInfoColumn(titleSize: 26, subSize: 15)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 56)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            HStack(spacing: isWindowFullScreen ? 90 : 54) {
+                radioArtwork(size: isWindowFullScreen ? 520 : 380)
 
-            VStack(alignment: .leading, spacing: 18) {
-                Spacer()
-
-                HStack(spacing: 8) {
-                    Circle().fill(.red).frame(width: 9, height: 9)
-                    Text("live_badge")
-                        .font(.system(size: 13, weight: .bold))
-                    if player.currentTime > 0 {
-                        Text("·")
-                        Text(player.currentTime.formattedDuration)
-                            .monospacedDigit()
-                    }
-                }
-                .foregroundStyle(playerSecondaryColor)
-
-                Text(player.currentRadioStation?.name ?? player.currentSong?.title ?? "")
-                    .font(.system(size: isWindowFullScreen ? 48 : 38, weight: .bold))
-                    .foregroundStyle(playerPrimaryColor)
-                    .lineLimit(2)
-
-                Text(
-                    player.radioMetadataTitle
-                        ?? player.currentSong.flatMap { library.artistDisplayName(for: $0) }
-                        ?? ""
-                )
-                    .font(.system(size: isWindowFullScreen ? 24 : 20, weight: .medium))
-                    .foregroundStyle(playerSecondaryColor)
-                    .lineLimit(3)
-
-                Text(radioTechnicalSummary)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(playerFaintColor)
-
-                HStack(spacing: 12) {
-                    Button { Task { await player.previous() } } label: {
-                        Image(systemName: "backward.fill")
-                            .frame(width: 42, height: 42)
-                            .background(playerFaintColor.opacity(0.14), in: Circle())
-                    }
-                    .disabled(!player.canSwitchRadioStation)
-                    .help(Text("radio_previous_station"))
-
-                    Button { player.togglePlayPause() } label: {
-                        Label(
-                            (player.isPlaying || player.isLoading)
-                                ? String(localized: "radio_stop")
-                                : String(localized: "a11y_play"),
-                            systemImage: (player.isPlaying || player.isLoading)
-                                ? "stop.circle.fill"
-                                : "play.circle.fill"
-                        )
-                        .font(.system(size: 17, weight: .semibold))
-                        .padding(.horizontal, 20)
-                        .frame(height: 46)
-                        .foregroundStyle(theme.onAccent)
-                        .background(theme.accentColor, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-
-                    Button { Task { await player.next() } } label: {
-                        Image(systemName: "forward.fill")
-                            .frame(width: 42, height: 42)
-                            .background(playerFaintColor.opacity(0.14), in: Circle())
-                    }
-                    .disabled(!player.canSwitchRadioStation)
-                    .help(Text("radio_next_station"))
-                }
-
-                Spacer()
+                radioInfoColumn(titleSize: isWindowFullScreen ? 48 : 38,
+                                subSize: isWindowFullScreen ? 24 : 20)
+                    .frame(maxWidth: 560, alignment: .leading)
             }
-            .frame(maxWidth: 560, alignment: .leading)
+            .padding(.horizontal, isWindowFullScreen ? 120 : 72)
+            .padding(.vertical, isWindowFullScreen ? 100 : 72)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.horizontal, isWindowFullScreen ? 120 : 72)
-        .padding(.vertical, isWindowFullScreen ? 100 : 72)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func radioArtwork(size: CGFloat) -> some View {
+        if let station = player.currentRadioStation {
+            RadioStationArtworkView(
+                station: station,
+                size: size,
+                cornerRadius: isWindowFullScreen ? 24 : 18
+            )
+            .shadow(color: .black.opacity(0.30), radius: 28, y: 14)
+        }
+    }
+
+    private func radioInfoColumn(titleSize: CGFloat, subSize: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: MacPhoneLayout.isPhoneForm ? 12 : 18) {
+            Spacer(minLength: 0)
+
+            HStack(spacing: 8) {
+                Circle().fill(.red).frame(width: 9, height: 9)
+                Text("live_badge")
+                    .font(.system(size: 13, weight: .bold))
+                if player.currentTime > 0 {
+                    Text("·")
+                    Text(player.currentTime.formattedDuration)
+                        .monospacedDigit()
+                }
+            }
+            .foregroundStyle(playerSecondaryColor)
+
+            Text(player.currentRadioStation?.name ?? player.currentSong?.title ?? "")
+                .font(.system(size: titleSize, weight: .bold))
+                .foregroundStyle(playerPrimaryColor)
+                .lineLimit(2)
+
+            Text(
+                player.radioMetadataTitle
+                    ?? player.currentSong.flatMap { library.artistDisplayName(for: $0) }
+                    ?? ""
+            )
+                .font(.system(size: subSize, weight: .medium))
+                .foregroundStyle(playerSecondaryColor)
+                .lineLimit(3)
+
+            Text(radioTechnicalSummary)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(playerFaintColor)
+
+            HStack(spacing: 12) {
+                Button { Task { await player.previous() } } label: {
+                    Image(systemName: "backward.fill")
+                        .frame(width: 42, height: 42)
+                        .background(playerFaintColor.opacity(0.14), in: Circle())
+                }
+                .disabled(!player.canSwitchRadioStation)
+                .help(Text("radio_previous_station"))
+
+                Button { player.togglePlayPause() } label: {
+                    Label(
+                        (player.isPlaying || player.isLoading)
+                            ? String(localized: "radio_stop")
+                            : String(localized: "a11y_play"),
+                        systemImage: (player.isPlaying || player.isLoading)
+                            ? "stop.circle.fill"
+                            : "play.circle.fill"
+                    )
+                    .font(.system(size: 17, weight: .semibold))
+                    .padding(.horizontal, 20)
+                    .frame(height: 46)
+                    .foregroundStyle(theme.onAccent)
+                    .background(theme.accentColor, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button { Task { await player.next() } } label: {
+                    Image(systemName: "forward.fill")
+                        .frame(width: 42, height: 42)
+                        .background(playerFaintColor.opacity(0.14), in: Circle())
+                }
+                .disabled(!player.canSwitchRadioStation)
+                .help(Text("radio_next_station"))
+            }
+
+            Spacer(minLength: 0)
+        }
     }
 
     private var radioTechnicalSummary: String {
@@ -495,8 +535,18 @@ struct MacNowPlayingView: View {
     }
 
     private var artworkPane: some View {
-        let coverSize: CGFloat = isWindowFullScreen ? 520 : 380
+        // 竖屏形态封面收到 264：393 减掉正文内缩 20×2 还剩 353，380 的封面
+        // 连同它外面那圈 40 的环境光就直接顶出窗口右边缘。
+        let coverSize: CGFloat = isWindowFullScreen
+            ? 520
+            : (MacPhoneLayout.isPhoneForm ? 264 : 380)
         let coverRadius: CGFloat = isWindowFullScreen ? 18 : 14
+        let titleSize: CGFloat = isWindowFullScreen
+            ? 56
+            : (MacPhoneLayout.isPhoneForm ? 24 : 36)
+        let metaSize: CGFloat = isWindowFullScreen
+            ? 36
+            : (MacPhoneLayout.isPhoneForm ? 15 : 24)
         let isShowingMusicVideo = player.isMusicVideoPlaybackActive && player.musicVideoPlayer != nil
         let mediaHeight = isShowingMusicVideo ? coverSize * 9 / 16 : coverSize
         let horizontalAlignment: HorizontalAlignment = isWindowFullScreen ? .center : .leading
@@ -584,7 +634,7 @@ struct MacNowPlayingView: View {
                     .foregroundStyle(playerFaintColor)
                     .textCase(.uppercase)
                 Text(player.currentSong?.title ?? "")
-                    .font(.system(size: isWindowFullScreen ? 56 : 36, weight: .bold))
+                    .font(.system(size: titleSize, weight: .bold))
                     .tracking(-0.6)
                     .foregroundStyle(playerPrimaryColor)
                     .lineLimit(2)
@@ -597,7 +647,7 @@ struct MacNowPlayingView: View {
                         foreground: playerSecondaryColor,
                         highlight: playerPrimaryColor
                     )
-                    .font(.system(size: isWindowFullScreen ? 36 : 24))
+                    .font(.system(size: metaSize))
                     .padding(.top, 6)
                 }
                 if let sourceLabel, !sourceLabel.isEmpty {

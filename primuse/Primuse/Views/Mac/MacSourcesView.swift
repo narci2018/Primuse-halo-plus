@@ -39,6 +39,10 @@ struct MacSourcesView: View {
 
     private let statusBlue = Color(red: 0.24, green: 0.48, blue: 0.72)
 
+    /// 竖屏形态下 36pt 左右留白把正文压到 321，卡片里「源名 + 主机 + 三枚文字按钮 +
+    /// 开关」那一排就挤不下了。跟首页同一处理：窄窗口收边距，宽窗口不动。
+    private var pageHInset: CGFloat { MacPhoneLayout.isPhoneForm ? 16 : PMSpace.xxxl }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             actionBar
@@ -165,7 +169,7 @@ struct MacSourcesView: View {
                         .textCase(.uppercase)
                         .foregroundStyle(PMColor.textMuted)
                     Text(Lz("Connected"))
-                        .font(.system(size: 32, weight: .bold))
+                        .font(.system(size: MacPhoneLayout.isPhoneForm ? 24 : 32, weight: .bold))
                         .tracking(-0.5)
                         .foregroundStyle(PMColor.text)
                 }
@@ -200,7 +204,7 @@ struct MacSourcesView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(PMColor.textMuted)
         }
-        .padding(.horizontal, 36)
+        .padding(.horizontal, pageHInset)
         .padding(.top, 28)
         .padding(.bottom, 20)
     }
@@ -237,7 +241,7 @@ struct MacSourcesView: View {
                     }
                 }
             }
-            .padding(.horizontal, PMSpace.xxxl)
+            .padding(.horizontal, pageHInset)
             .padding(.vertical, PMSpace.l)
             .padding(.bottom, 80)
         }

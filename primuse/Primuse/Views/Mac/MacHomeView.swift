@@ -90,6 +90,10 @@ struct MacHomeView: View {
 
     private var hasContent: Bool { derived.songCount > 0 }
 
+    /// 正文左右留白。宽窗口沿用了设计稿的 36；竖屏形态收到 16（iPhone 那一套）。
+    /// 36 在 393 宽里要吃掉 18% 的横向空间，专辑网格当场少一列。
+    private var pageHInset: CGFloat { MacPhoneLayout.isPhoneForm ? 16 : PMSpace.xxxl }
+
     private var homePresentationState: DeferredContentPresentationState {
         DeferredContentPresentationPolicy.resolve(
             isPrepared: hasPreparedDerivedSnapshot,
@@ -158,7 +162,7 @@ struct MacHomeView: View {
                     resolvedDashboardContent(hasContent: false)
                 }
             }
-            .padding(.horizontal, PMSpace.xxxl)
+            .padding(.horizontal, pageHInset)
             .padding(.top, PMSpace.l24)
             .padding(.bottom, 104)
         }
@@ -204,32 +208,60 @@ struct MacHomeView: View {
                     RoundedRectangle(cornerRadius: PMRadius.xxl, style: .continuous)
                         .fill(PMColor.bgElev)
 
-                    HStack(spacing: 36) {
-                        homeSkeletonBlock(
-                            width: 240,
-                            height: 240,
-                            cornerRadius: PMRadius.xl
-                        )
+                    if MacPhoneLayout.isPhoneForm {
+                        // 骨架屏也得跟着竖屏走：那块 240 的封面加 32 的留白就把
+                        // 393 吃完了，右边那两条 510 / 390 宽的灰条会直接顶出窗口。
+                        VStack(spacing: 12) {
+                            homeSkeletonBlock(
+                                width: 132,
+                                height: 132,
+                                cornerRadius: PMRadius.xl
+                            )
 
-                        VStack(alignment: .leading, spacing: 14) {
-                            homeSkeletonBlock(width: 82, height: 12)
-                            homeSkeletonBlock(height: 42, cornerRadius: PMRadius.m)
-                                .frame(maxWidth: 510, alignment: .leading)
-                            homeSkeletonBlock(height: 16)
-                                .frame(maxWidth: 390, alignment: .leading)
-                            HStack(spacing: PMSpace.s10) {
-                                homeSkeletonBlock(width: 152, height: 38, cornerRadius: PMRadius.pill)
-                                homeSkeletonBlock(width: 122, height: 38, cornerRadius: PMRadius.pill)
+                            VStack(alignment: .leading, spacing: 10) {
+                                homeSkeletonBlock(width: 82, height: 12)
+                                homeSkeletonBlock(height: 30, cornerRadius: PMRadius.m)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                homeSkeletonBlock(height: 14)
+                                    .frame(maxWidth: 220, alignment: .leading)
+                                HStack(spacing: PMSpace.s10) {
+                                    homeSkeletonBlock(width: 152, height: 38, cornerRadius: PMRadius.pill)
+                                    homeSkeletonBlock(width: 122, height: 38, cornerRadius: PMRadius.pill)
+                                }
+                                .padding(.top, 4)
                             }
-                            .padding(.top, 8)
                         }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 14)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        HStack(spacing: 36) {
+                            homeSkeletonBlock(
+                                width: 240,
+                                height: 240,
+                                cornerRadius: PMRadius.xl
+                            )
 
-                        Spacer(minLength: 0)
+                            VStack(alignment: .leading, spacing: 14) {
+                                homeSkeletonBlock(width: 82, height: 12)
+                                homeSkeletonBlock(height: 42, cornerRadius: PMRadius.m)
+                                    .frame(maxWidth: 510, alignment: .leading)
+                                homeSkeletonBlock(height: 16)
+                                    .frame(maxWidth: 390, alignment: .leading)
+                                HStack(spacing: PMSpace.s10) {
+                                    homeSkeletonBlock(width: 152, height: 38, cornerRadius: PMRadius.pill)
+                                    homeSkeletonBlock(width: 122, height: 38, cornerRadius: PMRadius.pill)
+                                }
+                                .padding(.top, 8)
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, PMSpace.xxl)
+                        .padding(.vertical, PMSpace.l24)
                     }
-                    .padding(.horizontal, PMSpace.xxl)
-                    .padding(.vertical, PMSpace.l24)
                 }
-                .frame(height: 296)
+                .frame(height: MacPhoneLayout.isPhoneForm ? 320 : 296)
                 .clipShape(RoundedRectangle(cornerRadius: PMRadius.xxl, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: PMRadius.xxl, style: .continuous)
@@ -552,67 +584,35 @@ struct MacHomeView: View {
             )
             .allowsHitTesting(false)
 
-            HStack(alignment: .center, spacing: 36) {
-                coverMosaic
-                    .frame(width: 240, height: 240)
-                    .allowsHitTesting(false)
-
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(verbatim: greeting)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.78))
+            if MacPhoneLayout.isPhoneForm {
+                // 竖屏形态：hero 从「左封面 + 右文案」改成上下两段。
+                // 原来那 240 的封面 + 36 的间距 + 一段 40pt 标题，在 393 宽里
+                // 只剩 80pt 给标题 —— 标题会被截成两个词都读不出来的碎片。
+                VStack(spacing: 10) {
+                    coverMosaic
+                        .frame(width: 132, height: 132)
                         .allowsHitTesting(false)
 
-                    Text(verbatim: heroNarrative)
-                        .font(.system(size: 40, weight: .bold))
-                        .tracking(-0.8)
-                        .lineSpacing(2)
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .allowsHitTesting(false)
-
-                    Text(verbatim: heroStats)
-                        .font(.system(size: 13.5, weight: .medium))
-                        .lineSpacing(3)
-                        .foregroundStyle(.white.opacity(0.78))
-                        .lineLimit(2)
-                        .frame(maxWidth: 660, alignment: .leading)
-                        .allowsHitTesting(false)
-
-                    HStack(spacing: PMSpace.s10) {
-                        Button { playLibrary(shuffled: true) } label: {
-                            Label("shuffle_all", systemImage: "shuffle")
-                                .font(.system(size: 13.5, weight: .semibold))
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 11)
-                                .background(PMColor.brand, in: Capsule())
-                                .foregroundStyle(.white)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!hasContent)
-                        .shadow(color: PMColor.brand.opacity(0.45), radius: 10, y: 4)
-
-                        Button { playLibrary(shuffled: false) } label: {
-                            Label("play_all", systemImage: "play.fill")
-                                .font(.system(size: 13.5, weight: .semibold))
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 11)
-                                .background(Color.white.opacity(0.18), in: Capsule())
-                                .overlay { Capsule().strokeBorder(.white.opacity(0.24), lineWidth: 0.5) }
-                                .foregroundStyle(.white)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!hasContent)
-                    }
-                    .padding(.top, 8)
+                    heroCopy(titleSize: 26)
                 }
-                Spacer(minLength: 0)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(alignment: .center, spacing: 36) {
+                    coverMosaic
+                        .frame(width: 240, height: 240)
+                        .allowsHitTesting(false)
+
+                    heroCopy(titleSize: 40)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, PMSpace.xxl)
+                .padding(.vertical, PMSpace.l24)
             }
-            .padding(.horizontal, PMSpace.xxl)
-            .padding(.vertical, PMSpace.l24)
         }
-        .frame(height: 296)
+        .frame(height: MacPhoneLayout.isPhoneForm ? 320 : 296)
         // 3. 整张 Hero 强制裁剪到圆角矩形 — AmbientBackdrop 的 blur 圈会越界, 必须在
         //    最外层统一切, 否则暖色会"漏"到 Hero 上下方区域。
         .clipShape(RoundedRectangle(cornerRadius: PMRadius.xxl, style: .continuous))
@@ -623,6 +623,63 @@ struct MacHomeView: View {
                 .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.45), radius: 8, y: 4)
+    }
+
+    /// Hero 右半边（宽窗口）/ 下半边（竖屏）那四件：问候语、叙事大标题、统计行、
+    /// 两个播放按钮。两种形态共用一份，字号由调用方给 —— 抄两份的结局是
+    /// 以后改文案只改了一边，另一边还写着老话术。
+    private func heroCopy(titleSize: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: MacPhoneLayout.isPhoneForm ? 8 : 14) {
+            Text(verbatim: greeting)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.78))
+                .allowsHitTesting(false)
+
+            Text(verbatim: heroNarrative)
+                .font(.system(size: titleSize, weight: .bold))
+                .tracking(-0.8)
+                .lineSpacing(2)
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .allowsHitTesting(false)
+
+            Text(verbatim: heroStats)
+                .font(.system(size: 13.5, weight: .medium))
+                .lineSpacing(3)
+                .foregroundStyle(.white.opacity(0.78))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .allowsHitTesting(false)
+
+            HStack(spacing: PMSpace.s10) {
+                Button { playLibrary(shuffled: true) } label: {
+                    Label("shuffle_all", systemImage: "shuffle")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 11)
+                        .background(PMColor.brand, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasContent)
+                .shadow(color: PMColor.brand.opacity(0.45), radius: 10, y: 4)
+
+                Button { playLibrary(shuffled: false) } label: {
+                    Label("play_all", systemImage: "play.fill")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 11)
+                        .background(Color.white.opacity(0.18), in: Capsule())
+                        .overlay { Capsule().strokeBorder(.white.opacity(0.24), lineWidth: 0.5) }
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasContent)
+            }
+            .padding(.top, 8)
+        }
     }
 
     /// Playing radio is contextual, so promote only the active station beneath
@@ -1396,7 +1453,11 @@ struct MacHomeView: View {
                 )
 
                 LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 24, alignment: .top), count: 5),
+                    // 原来钉死 5 列：竖屏形态整行只有 361，5 列每张封面 55pt，
+                    // 专辑名一个字都显示不出来。改成自适应，宽窗口仍是 3~4 列。
+                    columns: [GridItem(.adaptive(minimum: MacPhoneLayout.isPhoneForm ? 110 : 150,
+                                                 maximum: 220),
+                                        spacing: 24, alignment: .top)],
                     alignment: .leading,
                     spacing: 24
                 ) {
@@ -1407,7 +1468,7 @@ struct MacHomeView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, PMSpace.xxxl)
+                .padding(.horizontal, pageHInset)
             }
             .padding(.top, 24)
             .padding(.bottom, 112)
@@ -1442,7 +1503,7 @@ struct MacHomeView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, PMSpace.xxxl)
+                .padding(.horizontal, pageHInset)
             }
             .padding(.top, 24)
             .padding(.bottom, 112)
@@ -1499,7 +1560,7 @@ struct MacHomeView: View {
                 action: onBack
             )
         }
-        .padding(.horizontal, PMSpace.xxxl)
+        .padding(.horizontal, pageHInset)
     }
 
     private func closeSection() {

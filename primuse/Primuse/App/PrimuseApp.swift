@@ -1647,8 +1647,15 @@ struct PrimuseApp: App {
         #if os(macOS)
         // 标题栏背景和标题由 PMWindowChromeConfigurator 隐藏。这里保留 SwiftUI
         // 默认窗口样式,避免 `.hiddenTitleBar` 连同原生窗口按钮容器一起隐藏。
-        .defaultSize(width: 1280, height: 820)
-        .windowResizability(.contentMinSize)
+        //
+        // 尺寸口径改了（用户 2026-10-16 拍板"macos 打开也像手机版的界面一样"）：
+        // 主窗口按 iPhone 的 393×852 钉死。`.contentSize` 的意思是"窗口的最小尺寸
+        // 和最大尺寸都取内容自己的尺寸",内容那一格在 `MacContentView` 里被限成
+        // 393×852（全屏期间放开）,于是 min == max,系统不给拉大。
+        // 存档里已经躺着老尺寸的窗口由 `MacContentView.pinPhoneWindowSizeIfNeeded`
+        // 负责钉回来一次。
+        .defaultSize(width: MacPhoneLayout.width, height: MacPhoneLayout.height)
+        .windowResizability(MacPhoneLayout.isPhoneForm ? .contentSize : .contentMinSize)
         .commands {
             // 侧栏已经去掉（四 tab 外壳），`SidebarCommands` 那条「显示/隐藏侧栏」
             // 会点不出东西，所以删掉；`ToolbarCommands` 留着，全屏播放的标题栏仍然有工具栏。

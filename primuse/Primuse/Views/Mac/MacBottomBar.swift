@@ -25,20 +25,16 @@ struct MacBottomBar: View {
     @State private var airPlayShown = false
     @State private var castShown = false
     @State private var coverMenuShown = false
+    /// 竖屏形态那一排装不下 Mac 独有的全部控件，其余的收在这一个浮层里。
+    @State private var phoneMoreShown = false
+    /// 输出设备面板在竖屏也得有自己的宿主（见 `phoneVolumeControl`）。
+    @State private var phoneAudioOutShown = false
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            leftColumn
-                .frame(width: 260, alignment: .leading)
-            transportColumn
-                .frame(maxWidth: .infinity)
-            rightColumn
-                .frame(width: 260, alignment: .trailing)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .frame(height: PMSize.bottomBar)
-        .background {
+        barContent
+            .frame(maxWidth: .infinity)
+            .frame(height: PMSize.bottomBar)
+            .background {
             // 设计稿玻璃底栏: 浮在窗内, 14px 顶部圆角 + 左右 10pt 间距。背景只在圆角
             // 形状内填充 —— 之前用 NSVisualEffectView 的"吸窗后模糊"会画出一个不跟
             // 圆角走的实心方块, 盖出一块半透明方形; 改用直接 fill 圆角形状的
@@ -72,6 +68,180 @@ struct MacBottomBar: View {
         .padding(.horizontal, mode == .glass ? 10 : 0)
     }
 
+    @ViewBuilder
+    private var barContent: some View {
+        if MacPhoneLayout.isPhoneForm {
+            phoneRow
+        } else {
+            wideRow
+        }
+    }
+
+    /// 宽窗口那套三列布局（左 260 / 中弹性 / 右 260）。只在窗口不锁手机宽度时用。
+    private var wideRow: some View {
+        HStack(alignment: .center, spacing: 14) {
+            leftColumn
+                .frame(width: 260, alignment: .leading)
+            transportColumn
+                .frame(maxWidth: .infinity)
+            rightColumn
+                .frame(width: 260, alignment: .trailing)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - 竖屏形态（iPhone 那一条迷你播放条）
+
+    /// 用户 2026-10-16 拍板 macOS 的**外壳形态**照 iPhone 做，窗口钉在 393 宽。
+    /// 上面那三列在这里放不下：260 + 260 就已经超过整窗宽度，右半会被挤出窗口，
+    /// 看着像"投放、音量、迷你播放器这些按钮凭空不见了"。
+    /// iPhone 的迷你条本来就只留「封面 + 曲名 + 播放/下一首」，其余收进
+    /// 「正在播放」页 —— 这里同理：把 Mac 独有的那一堆控件收进一个浮层，
+    /// 一个都不删，只是不再摊在这一行上。进度条单独占一行，跟 iPhone 的
+    /// 迷你条下方那条细进度同一位置。
+    private var phoneRow: some View {
+        VStack(spacing: 3) {
+            HStack(spacing: 8) {
+                coverThumb
+                    .onTapGesture { onToggleNowPlaying() }
+
+                titleBlock
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if player.currentSong != nil, !player.isLiveRadio {
+                    likeButton
+                }
+
+                playPauseButton
+
+                PMRoundBtn(icon: isQueueShown ? "list.bullet.indent" : "list.bullet",
+                           iconSize: 12, style: .plain,
+                           isActive: isQueueShown, help: "queue_title") {
+                    onToggleQueue()
+                }
+
+                phoneMoreControls
+            }
+
+            scrubberRow
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    /// Mac 独有、但 iPhone 迷你条上没有的那一簇控件。全部保留，改挂在
+    /// 一个浮层里 —— 每个都还在，只是不再是屏幕上一排点不着的小图标。
+    private var phoneMoreControls: some View {
+        Button { phoneMoreShown.toggle() } label: {
+            PMRoundBtnIcon(icon: "slider.horizontal.3", help: "more")
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $phoneMoreShown, arrowEdge: .top) {
+            phoneMorePopover
+        }
+        // 投放设备面板在宽窗口那套里挂在右列那枚电视按钮上；竖屏那一列根本不渲染，
+        // 光把 `castShown` 置真没有任何宿主，面板一次都不会出现。所以这里在同一枚
+        // 「更多」按钮上再挂一个 popover，用同一个状态变量。
+        .popover(isPresented: $castShown, arrowEdge: .top) {
+            CastDevicePickerSheet()
+                .frame(minWidth: 360, minHeight: 460)
+        }
+        .popover(isPresented: $phoneAudioOutShown, arrowEdge: .top) {
+            AudioOutputPickerView()
+        }
+    }
+
+    private var phoneMorePopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !player.isLiveRadio {
+                popoverToggleRow(icon: isExpanded ? "text.bubble.fill" : "text.bubble",
+                                 title: LocalizedStringKey("lyrics_word"),
+                                 isOn: isExpanded) {
+                    phoneMoreShown = false
+                    onToggleNowPlaying()
+                }
+                popoverToggleRow(icon: "tv.and.hifispeaker.fill",
+                                 title: LocalizedStringKey("cast_picker_title"),
+                                 isOn: player.isCastingMode) {
+                    phoneMoreShown = false
+                    castShown = true
+                }
+
+                // 随机与循环只对歌曲有意义，直播电台那两条在宽窗口版本里也是藏起来的。
+                popoverToggleRow(icon: "shuffle",
+                                 title: LocalizedStringKey("shuffle"),
+                                 isOn: player.shuffleEnabled) {
+                    player.shuffleEnabled.toggle()
+                }
+                popoverToggleRow(icon: repeatIconName,
+                                 title: LocalizedStringKey("repeat"),
+                                 isOn: player.repeatMode != .off) {
+                    cycleRepeat()
+                }
+            }
+
+            Divider()
+
+            phoneVolumeControl
+
+            Divider()
+
+            popoverActionRow(icon: "rectangle.inset.filled.on.rectangle",
+                             title: LocalizedStringKey("mini_player")) {
+                phoneMoreShown = false
+                onMiniPlayer()
+            }
+            popoverActionRow(icon: "arrow.up.left.and.arrow.down.right",
+                             title: LocalizedStringKey("full_screen_player")) {
+                phoneMoreShown = false
+                onFullScreen()
+            }
+            if ImmersiveEffectEntryPolicy.showsMacQuickAccess(
+                hasCurrentSong: player.currentSong != nil,
+                isLiveRadio: player.isLiveRadio
+            ) {
+                fullscreenEffectMenu
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // 「加入歌单 / 刮削 / 歌曲信息 / 分享 / 睡眠定时」那一串不在这里：
+            // `PlayerMoreMenu` 自己是 Button + popover，套在本 popover 里点开会把外层
+            // 直接关掉。它本来就在「正在播放」页右上角（`floatingControls`）有一份，
+            // 竖屏形态点封面/歌词按钮先进那一页，那枚 ⋯ 一直在。
+        }
+        .padding(14)
+        .frame(width: 260)
+    }
+
+    private func popoverToggleRow(icon: String, title: LocalizedStringKey,
+                                  isOn: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(isOn ? PMColor.brand : PMColor.textMuted)
+                    .frame(width: 18)
+                Text(title)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(PMColor.text)
+                Spacer(minLength: 6)
+                if isOn {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(PMColor.brand)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func popoverActionRow(icon: String, title: LocalizedStringKey,
+                                  action: @escaping () -> Void) -> some View {
+        popoverToggleRow(icon: icon, title: title, isOn: false, action: action)
+    }
+
     // MARK: - Left column
 
     private var leftColumn: some View {
@@ -79,54 +249,67 @@ struct MacBottomBar: View {
             coverThumb
                 .onTapGesture { onToggleNowPlaying() }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(player.currentSong?.title ?? String(localized: "player_empty_title"))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(player.currentSong == nil ? PMColor.textMuted : PMColor.text)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(metaLine.isEmpty ? String(localized: "player_empty_message") : metaLine)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(PMColor.textMuted)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+            titleBlock
 
             Spacer(minLength: 4)
 
-            if let song = player.currentSong, !player.isLiveRadio {
-                let liked = library.isLiked(songID: song.id)
-                Button {
-                    library.toggleLiked(songID: song.id)
-                } label: {
-                    Image(systemName: liked ? "heart.fill" : "heart")
-                        .font(.system(size: 13))
-                        .foregroundStyle(liked ? PMColor.brand : PMColor.textMuted)
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(Text(liked ? "a11y_unlike" : "a11y_like"))
-                .animation(.easeOut(duration: 0.12), value: liked)
+            if player.currentSong != nil, !player.isLiveRadio {
+                likeButton
             }
         }
     }
 
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(player.currentSong?.title ?? String(localized: "player_empty_title"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(player.currentSong == nil ? PMColor.textMuted : PMColor.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(metaLine.isEmpty ? String(localized: "player_empty_message") : metaLine)
+                .font(.system(size: 11.5))
+                .foregroundStyle(PMColor.textMuted)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+
+    private var likeButton: some View {
+        let song = player.currentSong
+        let liked = song.map { library.isLiked(songID: $0.id) } ?? false
+        return Button {
+            if let song { library.toggleLiked(songID: song.id) }
+        } label: {
+            Image(systemName: liked ? "heart.fill" : "heart")
+                .font(.system(size: 13))
+                .foregroundStyle(liked ? PMColor.brand : PMColor.textMuted)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(Text(liked ? "a11y_unlike" : "a11y_like"))
+        .animation(.easeOut(duration: 0.12), value: liked)
+    }
+
+    /// 竖屏那一行只有 393 宽，48 的封面会把曲名挤到只剩几个字；
+    /// iPhone 的迷你条用的是 30，这里取 38 兼顾macOS 的鼠标点击目标。
+    private var coverThumbSize: CGFloat { MacPhoneLayout.isPhoneForm ? 38 : 48 }
+
     private var coverThumb: some View {
         Group {
             if let station = player.currentRadioStation, player.isLiveRadio {
-                RadioStationArtworkView(station: station, size: 48, cornerRadius: 5)
+                RadioStationArtworkView(station: station, size: coverThumbSize, cornerRadius: 5)
             } else if let song = player.currentSong {
                 CachedArtworkView(
                     coverRef: song.coverArtFileName,
                     songID: song.id,
-                    size: 48, cornerRadius: 5,
+                    size: coverThumbSize, cornerRadius: 5,
                     sourceID: song.sourceID,
                     filePath: song.filePath,
                     fileFormat: song.fileFormat
                 )
             } else {
-                CoverArtView(data: nil, size: 48, cornerRadius: 5)
+                CoverArtView(data: nil, size: coverThumbSize, cornerRadius: 5)
             }
         }
         .help(Text(isExpanded ? "close" : "now_playing"))
@@ -156,28 +339,7 @@ struct MacBottomBar: View {
                         Task { await player.previous() }
                     }
                 }
-                Button { player.togglePlayPause() } label: {
-                    ZStack {
-                        Circle().fill(PMColor.brand).frame(width: 36, height: 36)
-                        if player.isLoading && !player.isLiveRadio {
-                            ProgressView().controlSize(.small).tint(.white)
-                        } else {
-                            Image(systemName: player.isLiveRadio && (player.isPlaying || player.isLoading)
-                                ? "stop.fill"
-                                : (player.isPlaying ? "pause.fill" : "play.fill"))
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(.white)
-                                .contentTransition(.symbolEffect(.replace))
-                                .offset(x: player.isPlaying ? 0 : 1)
-                        }
-                    }
-                    .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(player.isLoading && !player.isLiveRadio)
-                .help(Text(player.isLiveRadio && (player.isPlaying || player.isLoading)
-                    ? "radio_stop"
-                    : (player.isPlaying ? "pause" : "play")))
+                playPauseButton
 
                 if !player.isLiveRadio || player.canSwitchRadioStation {
                     transportBtn("forward.fill", size: 13, help: player.isLiveRadio ? "radio_next_station" : "next_song") {
@@ -212,6 +374,33 @@ struct MacBottomBar: View {
         case .all: player.repeatMode = .one
         case .one: player.repeatMode = .off
         }
+    }
+
+    /// 中间那枚圆形播放/暂停。宽栏和竖屏迷你条共用一份，图标、状态、
+    /// 加载中的转圈都跟着同一个条件走 —— 两边各抄一遍迟早会走岔。
+    private var playPauseButton: some View {
+        Button { player.togglePlayPause() } label: {
+            ZStack {
+                Circle().fill(PMColor.brand).frame(width: 36, height: 36)
+                if player.isLoading && !player.isLiveRadio {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: player.isLiveRadio && (player.isPlaying || player.isLoading)
+                        ? "stop.fill"
+                        : (player.isPlaying ? "pause.fill" : "play.fill"))
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .contentTransition(.symbolEffect(.replace))
+                        .offset(x: player.isPlaying ? 0 : 1)
+                }
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(player.isLoading && !player.isLiveRadio)
+        .help(Text(player.isLiveRadio && (player.isPlaying || player.isLoading)
+            ? "radio_stop"
+            : (player.isPlaying ? "pause" : "play")))
     }
 
     private func transportBtn(_ symbol: String, size: CGFloat,
@@ -313,34 +502,58 @@ struct MacBottomBar: View {
 
     private var volumeControl: some View {
         HStack(spacing: 5) {
-            Button { airPlayShown.toggle() } label: {
-                Image(systemName: volumeSymbol)
-                    .font(.system(size: 12))
-                    .foregroundStyle(PMColor.textMuted)
-                    .frame(width: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(Text("audio_output"))
-            .popover(isPresented: $airPlayShown, arrowEdge: .top) {
-                AudioOutputPickerView()
+            volumeMuteButton { airPlayShown.toggle() }
+                .popover(isPresented: $airPlayShown, arrowEdge: .top) {
+                    AudioOutputPickerView()
+                }
+
+            volumeSlider
+        }
+    }
+
+    /// 竖屏浮层里那一行。滑块同一个，但那枚喇叭不能用它自己的 popover：
+    /// popover 套 popover，一点就把外层关掉，输出设备面板一次都出不来（`PlayerMoreMenu`
+    /// 在 §33 里栽的是同一个坑）。所以这里改成先把外层关掉，再由「更多」按钮上的
+    /// 第三个 popover 承载面板。
+    private var phoneVolumeControl: some View {
+        HStack(spacing: 5) {
+            volumeMuteButton {
+                phoneMoreShown = false
+                phoneAudioOutShown = true
             }
 
-            if showsPlayerVolumeBar {
-                // AppKit slider opts out of window-background dragging, so volume
-                // drags do not move the hidden-titlebar window.
-                PMVolumeSlider(value: Binding(
-                    get: { Double(engine.volume) },
-                    set: { player.setPlaybackVolume(Float($0)) }
-                ), isEnabled: player.isLiveRadio || player.playbackSettings.outputMode == .effects,
-                   accessibilityHelp: !player.isLiveRadio && player.playbackSettings.outputMode == .highFidelity
-                       ? String(localized: "volume_high_fidelity_system_hint")
-                       : nil)
-                .frame(width: 72)
-                .help(!player.isLiveRadio && player.playbackSettings.outputMode == .highFidelity
-                    ? Text("volume_high_fidelity_system_hint")
-                    : Text("volume"))
-            }
+            volumeSlider
+        }
+    }
+
+    private func volumeMuteButton(_ openPicker: @escaping () -> Void) -> some View {
+        Button(action: openPicker) {
+            Image(systemName: volumeSymbol)
+                .font(.system(size: 12))
+                .foregroundStyle(PMColor.textMuted)
+                .frame(width: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(Text("audio_output"))
+    }
+
+    @ViewBuilder
+    private var volumeSlider: some View {
+        if showsPlayerVolumeBar {
+            // AppKit slider opts out of window-background dragging, so volume
+            // drags do not move the hidden-titlebar window.
+            PMVolumeSlider(value: Binding(
+                get: { Double(engine.volume) },
+                set: { player.setPlaybackVolume(Float($0)) }
+            ), isEnabled: player.isLiveRadio || player.playbackSettings.outputMode == .effects,
+               accessibilityHelp: !player.isLiveRadio && player.playbackSettings.outputMode == .highFidelity
+                   ? String(localized: "volume_high_fidelity_system_hint")
+                   : nil)
+            .frame(width: 72)
+            .help(!player.isLiveRadio && player.playbackSettings.outputMode == .highFidelity
+                ? Text("volume_high_fidelity_system_hint")
+                : Text("volume"))
         }
     }
 
@@ -365,6 +578,7 @@ private struct MacBottomBarProgress: View {
     private var radioStatusLine: some View {
         let isBuffering = player.isLoading
         let isActive = player.isPlaying && !isBuffering
+        let statusMaxWidth: CGFloat = MacPhoneLayout.isPhoneForm ? .infinity : 340
 
         return HStack(spacing: PMSpace.s10) {
             HStack(spacing: 5) {
@@ -396,7 +610,9 @@ private struct MacBottomBarProgress: View {
                 .foregroundStyle(PMColor.textFaint)
                 .help(Text("radio_connected_for"))
         }
-        .frame(maxWidth: 340)
+        // 宽窗口时那条状态线限到 340 是为了跟中间列同宽居中；竖屏形态整行
+        // 就 393，限宽反而让右边的已连时长贴不到边。
+        .frame(maxWidth: statusMaxWidth)
     }
 
     /// 「128 kbps · MP3」。仅在左栏正显示曲目元数据时才补 —— 没有元数据时
@@ -419,6 +635,7 @@ private struct MacBottomBarProgress: View {
         } else {
         let current = dragValue ?? player.currentTime
         let duration = max(player.duration, 0.001)
+        let progressMaxWidth: CGFloat = MacPhoneLayout.isPhoneForm ? .infinity : 560
 
         HStack(spacing: 8) {
             Text(player.currentSong == nil ? "--:--" : current.formattedDuration)
@@ -445,7 +662,7 @@ private struct MacBottomBarProgress: View {
                 .foregroundStyle(PMColor.textFaint)
                 .frame(minWidth: 36, alignment: .leading)
         }
-        .frame(maxWidth: 560)
+        .frame(maxWidth: progressMaxWidth)
         }
     }
 }

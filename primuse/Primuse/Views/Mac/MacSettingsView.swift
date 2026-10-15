@@ -204,7 +204,10 @@ struct MacSettingsView: View {
     var body: some View {
         Group {
             if embedded {
-                settingsCore(minWidth: 620, idealWidth: 900, minHeight: 360, idealHeight: 620)
+                // 内嵌在主窗口「设置」tab 里：宽度由外壳给。竖屏形态窗口只有 393，
+                // 这里再报 620 最小宽会把正文顶出窗口右边，看着像"设置页右边一片
+                // 空白、控件点不到"。所以内嵌时不给任何尺寸下限，只跟着外壳撑满。
+                settingsCore(minWidth: nil, idealWidth: nil, minHeight: nil, idealHeight: nil)
             } else {
                 settingsCore(minWidth: 940, idealWidth: 960, minHeight: 680, idealHeight: 720)
                     .background(PMColor.bg.ignoresSafeArea())
@@ -217,24 +220,38 @@ struct MacSettingsView: View {
     /// 两种模式共用的部分。设计稿 Settings 窗口尺寸: sidebar 200 + content
     /// max-width 720 + L/R padding 32×2 ≈ 984pt 宽。之前设 1040×720, 右侧
     /// max-width 限制让 56pt 留白; 用户截图看着 "右边空一片"。改成 940×680,
-    /// content 几乎贴右边缘。内嵌时这套窗口级尺寸不成立, 只保留一个够用的下限。
+    /// content 几乎贴右边缘。内嵌时这套窗口级尺寸不成立（四个参数全传 nil），
+    /// 尺寸由主窗口外壳决定。
     private func settingsCore(
-        minWidth: CGFloat,
-        idealWidth: CGFloat,
-        minHeight: CGFloat,
-        idealHeight: CGFloat
+        minWidth: CGFloat?,
+        idealWidth: CGFloat?,
+        minHeight: CGFloat?,
+        idealHeight: CGFloat?
     ) -> some View {
         VStack(spacing: 0) {
             if !embedded { settingsTitleBar }
 
-            HStack(spacing: 0) {
-                sidebar
-                    .frame(width: embedded ? 196 : 200)
-                Divider()
-                contentPane
+            if embedded {
+                // 竖屏形态：393 宽里摆一条 200pt 侧栏，正文只剩 193 —— 每行设置
+                // 都被挤成一坨。照 iPhone：分区名做成一排可横滑的 pill，正文独占
+                // 整块区域，原先侧栏底部那几行目的地挪到正文最底下。
+                VStack(spacing: 0) {
+                    embeddedCategoryStrip
+                    Divider()
+                    contentPane
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(spacing: 0) {
+                    sidebar
+                        .frame(width: 200)
+                    Divider()
+                    contentPane
+                }
             }
         }
         .frame(minWidth: minWidth, idealWidth: idealWidth, minHeight: minHeight, idealHeight: idealHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environment(\.pmAppearance, MacUIPreferences.shared.appearance)
         .onChange(of: sidebarFilter) { _, value in
             showingSearchResults = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -273,6 +290,9 @@ struct MacSettingsView: View {
         }
     }
 
+    // MARK: - 独立设置窗口侧栏
+
+    /// 只有非内嵌（⌘, 独立窗口）模式用这条侧栏；内嵌改走 `embeddedCategoryStrip`。
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             sidebarSearch
@@ -283,10 +303,6 @@ struct MacSettingsView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(availableTabs) { sidebarItem($0) }
-
-                    if embedded {
-                        embeddedDestinationRows
-                    }
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 10)
@@ -301,9 +317,63 @@ struct MacSettingsView: View {
         }
     }
 
+    // MARK: - 内嵌模式分区条（竖屏形态）
+
+    /// 搜索框 + 一排可横滑的分区 pill。iPhone 的设置就是「顶部进页、
+    /// 一级分区靠滑动」，这里把它搬到 macOS 主窗口的「设置」tab 上。
+    private var embeddedCategoryStrip: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sidebarSearch
+                .frame(maxWidth: .infinity)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(availableTabs) { embeddedTabChip($0) }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .background {
+            ZStack {
+                NSVisualEffectBackdrop(material: .sidebar, blending: .behindWindow)
+                Rectangle().fill(PMColor.sidebarGlass)
+            }
+        }
+    }
+
+    /// 侧栏行在竖屏没地方放，分区名收成 pill：选中态跟 `sidebarItem` 同一套品牌色。
+    private func embeddedTabChip(_ item: MacSettingsTab) -> some View {
+        let selected = item == tab
+        return Button { selectTab(item) } label: {
+            HStack(spacing: 5) {
+                Image(systemName: item.icon)
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text(verbatim: item.title)
+                    .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                selected ? AnyShapeStyle(PMColor.brand) : AnyShapeStyle(PMColor.glassBtn),
+                in: Capsule()
+            )
+            .overlay {
+                Capsule().strokeBorder(PMColor.cardBorder, lineWidth: selected ? 0 : 0.5)
+            }
+            .foregroundStyle(selected ? Color.white : PMColor.text)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("settings.tab.\(item.rawValue)")
+    }
+
     // MARK: - 内嵌模式页脚（音乐源 / 聚合音乐源 / 工具）
 
-    /// 四 tab 外壳把侧栏去掉了，原先挂在侧栏里的三个目的地改挂在这里，
+    /// 竖屏形态没有侧栏，原先挂在侧栏底部的三个目的地改挂在每页正文底部，
     /// 与 iPhone（设置 → 音乐源管理 / 聚合音乐源设置）和 Windows（设置里同名两行）
     /// 的位置一致。工具保持弹框（`.sheet`）而不是页面，因为它们本来就是用完即关的面板。
     private var embeddedDestinationRows: some View {
@@ -475,7 +545,17 @@ struct MacSettingsView: View {
                     if navigation.settingID.flatMap({ SettingsCatalog.byID[$0] })?.page == .transcription {
                         GoogleLyricsTranscriptionSettingsView()
                     } else {
-                        MacSettingsScroll(title: tab.title) { settingsContent }
+                        MacSettingsScroll(title: tab.title,
+                                          hInset: embedded ? 16 : 32) {
+                            settingsContent
+
+                            // 竖屏形态没有侧栏放目的地行了，就挂在每页正文最下面 ——
+                            // 目的地一个不少，只是换了个位置。
+                            if embedded {
+                                embeddedDestinationRows
+                                    .padding(.top, 18)
+                            }
+                        }
                     }
                 }
                 .id(navigation.revision)
@@ -579,10 +659,14 @@ private struct MacSTStorageView: View {
 
 private struct MacSettingsScroll<Content: View>: View {
     let title: String
+    /// 独立窗口按设计稿留 32；内嵌在 393 竖屏窗口里时 32 会把正文压到 329 宽，
+    /// 每行「标题 + 控件」都挤不下，所以调用方可以收小。
+    let hInset: CGFloat
     private let content: Content
 
-    init(title: String, @ViewBuilder content: () -> Content) {
+    init(title: String, hInset: CGFloat = 32, @ViewBuilder content: () -> Content) {
         self.title = title
+        self.hInset = hInset
         self.content = content()
     }
 
@@ -1047,7 +1131,7 @@ private struct MacSTIntelligenceView: View {
                                 .foregroundStyle(PMColor.textFaint)
                                 .lineLimit(2)
                                 .textSelection(.enabled)
-                                .frame(width: 320, alignment: .trailing)
+                                .frame(maxWidth: 320, alignment: .trailing)
                         }
                     }
                     if !selectedProviderIsAvailableInRegion {

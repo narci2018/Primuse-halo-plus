@@ -2699,3 +2699,95 @@ olive 那批 QQ 条目现在有了图形化出口：后台打开 olive 的设备
 全选删除 → 保存。§29 那个只在命令行里做的迁移，日常可以手点完成；命令行工具仍保持默认 dry-run、
 不接 CI、不进 npm scripts。待用户拍的仍是那 16 条到底删不删，以及 §55 本机存档那一轮补做（需要他先退出 Primuse）。
 
+
+## 33. macOS 打开就像 iPhone 竖屏：把窗口钉在 393×852，以及"放不下"到底会让什么凭空消失（2026-10-16）
+
+用户这两句是同一轮的：「app 最小化后没有歌词显示，要想 win 版本一样」「macos 版 app 界面最好设置跟 iPhone 一样，在 macos 打开也像手机版的界面一样」。
+前一句的死锁根因写在 §31.9 之后那节（面板只在建好之后才有 SwiftUI 视图，而推词的视图只活在那个面板里 → 一句词都推不过来 → 第五个条件永远为假 → 面板永远不建；
+把"词 + 播放状态"的观察上移到控制器自己身上一句就解了，commit `8b5d9a4`）。后一句需要他先选形态，选项是「固定手机比例窗口（推荐）」/「可拉大但默认手机宽」/「只改布局不改窗口」，
+他点了第一个 —— 这一节的所有改动都建立在这一个决定上。
+
+### 33.1 尺寸只有一个来源：`MacPhoneLayout`
+
+新文件 `Primuse/Views/Mac/MacPhoneLayout.swift` 就三个常量：`width = 393`、`height = 852`、`isPhoneForm = width <= 460`。
+判据刻意写在常量上而不是"运行时量一下窗口多宽"——后者会让用户在拉大窗口后一半页面还是竖屏排布、一半不是（同一屏两种形态最难受）。
+`isPhoneForm` 是编译期就成立的常量，意味着**旧的宽窗口布局一行都没删**，全部退到 `if MacPhoneLayout.isPhoneForm` 的另一边：
+将来要回到宽窗口，只改这一个常量。§30/§31 那句"macOS 向 Windows 看齐"从这轮起只管**功能判据**（看守第 15/16/17 组比的还是判据，不比窗口宽度），
+外壳形态改照 iPhone —— 这两件事不冲突，冲突的是把界面对齐理解成把三栏壳也对齐。
+
+### 33.2 只改 `.defaultSize` 是不够的：存档的 frame 会盖掉它
+
+`.defaultSize(width:height:)` 只在"这个窗口没有存档 frame"时生效，而主窗口带 `frameAutosaveName`，里面躺着 v1.9.20 那会儿的 1280×820。
+所以老用户升级完看到的还是宽窗口 —— 里面的三列布局又露出一半，正是 §19 那次"右半被挤出窗口"的镜像症状。
+补了一次 AppKit 侧的强制：`MacContentView.pinPhoneWindowSizeIfNeeded(in:)` 在窗口解析出来时 `setContentSize(393×852)` + `center()`，
+用 `didPinPhoneWindowSize` 保证只做一次，且窗口已经在原生全屏里时不做（否则会把全屏顶回窗口内）。
+`.windowResizability(.contentSize)` 让 min == max == 内容尺寸，这就是"不给拖大"的实现；根上再压一层
+`.frame(maxWidth: phoneContentMaxWidth, maxHeight: phoneContentMaxHeight)`，那两个 getter 读 `!isWindowFullScreen` ——
+封顶不放开，「全屏播放」点下去没反应：SwiftUI 的 max 会把系统那一步 resize 顶回去。进/出全屏各挂一条监听
+（`NSWindow.willEnterFullScreenNotification` / `willExitFullScreenNotification`，"will" 而不是 "did"，SwiftUI 要先于 AppKit 松手），
+通知名走 §31.9 那份白名单看守 —— v1.9.23 那次构建红就是红在两个根本不存在的通知名上。
+
+### 33.3 一页一页算的几何账（393 − 2×16 = 361 是能放东西的地方）
+
+- **底栏**：`leftColumn(260) + transport + rightColumn(260)`，260 + 260 就已经超过 393。宽窗口那套原样留成 `wideRow`，
+  竖屏走 `phoneRow`（封面 + 曲名 + 喜欢 + 播放/暂停 + 队列 + 一枚「更多」，进度条单独一行，位置同 iPhone 迷你条下面那条细线）。
+  Mac 独有的控件一个不删，全收进 `phoneMorePopover`：歌词/正在播放、投放、随机、重复、音量、迷你播放器、全屏播放、全屏特效入口。
+  随机/重复挪进 `if !player.isLiveRadio` 里，不然直播电台模式下会给出一个不可能生效的"重复播放"。
+  三个坑都是"浮层套浮层"这一类：① `PlayerMoreMenu` 自己是 `Button + .popover`，塞进本 popover 里一点就把外层关掉 ——
+  它在「正在播放」页右上角本来就有，这里不放；② 投放设备面板原本挂在右列那枚电视按钮上，而竖屏根本不渲染右列 →
+  `castShown` 置真也没有宿主，一次都不会出现；③ `volumeControl` 里那枚喇叭也自带一个 `AudioOutputPickerView` 的 popover，
+  在浮层里点它等于关掉浮层再期望一个已经没有宿主的浮层出现。②③ 的解法是同一个：把面板的宿主挪到「更多」按钮自己身上，
+  在它后面再挂两层 `.popover(isPresented: $castShown)` / `.popover(isPresented: $phoneAudioOutShown)`，
+  音量行则拆出 `phoneVolumeControl`（滑块与 `volumeSlider` 共用，喇叭只负责关外层 + 置真那个状态）。
+- **标题栏**：竖屏一行只剩 365pt 可用，「品牌字标 + 居中搜索(min 240) + 右两枚按钮」合起来 480 出头 → 搜索框把三色灯和右按钮一起顶出窗口。
+  改成 iPhone 导航栏的做法：搜索框 `frame(maxWidth: .infinity)` 吃满，字标让给 Dock 与菜单栏。
+  中间保留一条 12pt 的 `PMWindowDragRegion`：`isMovableByWindowBackground` 被窗口修容逻辑按死为 false，窗口又不许拉大，
+  没有这一段用户就**没法挪动这个窗口**了 —— 这是钉死尺寸带来的新问题，不写出来下一个人一定会顺手删掉。
+- **首页**：hero 那张 240 封面 + 510/390 宽的文案横排换成竖排（132 封面在上、文案在下），卡片高 296 → 320；
+  正文左右留白 36 → 16（`pageHInset`）；「最近专辑」那 5 个固定列换成 `GridItem(.adaptive(minimum: 110))`；加载骨架同步换。
+- **正在播放**：宽窗口是 380 封面并排 560 歌词；竖屏改成 `VStack { artworkPane; lyricsPane }`，封面 380 → 264，标题 36 → 24，副标 24 → 15。
+  电台页同构（拆出 `radioArtwork(size:)` / `radioInfoColumn(titleSize:subSize:)` 两个 helper 让两种形态共用，别再抄一份）。
+- **设置页（内嵌在主窗口那个 tab）**：`sidebar.frame(width: embedded ? 196 : 200)` 是最大的一处 —— 393 里摆 196 侧栏，正文只剩 193。
+  照 iPhone：分区名做成一排可横滑的 pill（`embeddedCategoryStrip` + `embeddedTabChip`），侧栏底部那几行目的地
+  （音乐源 / 聚合音乐源 / 五个工具）挪到**每页正文最底下**，`contentPane` 里加 `if embedded { embeddedDestinationRows }`；
+  `settingsCore` 的四个尺寸参数改成可选，内嵌全传 `nil`（原来那句 `minWidth: 620` 会把正文顶出窗口右边，看着像"设置页右边一片空白、控件点不到"）；
+  `MacSettingsScroll` 加了 `hInset` 参数，内嵌 16 / 独立窗口仍 32。⌘, 那个独立设置窗口完全没动，还是 200pt 侧栏 + 940×680。
+- **来源页**：左右留白 36 → 16，"Connected" 大标题 32 → 24（36pt 留白下只剩 321，卡片里"源名 + 主机 + 三枚文字按钮 + 开关"那一排放不下）。
+  卡片瀑布流 `MacSourceWaterfallLayout(minimumColumnWidth: 440)` 不用改：列数按容器宽算，窄的时候自然掉到 1 列、列宽跟容器走。
+- **队列**：原来是详情区右边并排一条 380 —— 393 宽里打开队列等于把正文整块挤没。改成整块覆盖（`zIndex(2)` + 从右推入的转场），
+  `MacQueuePanel` 自己一行没改。
+
+### 33.4 看守第 18 组：11 条断言、15 个变异
+
+`primuse-win/scripts/criteria-parity-check.js` 新增第 18 组，钉的正是上面那些"改掉就会凭空消失"的点：
+尺寸常量只有一个来源、`.defaultSize` 用常量且 1280 不许回来、`setContentSize` 那一次强制还在、封顶读 `!isWindowFullScreen` 且两条全屏通知名是真的、
+队列不再是 `.frame(width: 380)`、竖屏那一行没有 260 三列且浮层里音量/随机/重复/迷你/全屏/投放六件齐（音量必须是 `phoneVolumeControl` 且浮层里不许出现 `airPlayShown`）、
+投放与输出设备各自有宿主 popover、标题栏搜索吃满且 `PMWindowDragRegion` 在位、设置内嵌没有 196 侧栏也没有 `minWidth: 620` 且目的地行挂在 `contentPane`、
+首页与来源页两处 `xxxl` 留白不许回来、正在播放竖屏是 `artworkPane + lyricsPane` 且封面 264。
+全库 136 项通过 / 0 失败。逐条做变异（改常量、改回 `.contentMinSize`、删 `setContentSize`、把封顶写死、队列改回 380、
+浮层音量换回宽窗口那份 `volumeControl`、把输出设备的宿主 popover 换成已有那层、删掉 `castShown` 那层 popover、搜索框改成 `minWidth: 240`、
+内嵌恢复 `minWidth: 620`、把 `hInset` 写死 32、留白改回 `PMSpace.xxxl`、大标题 24 改回 32、封面 264 改回 380、竖屏分支写 `false &&`），
+**15 次变异全部被抓红**，还原后基线仍是 136/0。
+
+### 33.5 又一次 CRLF 事故（和 §31.7 同因，这次是提交前发现的）
+
+改完跑 `git diff --numstat`：`MacBottomBar.swift` 755/567、`MacHomeView.swift` 1978/1917 —— 整份文件都被判成改动。
+原因还是那条：编辑器把 LF 文件按 CRLF 写回，而仓库里这两个文件在 HEAD 是纯 LF（`core.autocrlf=false`、无 `.gitattributes`，所以 git 不做转换，CRLF 会一路进索引）。
+按字节做一次 `\r\n` → `\n`（严格 UTF-8 校验：改完 CR 数为 0、解码不报错、行数不变），numstat 立刻回到 253/65 与 139/78 —— 只剩真实改动。
+**结论仍然是：这一族文件改完必须看一次 `git diff --numstat`，行数对不上就是编码/行尾出事，别提交。**
+
+### 33.6 本轮没做的：二级面板还是宽的
+
+歌词转换(820)、音频缓存同步(640)、AI 提示词(520)、开源许可(520×580)、新增/编辑来源(560~660)、目录浏览(940)这些面板按宽窗口设计，
+这轮**一行没动**。它们是独立 sheet/窗口，浮在 393 主窗口外面仍然能操作（macOS 允许 sheet 比父窗宽），只是会比主窗口宽出一截。
+要不要连面板也竖屏化，是另一轮的事 —— 那需要把左右分栏改成上下分栏，不是收边距能解决的。
+
+### 33.7 验证边界（含糊不得）
+
+这台机器没有 Swift 工具链，本轮所有 Swift 改动只过了三道本地关：源码级看守 136/0、变异测试 14/14 抓红、括号/字符串结构体检（`MacSettingsView` 那处报的是
+已有的 `"""` 多行字面量，不是本轮引入）。**真正编一次要靠 CI 的 macOS 构建，而它只在 `v*` tag 或 workflow_dispatch 上跑**（push 到 `primuse/**` 只跑 preflight，
+约 1.5 分钟）—— 也就是说 `8b5d9a4` 那条歌词死锁的修复至今没被编译器看过一眼。所以这轮直接升 v1.9.25 / build 87 并打 tag，
+让一次构建同时验两件事：竖屏形态这堆新代码能不能编过、歌词条死锁修复是不是真修好了。
+屏幕上对不对只能等他的截图：首页 / 资料库 / 搜索 / 设置(含横滑分区条与底部那几行目的地) / 正在播放(歌 + 电台) / 队列 / 底栏「更多」浮层 /
+全屏播放 / 最小化后的歌词条。
+

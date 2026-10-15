@@ -27,6 +27,24 @@ struct PMTitleBar: View {
 
     var body: some View {
         ZStack {
+            if MacPhoneLayout.isPhoneForm {
+                phoneRow
+            } else {
+                wideRow
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(height: PMSize.titlebar)
+        .background(titlebarBackground.ignoresSafeArea(edges: .top))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+        }
+    }
+
+    /// 宽窗口（不是竖屏形态）那一套：三色灯 + 品牌 + 弹性空档 + 右工具，
+    /// 搜索框另外钉在整条的几何中心。
+    private var wideRow: some View {
+        ZStack {
             // The traffic lights and the three trailing tools have different
             // widths. Putting the search field between two flexible gaps
             // therefore centered it in the leftover space, not in the window.
@@ -51,11 +69,31 @@ struct PMTitleBar: View {
                 .frame(height: 36)
                 .zIndex(1)
         }
-        .padding(.horizontal, 14)
-        .frame(height: PMSize.titlebar)
-        .background(titlebarBackground.ignoresSafeArea(edges: .top))
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(PMColor.divider).frame(height: 0.5)
+    }
+
+    /// 竖屏形态：这一行可用宽度只剩 365pt。上面那套「品牌字 + 居中搜索(min 240) +
+    /// 右两枚按钮」加起来 480 出头，搜索框会把三色灯和右侧按钮一起挤出窗口。
+    /// 改成 iPhone 导航栏的做法 —— 搜索框贴着左侧吃满剩余宽度，品牌标识让给
+    /// Dock 和菜单栏（竖屏这一行本来就放不下字标）。
+    /// 中间那条 12pt 是拖窗口的落点：`isMovableByWindowBackground` 被窗口
+    /// 修容逻辑按死为 false，窗口又不许拉大，没有这一段就没法挪动它。
+    private var phoneRow: some View {
+        HStack(spacing: 8) {
+            PMStandardWindowButtonArea()
+
+            if showsBack {
+                PMRoundBtn(icon: "chevron.left", iconSize: 12, style: .glass,
+                           help: "back_to_options", action: onBack)
+            }
+
+            searchBox
+                .frame(maxWidth: .infinity)
+                .frame(height: 30)
+
+            PMWindowDragRegion()
+                .frame(width: 12, height: PMSize.titlebar)
+
+            trailingControls
         }
     }
 

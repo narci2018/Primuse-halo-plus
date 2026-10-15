@@ -22,6 +22,8 @@ struct MacContentView: View {
     @State private var queuePresented = false
     @State private var isWindowFullScreen = false
     @State private var hostWindow: NSWindow?
+    /// 竖屏形态那次"把存档里的宽窗口尺寸钉成手机尺寸"只在第一次拿到窗口时做一次。
+    @State private var didPinPhoneWindowSize = false
     @State private var searchText = ""
     @State private var songLocationRequest: SongLibraryLocationRequest?
     /// 发给资料库页的入口指令（「全部歌曲」/「在资料库中显示」/电台「全部」）。
@@ -106,18 +108,22 @@ struct MacContentView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .zIndex(1)
                     }
+
+                    // 队列在宽窗口时代是贴在正文右边的一栏（固定 380）。竖屏形态
+                    // 整窗才 393，那一栏会把正文挤成 13pt 的一条缝 —— 跟 iPhone 一样
+                    // 改成盖在正文上的整页浮层，从底下往上滑，关掉回到原来那页。
+                    if queuePresented {
+                        MacQueuePanel(onClose: {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                queuePresented = false
+                            }
+                        })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .zIndex(2)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                if queuePresented {
-                    MacQueuePanel(onClose: {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            queuePresented = false
-                        }
-                    })
-                    .frame(width: 380)
-                    .transition(.move(edge: .trailing))
-                }
             }
             // 迷你播放条 + 四 tab 一起挂在内容 HStack 底部, 而不是当 VStack 的
             // 第三行 —— 后者会让底栏自带一条等高的窗口底色 (PMColor.bg) 横条, 浮动
@@ -156,14 +162,25 @@ struct MacContentView: View {
                 }
             }
         }
+        // 竖屏形态把整窗钉成 iPhone 那一块（用户 2026-10-16 拍板："macos 版 app 界面
+        // 最好设置跟 iPhone 一样，在 macos 打开也像手机版的界面一样"）。配套的是
+        // `PrimuseApp` 里那句 `.windowResizability(.contentSize)` —— 窗口的 min/max
+        // 都由这里的尺寸回推，系统因此不给拉伸。
+        // 全屏期间必须把上限放开：钉着不放的话「全屏播放」这个既有功能会一起坏掉，
+        // 而它读的正是下面 `isWindowFullScreen`。
+        .frame(maxWidth: phoneContentMaxWidth, maxHeight: phoneContentMaxHeight)
         .songBatchRemovalFeedback()
         .environment(\.pmAppearance, preferences.appearance)
         .background(PMColor.bg.ignoresSafeArea())
         .background(PMWindowChromeConfigurator())
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $showInitialOnboarding) {
+            // 首次启动那张引导面板原来是 720×560（宽窗口时代定的）。竖屏形态下
+            // sheet 是按内容尺寸开一个独立窗口，比主窗口宽一倍多，用户第一面看到
+            // 的就是"引导页比 app 还大"。限到和主窗口同宽。
             OnboardingView()
-                .frame(minWidth: 720, minHeight: 560)
+                .frame(maxWidth: onboardingMaxWidth)
+                .frame(minHeight: onboardingMinHeight)
         }
         .sheet(item: $activeTool) { tool in
             toolSheet(tool)
@@ -254,7 +271,21 @@ struct MacContentView: View {
         .background {
             PMWindowResolver { window in
                 hostWindow = window
+                // 放到下一轮主循环：SwiftUI 正在算这层布局的当口去改 AppKit 的窗口
+                // 尺寸，会拿到还没定下来的 contentView。
+                Task { @MainActor in pinPhoneWindowSizeIfNeeded(in: window) }
             }
+        }
+        // willEnter / willExit 而不是只等 did：正文那一格的宽高上限要赶在 AppKit
+        // 真的动窗口之前松开，等 didEnter 才改已经晚了一整个全屏动画，
+        // 「全屏播放」会先被 min==max 顶住再进不去。
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { note in
+            guard let window = note.object as? NSWindow, window === hostWindow else { return }
+            isWindowFullScreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willExitFullScreenNotification)) { note in
+            guard let window = note.object as? NSWindow, window === hostWindow else { return }
+            isWindowFullScreen = false
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
             guard let window = note.object as? NSWindow, window === hostWindow else { return }
@@ -286,6 +317,42 @@ struct MacContentView: View {
 
     private var isFullScreenNowPlaying: Bool {
         isWindowFullScreen && nowPlayingPresented
+    }
+
+    /// 竖屏形态下正文的宽高上限。返回 `nil` 而不是 `.infinity`，是为了让
+    /// `.frame(maxWidth:)` 拿到真正的"不设限"，而不是一个极大值。
+    private var phoneContentMaxWidth: CGFloat? {
+        MacPhoneLayout.isPhoneForm && !isWindowFullScreen ? MacPhoneLayout.width : nil
+    }
+
+    private var phoneContentMaxHeight: CGFloat? {
+        MacPhoneLayout.isPhoneForm && !isWindowFullScreen ? MacPhoneLayout.height : nil
+    }
+
+    private var onboardingMaxWidth: CGFloat? {
+        MacPhoneLayout.isPhoneForm ? MacPhoneLayout.width : nil
+    }
+
+    private var onboardingMinHeight: CGFloat {
+        MacPhoneLayout.isPhoneForm ? 620 : 560
+    }
+
+    /// SwiftUI 只在"这个窗口还没有存档尺寸"时才用 `.defaultSize`。这台机器上主窗口
+    /// 从 v1.9.20 起就是同一个，存档里躺着 1280×820 —— 光改 `.defaultSize` 不够：
+    /// 窗口按老尺寸恢复，正文却缩在 393 那一格里，右边和下面一大片空底。
+    /// 所以主窗口一旦被解析出来就按手机尺寸钉一次，钉完 SwiftUI 会把这份新尺寸
+    /// 写回存档，下一次启动就自己对了。全屏期间不钉。
+    private func pinPhoneWindowSizeIfNeeded(in window: NSWindow?) {
+        guard MacPhoneLayout.isPhoneForm, !didPinPhoneWindowSize,
+              let window, !window.styleMask.contains(.fullScreen) else { return }
+        didPinPhoneWindowSize = true
+        let target = NSSize(width: MacPhoneLayout.width, height: MacPhoneLayout.height)
+        let current = window.contentView?.frame.size ?? .zero
+        guard abs(current.width - target.width) > 1 || abs(current.height - target.height) > 1 else {
+            return
+        }
+        window.setContentSize(target)
+        window.center()
     }
 
     private func startCurrentSongLyricsScrape() {
