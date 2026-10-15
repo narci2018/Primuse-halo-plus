@@ -80,6 +80,49 @@ final class PlaylistSyncService {
         let materializedSongs: Int
         /// 认不出形状、又缺 id / 标题，连元数据都留不下的（应当极少）。
         let skippedSongs: Int
+        /// 这次是从哪台设备拉的（跨设备导入时不是本机）。
+        let sourceDeviceID: String
+        /// 拉的是不是本机自己那一份备份。
+        let isOwnBackup: Bool
+    }
+
+    /// 云端设备概览 —— `GET` 不带 `deviceId` 时服务端返回的那张表
+    /// （`cf-sync-server/functions/api/sync-playlists.js:157-168`，`LIMIT 50`，按 `updated_at` 倒序）。
+    ///
+    /// 字段是 **snake_case**，和单设备那份 `RestoreResponseData` 的 camelCase 不一样，
+    /// 所以这里显式写 CodingKeys，不能指望 `keyDecodingStrategy`。
+    /// 服务端把 `device_name` / `platform` 允许为 NULL，计数也可能是 0，全部做成可选，
+    /// 少一个字段就整个列表解码失败是没道理的。
+    struct CloudDeviceSummary: Codable, Identifiable, Sendable {
+        let deviceId: String
+        let deviceName: String?
+        let platform: String?
+        let playlistCount: Int?
+        let songCount: Int?
+        let updatedAt: Double?
+        let createdAt: Double?
+
+        var id: String { deviceId }
+
+        /// 界面上显示的名字（和 Windows 一样：没名字就退回机器码）。
+        var displayName: String {
+            let name = (deviceName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? deviceId : name
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case deviceId = "device_id"
+            case deviceName = "device_name"
+            case platform
+            case playlistCount = "playlist_count"
+            case songCount = "song_count"
+            case updatedAt = "updated_at"
+            case createdAt = "created_at"
+        }
+    }
+
+    struct DeviceListResponseData: Codable, Sendable {
+        let devices: [CloudDeviceSummary]
     }
 
     /// 执行本地歌单备份（上传至 CF 服务器）
@@ -145,7 +188,11 @@ final class PlaylistSyncService {
         }
     }
 
-    /// 从云端恢复/拉取歌单（更新至本地）
+    /// 从云端拉取歌单（更新至本地）。
+    ///
+    /// `sourceDeviceID` 为 nil 时拉**本机**那一份；给了别人的机器码就是
+    /// Windows 那套「跨设备导入」——读那台设备的备份、合并进本机，
+    /// 本机的机器码不变，也绝不回写对方那一条（`primuse-win/src/main/sync.js:205-219` 同语义）。
     ///
     /// 语义与 Windows 端 `primuse-win/src/main/sync.js` 的 `restore()` 对齐 ——
     /// 那一层的注释写得很清楚，是用户明确纠正过的分层：**服务器同步的是歌单结构，
@@ -158,14 +205,25 @@ final class PlaylistSyncService {
     /// 建出 6 个空歌单 → 界面 0 首歌，而弹窗按服务端的计数报"已同步 237 首"。
     /// 现在匹配不上的条目一律落成为自包含的在线曲目；本机确实没有对应源的，
     /// 保留元数据、播放时给可读失败，而不是假装这首歌不存在。
-    func restore(serverURL: String, library: MusicLibrary) async throws -> RestoreResult {
+    func restore(
+        serverURL: String,
+        library: MusicLibrary,
+        sourceDeviceID: String? = nil
+    ) async throws -> RestoreResult {
         let cleanURLString = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var components = URLComponents(string: cleanURLString) else {
             throw NSError(domain: "PlaylistSync", code: 400, userInfo: [NSLocalizedDescriptionKey: "服务器 URL 格式无效"])
         }
 
+        let ownDeviceID = DeviceIdentity.currentDeviceID
+        let targetDeviceID = (sourceDeviceID ?? ownDeviceID).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetDeviceID.isEmpty else {
+            throw NSError(domain: "PlaylistSync", code: 400, userInfo: [NSLocalizedDescriptionKey: "缺少 deviceId（设备机器码）"])
+        }
+
         var queryItems = components.queryItems ?? []
-        queryItems.append(URLQueryItem(name: "deviceId", value: DeviceIdentity.currentDeviceID))
+        queryItems.removeAll { $0.name == "deviceId" || $0.name == "device_id" }
+        queryItems.append(URLQueryItem(name: "deviceId", value: targetDeviceID))
         components.queryItems = queryItems
 
         guard let url = components.url else {
@@ -175,7 +233,9 @@ final class PlaylistSyncService {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(DeviceIdentity.currentDeviceID, forHTTPHeaderField: "X-Device-ID")
+        // 头里报的是**谁在问**，query 里的才是**问的是谁的数据** —— 服务端 GET 只看 query，
+        // 这个头是给日志对账用的。
+        request.setValue(ownDeviceID, forHTTPHeaderField: "X-Device-ID")
         request.timeoutInterval = 20
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -184,6 +244,15 @@ final class PlaylistSyncService {
         }
 
         let decoded = try JSONDecoder().decode(SyncResponseEnvelope<RestoreResponseData>.self, from: data)
+        if httpRes.statusCode == 404 || decoded.code == 404 {
+            // 服务端对"这台设备从没备份过"给的是 404，不是空列表。
+            // 跨设备导入时最容易撞上（列表里能看到、点下去 404），所以要给一句人话，
+            // 而不是 "拉取歌单失败: 404"。
+            throw NSError(domain: "PlaylistSync", code: 404, userInfo: [
+                NSLocalizedDescriptionKey: "云端还没有这台设备的备份（\(targetDeviceID) 从未上传过）。"
+                    + "先在那台设备上点「立即备份到云端」，再回来导入。"
+            ])
+        }
         guard httpRes.statusCode == 200, decoded.code == 0, let resData = decoded.data else {
             throw NSError(domain: "PlaylistSync", code: decoded.code, userInfo: [
                 NSLocalizedDescriptionKey: decoded.error ?? decoded.message ?? "拉取歌单失败: \(httpRes.statusCode)"
@@ -286,8 +355,44 @@ final class PlaylistSyncService {
             addedSongs: addedSongs,
             matchedSongs: matchedSongs,
             materializedSongs: materializedSongs,
-            skippedSongs: skippedSongs
+            skippedSongs: skippedSongs,
+            sourceDeviceID: targetDeviceID,
+            isOwnBackup: targetDeviceID == ownDeviceID
         )
+    }
+
+    /// 云端设备列表（不带 `deviceId` 的 GET；服务端 `LIMIT 50`、按 `updated_at` 倒序）。
+    ///
+    /// 这是 Windows 设置页「查看云端设备列表 / 跨设备导入」那一块在 Apple 侧的对应物
+    /// （`primuse-win/src/main/sync.js:194-203`）。有了它，"iPhone 备份了、Mac 是空机"
+    /// 这种局面才能在一台新设备上自助解决，而不是只能等同名机器码那份。
+    func listCloudDevices(serverURL: String) async throws -> [CloudDeviceSummary] {
+        let cleanURLString = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: cleanURLString), url.scheme?.hasPrefix("http") == true else {
+            throw NSError(domain: "PlaylistSync", code: 400, userInfo: [NSLocalizedDescriptionKey: "服务器 URL 格式无效"])
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(DeviceIdentity.currentDeviceID, forHTTPHeaderField: "X-Device-ID")
+        request.timeoutInterval = 20
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpRes = response as? HTTPURLResponse else {
+            throw NSError(domain: "PlaylistSync", code: 500, userInfo: [NSLocalizedDescriptionKey: "网络通信错误"])
+        }
+
+        // 这份表可能是空的（云端一条备份都没有）。服务端在这种情况下仍然返回 code 0 + `devices: []`，
+        // 但 `data` 缺失或列表解码不出来时不该把"没有设备"报成错误。
+        let decoded = try? JSONDecoder().decode(SyncResponseEnvelope<DeviceListResponseData>.self, from: data)
+        guard httpRes.statusCode == 200, let envelope = decoded, envelope.code == 0 else {
+            let detail = decoded?.error ?? decoded?.message ?? "读取设备列表失败: \(httpRes.statusCode)"
+            throw NSError(domain: "PlaylistSync", code: decoded?.code ?? httpRes.statusCode, userInfo: [
+                NSLocalizedDescriptionKey: detail
+            ])
+        }
+        return envelope.data?.devices ?? []
     }
 
     /// 曲名+歌手 的匹配键。和旧实现一样是精确相等（不做归一化），只是把对整库的

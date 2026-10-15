@@ -2199,3 +2199,96 @@ LibraryDisplayConfigurationTests.swift:53-61` 正断言 `defaultSectionOrder.fir
 `MinimalNavigationPolicy` 又拿可见分区推首页落点，而 macOS 界面在这台机器上看不见、
 改完没法目测 —— 一个"看着像 0"的功能修复，不该和一次没法验证的视觉改动同车发出去。
 列为任务 #58，下一版带着他的截图来对。
+
+## 30. macOS 向 Windows 看齐：口径变更、这一轮动了两处、故意留下两处（2026-10-15，v1.9.22 / build 84）
+
+### 30.1 口径变更：Mac 的参照物是 Windows，不再是 iPhone
+
+用户 2026-10-15 的原话：**"macos版界面和功能逻辑都存在问题。能否界面不要跟iPhone看齐，而是跟win版本看齐？"**
+
+这推翻了 §19 那条（"UI界面还是跟iPhone完全不一样！我的需求UI及功能跟iPhone版本基本保持一致！"）。
+那条口径当年是对的 —— 它约束的是 **Windows 那一端要长成 iPhone 的样子**（§19/§21 照此重建了渲染层外壳）。
+现在他手里三台设备天天比着看，参照物换了：**Mac 照 Windows**。两端从此都以 Windows 的呈现与逻辑为准，
+iPhone 只约束 iPhone。
+
+先纠正一个事实，免得当成大工程重做：**外壳已经是同一套**。`MacTabBar.swift` 的 `MacTab` 就是
+home / library / search / settings 四格，图标与 Windows 的 `TABS`、iPhone 的 `TabView` 是同一组 SF Symbol。
+所以"看齐"剩下的不是重写，是四处**页面级**差异。
+
+### 30.2 四处差异，这一轮动了两处
+
+| # | 差异 | 这一轮 |
+|---|---|---|
+| 1 | 资料库 hub：Mac 十行（含 智能推荐 / 流派 / 目录 / 电台）+ 红色「我喜欢」大卡 + 快捷收藏；Windows 是一串纯行 | **做了** |
+| 4 | 云端设备列表 + 跨设备导入：Windows 有，Apple 侧只有 CloudKit 与普通备份/恢复 | **做了** |
+| 2 | 标题栏搜索占位：Mac/iOS 共用 `search_placeholder_universal` = "搜索本地库 + Apple Music"，Win 是"歌曲、艺术家、专辑、歌词" | 没做，理由见 30.5 |
+| 3 | 底栏播放器：Win 是 tab 上方一条窄胶囊，Mac 是三列全控制条（`MacBottomBar`） | 没做，理由见 30.5 |
+
+### 30.3 资料库 hub（改动 1）
+
+`LibraryDisplayConfiguration.macOSAlignedSectionOrder` = 歌曲 / 专辑 / 艺术家 / 歌单 / 我喜欢 / 听歌统计。
+纯函数 `macOSAlignedSections(_:)` 只做**交集再按 Win 的顺序排**，所以用户以前重排过、或者主动藏掉过哪一行，
+Mac 上只会更靠近 Windows，不会冒出他没要的行。收敛点选在 `LibraryView.visibleLibrarySections` 里、
+用 `#if os(macOS)` 包住，而不是放进 `LibraryDisplayConfiguration` —— 因为
+`ContentView`（iPhone 的极简导航）也拿同一个函数推首页落点，那边一个字都不许变。
+
+「我喜欢」这一格两端语义本来就不是一个东西：iPhone 的 `LibrarySection.favorites.title` 是
+`library_quick_access`（"快捷收藏"，它是一张卡的区块名），Windows 那一行就是歌单本名。所以
+Mac 上标题走 `hubRowTitle` = `playlist_liked_name`（我喜欢），副标题走 `categoryCountText` = "N 首歌曲"，
+点击跳 `NavigationLink(value: likedPlaylist)` 而不是 `value: .favorites` —— 后者在
+`destination(for:)` 里落到的是快捷收藏编辑器，不是歌单。
+
+镜像那几行（智能推荐 / 流派 / 目录 / 电台）在 Mac 上只是**不再出现在 hub**，
+枚举分支、详情页、`restorePersistedPageIfNeeded` 的 `visibleLibrarySections.contains(section)` 保护都留着，
+所以旧存档里持久化的"上次停在电台"会安静地退回 hub，不会崩也不会白屏。
+
+### 30.4 云端设备列表 + 跨设备导入（改动 4）
+
+照 Windows 的契约搬，三处都对着 `primuse-win/src/main/sync.js`：
+
+- `listCloudDevices(serverURL:)` ← `devices()`：**不带 `deviceId`** 的 GET，服务端
+  `functions/api/sync-playlists.js:157-168` 返回 `data.devices`，`LIMIT 50`、`updated_at` 倒序。
+  这张表的字段是 **snake_case**（`device_id` / `device_name` / `playlist_count` / `song_count` / `updated_at`），
+  和单设备那份 `RestoreResponseData` 的 camelCase 不一样，所以 `CloudDeviceSummary` 显式写了 CodingKeys，
+  没有指望 `keyDecodingStrategy`；除 `device_id` 外全部做成可选，服务端允许 NULL。
+- `restore(serverURL:library:sourceDeviceID:)` ← `importFromDevice()`：query 里的 `deviceId` 是**要拉谁的数据**，
+  `X-Device-ID` 头是**谁在问**；两个数分开，导入别人时不会把自己机器码写进 URL。
+  拉完走的是 §29.8 那条同一个落地路径（认不出的条目落成自包含在线曲目），所以"从 iPhone 那台搬到 Mac"
+  不会又撞上"0 首"。`RestoreResult` 新增 `sourceDeviceID` / `isOwnBackup`，反馈文案把来源设备写在显眼处 ——
+  拉错设备是撤不回来的事。
+- 404 单独立刻：服务端对"这台设备从没备份过"返回 404 而不是空列表，设备列表里看得见、点下去 404 是最容易撞的
+  一格，所以给一句"先在那台设备上点立即备份，再回来导入"，而不是 `拉取歌单失败: 404`。
+
+### 30.5 故意没做的两处，以及为什么
+
+**搜索占位文案（2）**：`search_placeholder_universal` 是 Mac 与 iPhone 共用的 key，同时存在于
+16 份 `.lproj/Localizable.strings`。要为 Mac 换文案就得新增一个 key 并给出 16 种语言的译文，
+其中 14 种是我写的、他看不出对错。一个占位符的改动不值这个风险面，等他确认要不要连 iPhone 一起改。
+
+**底栏播放器（3）**：Windows 那条窄胶囊是给 Electron 小窗定的；Mac 的 `MacBottomBar` 三列
+（封面+标题 / 传输键+进度 / 投屏+音量）本来就是桌面端惯例，而且这一版 §29.8 修完之后它里面
+会真的显示歌曲，不再是"选一首歌开始播放"那一屏空话。要不要压成胶囊是产品口味问题，
+需要他先看新 DMG 再拍 —— 这块我不敢在没有眼睛的情况下重写，重写坏了连播放控制都没了。
+
+**「最近播放」那一行**（Windows hub 有、Apple 侧没有对应分区）也归在这里：加一个 `LibrarySection`
+分支要同时动 `destination` / `categoryCountText` / `categoryPreview` 三处 switch 和 16 份本地化，
+单独一轮做。
+
+### 30.6 这一轮的验证边界（必须写清，不许含糊）
+
+这台机器**没有 Swift 工具链**（`which swift` / `swiftc` / `xcodebuild` 全空），**也看不见 macOS 界面**。
+所以这一轮的东西只能这样验：
+
+- 编译由 CI 承担：推 main 跑 preflight（约 2 分钟，只查 FFmpeg 符号链接与 XcodeGen 出 scheme，**不编译 Swift**），
+  真正编译要等 `v*` tag 的那次 macOS 构建。也就是说 30.3 / 30.4 的 Swift 代码在 v1.9.22 构建绿之前，
+  属于"照 API 事实逐个核对过签名、但没有编译器验证过"的状态。逐个核对过的点：
+  `LibrarySection.title: LocalizedStringKey`、`likedPlaylist: Playlist`、
+  `library.songCount(forPlaylist:) -> Int`（MusicLibrary.swift:4593）、
+  `library.ensurePlaylist(id:name:)`（:4712）、`NavigationLink(value:)` 对应的
+  `.navigationDestination(for: Playlist.self)`（LibraryView 里已有）、
+  `SyncResponseEnvelope<T: Codable & Sendable>` 的泛型约束（新结构体都写了 `Codable, Sendable`）。
+- `PrimuseTests` 里那套 Swift 单元测试**CI 从来不跑**（`.github/workflows/*.yml` 里没有 `xcodebuild test`）。
+  所以我没有为这两处改动新写 Swift 测试 —— 写了也只会是一条"永远绿的测试"，比没有更糟。
+  真正的看守是 §29.8 那套可离线跑的 JS 账（数据落地逻辑），以及他手上的截图。
+- 界面效果由他验。需要他回传两样东西：资料库页截图（看六行对不对）、
+  设置页「云端设备」列表截图（看设备名 / 计数 / 时间有没有解码出来）。

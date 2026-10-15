@@ -87,6 +87,36 @@ enum LibraryDisplayConfiguration {
         .statistics,
     ]
 
+    /// macOS 资料库 hub 的行集合与顺序 —— 对齐 Windows 版（`primuse-win` 的资料库页）。
+    ///
+    /// 2026-10-15 用户口径变更（plan §30）：Mac 的界面与功能逻辑照 Windows，不再照 iPhone。
+    /// 上面那套十行是给 iPhone 小屏设计的：智能推荐、流派、目录、电台全摊在资料库里，
+    /// 「我喜欢」还是一张红色大卡加一排快捷收藏。他在 Mac 上把「6 个歌单、其余全写 0」
+    /// 读成"同步根本没生效"，而 Windows 那份就是一串纯行：
+    /// 歌曲 / 专辑 / 艺术家 / 歌单 / 我喜欢 / 最近播放 / 听歌统计。
+    ///
+    /// 这一轮只取 Apple 侧**已有**分区的子集并按 Win 的顺序排。Win 的「最近播放」在
+    /// Apple 侧不是资料库分区（iPhone 把它放首页），新增一个 `LibrarySection` 分支要同时
+    /// 动 `destination` / `categoryCountText` / `categoryPreview` 三处 switch 和 16 份
+    /// 本地化，值得单独一轮做，不混在这次里。
+    static let macOSAlignedSectionOrder: [LibrarySection] = [
+        .songs,
+        .albums,
+        .artists,
+        .playlists,
+        .favorites,
+        .statistics,
+    ]
+
+    /// 纯函数：把任意（可能被用户重排或隐藏过的）可见分区收敛成 Windows 那几行。
+    /// 用户主动藏掉的行在 Mac 上照样藏着 —— 这里只做交集，并且按 Windows 的顺序重排，
+    /// 所以即便他以前在 iPhone 上同步过来一份自定义顺序，Mac 上也只会更靠近 Windows，
+    /// 不会冒出新行。输入 iPhone 默认十行 → 输出六行。
+    static func macOSAlignedSections(_ visible: [LibrarySection]) -> [LibrarySection] {
+        let present = Set(visible)
+        return macOSAlignedSectionOrder.filter { present.contains($0) }
+    }
+
     static func normalizedQuickAccessLimit(_ value: Int) -> Int {
         min(max(value, quickAccessLimitRange.lowerBound), quickAccessLimitRange.upperBound)
     }
@@ -351,10 +381,18 @@ struct LibraryView: View {
         LibraryDisplayConfiguration.normalizedQuickAccessLimit(configuredQuickAccessLimit)
     }
     private var visibleLibrarySections: [LibrarySection] {
-        LibraryDisplayConfiguration.visibleSections(
+        let sections = LibraryDisplayConfiguration.visibleSections(
             orderRawValue: sectionOrderRawValue,
             hiddenRawValue: hiddenSectionsRawValue
         )
+        #if os(macOS)
+        // Mac 走 Windows 那六行（见 `macOSAlignedSectionOrder` 的注释）。
+        // 收敛放在这一处而不是 `LibraryDisplayConfiguration` 里面，是因为
+        // `ContentView`（iPhone 的极简导航）也拿同一个函数推首页落点，那边不许变。
+        return LibraryDisplayConfiguration.macOSAlignedSections(sections)
+        #else
+        return sections
+        #endif
     }
     private var artworkPreviewRevision: String {
         let radioSignature = radioStationsStore.stations.map { station in
@@ -600,21 +638,42 @@ struct LibraryView: View {
 
                     LazyVStack(spacing: 10) {
                         ForEach(visibleLibrarySections) { section in
+                            #if os(macOS)
+                            // Windows 那份 hub 里「我喜欢」就是一行，点进去是这张歌单本身。
+                            // iPhone 侧它是 `quickAccessSection`（红色大卡 + 快捷收藏 + 编辑按钮），
+                            // 而 `destination(for: .favorites)` 落到的也是那套编辑器，
+                            // 所以 Mac 上不能按分区跳，要直接按歌单跳。
                             if section == .favorites {
-                                quickAccessSection
-                                    .padding(.vertical, 8)
-                            } else {
-                                NavigationLink(value: section) {
+                                NavigationLink(value: likedPlaylist) {
                                     libraryCategoryRow(section)
                                 }
                                 .buttonStyle(.plain)
                                 .padding(.horizontal, 16)
+                            } else {
+                                libraryCategoryLink(section)
                             }
+                            #else
+                            if section == .favorites {
+                                quickAccessSection
+                                    .padding(.vertical, 8)
+                            } else {
+                                libraryCategoryLink(section)
+                            }
+                            #endif
                         }
                     }
                 }
             }
         }
+    }
+
+    /// hub 里一行的通用跳法：按分区跳（歌曲 / 专辑 / 艺术家 / 歌单 / 听歌统计…）。
+    private func libraryCategoryLink(_ section: LibrarySection) -> some View {
+        NavigationLink(value: section) {
+            libraryCategoryRow(section)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
     }
 
     private func sectionHeader<Trailing: View>(
@@ -772,6 +831,23 @@ struct LibraryView: View {
         }
     }
 
+    /// hub 行的标题文案。iPhone 把 `.favorites` 这一格叫「快捷收藏」
+    /// （`LibrarySection.favorites.title` = `library_quick_access`，它是那一大卡的区块名）；
+    /// Windows 那一行就叫「我喜欢」，点进去是这张歌单本身。Mac 走 Windows 的叫法，
+    /// 直接用 `playlist_liked_name` —— 和点进去后详情页的标题是同一个词。
+    @ViewBuilder
+    private func hubRowTitle(_ section: LibrarySection) -> some View {
+        #if os(macOS)
+        if section == .favorites {
+            Text("playlist_liked_name")
+        } else {
+            Text(section.title)
+        }
+        #else
+        Text(section.title)
+        #endif
+    }
+
     private func libraryCategoryRow(_ section: LibrarySection) -> some View {
         HStack(spacing: 13) {
             Image(systemName: section.icon)
@@ -781,7 +857,7 @@ struct LibraryView: View {
                 .background(section.color.gradient, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(section.title)
+                hubRowTitle(section)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.primary)
                 Text(categoryCountText(section))
@@ -1245,7 +1321,16 @@ struct LibraryView: View {
     private func categoryCountText(_ section: LibrarySection) -> String {
         switch section {
         case .favorites:
+            #if os(macOS)
+            // Windows 那一行副标题是「N 首歌曲」；iPhone 那行本来就是「添加快捷收藏」的
+            // 入口卡标题，两种语义不该共用一个字符串。
+            return countText(
+                library.songCount(forPlaylist: MusicLibrary.likedSongsPlaylistID),
+                unitKey: "songs_count"
+            )
+            #else
             return String(localized: "library_quick_access")
+            #endif
         case .folders:
             return countText(songs.count, unitKey: "songs_count")
         case .statistics:
