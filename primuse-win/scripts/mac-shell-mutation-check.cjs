@@ -86,6 +86,32 @@ const CASES = [
     // 把 tab 挪出那个底部 VStack：文本顺序没变，但它不再跟迷你条同在一叠里。
     to: '                    }\n                    MacTabBar(selection: selection.tab) { tab in\n                        selectTab(tab)\n                    }',
   },
+  {
+    // 页名文件的平台围栏整条去掉：iOS target 也会编译它，而 `PMColor` 只存在于
+    // `PrimuseTheme.swift` 的 `#if os(macOS)` 里 —— 本机没有 swiftc，只能靠看守钉住。
+    label: 'Mac 的资料库有页名 —— 页名文件自己的平台围栏没了',
+    file: 'primuse/Primuse/Views/Mac/MacLibraryPageTitle.swift',
+    from: '#if os(macOS)\nimport SwiftUI',
+    to: 'import SwiftUI',
+  },
+  {
+    label: 'Mac 的资料库有页名 —— hub 那处漏进 iPhone',
+    file: 'primuse/Primuse/Views/Library/LibraryView.swift',
+    from: '            #if os(macOS)\n            // 主窗口的系统 toolbar 是隐藏的',
+    to: '            // 主窗口的系统 toolbar 是隐藏的',
+  },
+  {
+    label: 'Mac 的资料库有页名 —— 分区页没跟上',
+    file: 'primuse/Primuse/Views/Library/LibraryView.swift',
+    from: 'MacLibraryPageTitle(title: section.title)',
+    to: 'EmptyView()',
+  },
+  {
+    label: 'Mac 从资料库点进专辑',
+    file: 'primuse/Primuse/Views/Library/LibraryView.swift',
+    from: '        #else\n        return nil\n        #endif\n    }\n\n    @ViewBuilder\n    private var rootContent',
+    to: '        #else\n        return {}\n        #endif\n    }\n\n    @ViewBuilder\n    private var rootContent',
+  },
 ];
 
 function runGuard() {

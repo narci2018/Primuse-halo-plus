@@ -62,6 +62,7 @@ const SWIFT_MAC_SETTINGS = read('primuse/Primuse/Views/Mac/MacSettingsView.swift
 const SWIFT_MAC_TITLEBAR = read('primuse/Primuse/Views/Mac/PMTitleBar.swift');
 const SWIFT_MAC_ROUTE = read('primuse/Primuse/Views/Mac/MacRoute.swift');
 const SWIFT_MAC_THEME = read('primuse/Primuse/Views/Mac/Theme/PrimuseTheme.swift');
+const SWIFT_MAC_PAGETITLE = read('primuse/Primuse/Views/Mac/MacLibraryPageTitle.swift');
 const SWIFT_APP = read('primuse/Primuse/App/PrimuseApp.swift');
 const WIN_STYLES = read('primuse-win/src/renderer/styles.css');
 const WIN_AGG = read('primuse-win/src/main/aggregated.js');
@@ -516,6 +517,48 @@ record('没有系统返回按钮，就有外壳级的返回（标题栏箭头 + 
     && /private var showsTitleBarBack: Bool/.test(SWIFT_MAC_SHELL)
     && /guard tab != selection\.tab[\s\S]{0,220}backToTabRoot\(\)/.test(SWIFT_MAC_SHELL),
   'windowToolbar 是隐藏的，NavigationStack 里钻进去就没了返回 —— 只有外壳能补');
+
+// 页名：`.navigationTitle` 在 Mac 上画不出来（`.toolbar(.hidden, for: .windowToolbar)`
+// 把整条系统 bar 藏了），所以 `LibraryView` 得在正文顶上自己画一行。两处调用点
+// （hub / 分区页）都必须待在 `#if os(macOS)` 里 —— 漏进 iPhone 就是在手机上多出一条
+// 没人要的灰色横带；而没有这个补偿，Mac 的资料库页打开时一个字的页名都没有。
+function lastBefore(hay, idx, needle) {
+  let found = -1;
+  for (let at = hay.indexOf(needle); at !== -1 && at < idx; at = hay.indexOf(needle, at + 1)) found = at;
+  return found;
+}
+const macTitleCalls = (hay) => {
+  const hits = [];
+  for (let at = hay.indexOf('MacLibraryPageTitle('); at !== -1; at = hay.indexOf('MacLibraryPageTitle(', at + 1)) {
+    hits.push({
+      at,
+      open: lastBefore(hay, at, '#if os(macOS)'),
+      close: lastBefore(hay, at, '#endif'),
+    });
+  }
+  return hits;
+};
+const macTitleHits = macTitleCalls(SWIFT_LIBRARY);
+const macTitleInsideBranches = macTitleHits.length > 0
+  && macTitleHits.every((h) => h.open >= 0 && h.close < h.open);
+record('Mac 的资料库有页名（正文顶上补画一行），而 iPhone 一行代码都没多',
+  /PMColor/.test(SWIFT_MAC_THEME)
+    && /^#if os\(macOS\)/.test(SWIFT_MAC_PAGETITLE)
+    && /struct MacLibraryPageTitle: View/.test(SWIFT_MAC_PAGETITLE)
+    && /font\(\.system\(size: 28, weight: \.bold\)\)/.test(SWIFT_MAC_PAGETITLE)
+    && /let title: LocalizedStringKey/.test(SWIFT_MAC_PAGETITLE)
+    && SWIFT_MAC_DETAIL.includes('.toolbar(.hidden, for: .windowToolbar)')
+    && macTitleHits.length === 2 && macTitleInsideBranches,
+  `调用点 ${macTitleHits.length} 处（要 2：hub + 分区页），都在 macOS 分支里 = ${macTitleInsideBranches}`);
+// 详情栈里的返回：Album/Artist/Playlist 三个 push 目的地要把 pop 传进去，
+// 并且 pop 只能在 macOS 上非 nil —— iPhone 传了闭包会在详情页里多画一个返回圆钮。
+const inlineBackPasses = (SWIFT_LIBRARY.match(/onMacInlineBack: /g) || []).length;
+record('Mac 从资料库点进专辑/艺术家/歌单还有页内返回（三处都传了，且 iPhone 那边恒为 nil）',
+  inlineBackPasses === 3
+    && /private var detailPop: \(\(\) -> Void\)\?/.test(SWIFT_LIBRARY)
+    && /navigationPath\.removeLast\(\)/.test(SWIFT_LIBRARY)
+    && /#if os\(macOS\)[\s\S]{0,180}?return \{[\s\S]{0,160}?#else[\s\S]{0,60}?return nil/.test(SWIFT_LIBRARY),
+  `传了 ${inlineBackPasses} 处（要 3）`);
 
 const macTabH = num(SWIFT_MAC_THEME, /static let tabBar: CGFloat = (\d+)/);
 const winTabH = num(WIN_STYLES, /--tab-h:\s*(\d+)px/);
