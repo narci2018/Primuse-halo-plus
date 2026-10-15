@@ -11,9 +11,11 @@
 // 变异自查（改坏判据时这里必须变红）：
 //   - artistHit 退回子串包含 → 「田馥甄 ↔ 田馥甄的小迷妹」「谢安琪 ↔ 谢安琪Kay」两条 FAIL；
 //   - artistSegments 不摊平括号 → 「等什么君(邓寓君) ↔ 邓寓君」FAIL；
-//   - titleTier 去掉 relaxed 档 → 「我的梦 ↔ 我的梦 (Live)」FAIL。
+//   - titleTier 去掉 relaxed 档 → 「我的梦 ↔ 我的梦 (Live)」FAIL；
+//   - sameSongAs 退回只看标题字符串 → 「同一个 netease id、标题差个（R&B版）」FAIL（现网那 3 条同 id 重复的成因）；
+//   - dedupeById 不去重 → 「去重后条数 / 重复品计数」FAIL。
 
-import { norm, baseTitle, artistSegments, artistHit, artistMatchLabel, titleTier } from "../scripts/lib/song-match.mjs";
+import { norm, baseTitle, artistSegments, artistHit, artistMatchLabel, titleTier, songKeyOf, sameKeyAs, sameSongAs, sameSongIn, dedupeById } from "../scripts/lib/song-match.mjs";
 
 let pass = 0;
 const fails = [];
@@ -56,6 +58,64 @@ check("baseTitle 去括号段", baseTitle("赤伶 (live)"), "赤伶");
 check("切段数量", artistSegments("张靓颖, 卢昶宇/王艺陶").length, 3);
 check("报告要说清认的是哪一段", artistMatchLabel("张智霖, 王菲", "王菲"), "王菲");
 check("没命中时给的是两边原文", artistMatchLabel("田馥甄", "田馥甄的小迷妹"), "田馥甄|田馥甄的小迷妹");
+
+// ---- 身份：同一个条目 / 同一首歌（这一轮加的，之前只有标题字符串可比） ----
+// 现网事故：`黄昏（纵然青丝如霜）` 那条 QQ 换出来的 netease id，跟用户自己早就加过的
+// `黄昏（纵然青丝如霜）（R&B版）` 是**同一个** netease:3391575975。只比标题认不出括号差异，
+// 同一个 id 就在同一个歌单里出现了两遍。所以身份必须先看 `platform:rawID`。
+check("线上形状的身份键", songKeyOf({ id: "agg_netease_3391575975" }), "netease:3391575975");
+check("本机形状的身份键（大小写归一）", songKeyOf({ platform: "QQ", rawID: "004TXgZ41ST7lB" }), "qq:004TXgZ41ST7lB");
+check("本地文件条目没有身份键（不参与去重）", songKeyOf({ id: "local-D:/music/a.mp3", title: "黄昏" }), "");
+check("同一个 id 就是同一首，标题差个括号也算", sameKeyAs(
+  { id: "agg_netease_3391575975", title: "黄昏（纵然青丝如霜）" },
+  { id: "agg_netease_3391575975", title: "黄昏（纵然青丝如霜）（R&B版）" }), true);
+check("不同平台的不同 id 不是同一个条目", sameKeyAs({ id: "agg_qq_1" }, { id: "agg_netease_1" }), false);
+check("跨平台同名同歌手 = 同一首歌的另一个版本", sameSongAs(
+  { id: "agg_qq_111", title: "小幸运", artist: "田馥甄" },
+  { id: "agg_netease_222", title: "小幸运", artist: "田馥甄" }), true);
+check("id 相同即同一首（标题歌手都不必看）", sameSongAs(
+  { id: "agg_netease_3391575975", title: "黄昏（纵然青丝如霜）", artist: "落日微醺" },
+  { id: "agg_netease_3391575975", title: "黄昏（纵然青丝如霜）（R&B版）", artist: "落日微醺" }), true);
+check("同名不同歌手 + 不同 id —— 不是同一首", sameSongAs(
+  { id: "agg_qq_111", title: "小幸运", artist: "田馥甄" },
+  { id: "agg_netease_222", title: "小幸运", artist: "田馥甄的小迷妹" }), false);
+check("同一首 QQ 歌的两份拷贝：判据本身认同一首 —— 所以调用方必须先按平台过滤，否则会把没可播版本的那首当重复删掉", sameSongAs(
+  { id: "agg_qq_A", title: "难念的经", artist: "周华健" },
+  { id: "agg_qq_A", title: "难念的经", artist: "周华健" }), true);
+check("取不到 id 的条目（本地文件）退回标题+歌手", sameSongAs(
+  { id: "local-1", title: "境随心变心自安", artist: "慕容小小" },
+  { id: "local-2", title: "境随心变心自安", artist: "慕容小小" }), true);
+
+// ---- 查"歌单里是不是已经有这首歌"：必须查整串，不是查已经处理过的那一段 ----
+const 经典 = [
+  { id: "agg_qq_A", title: "难念的经", artist: "周华健" }, // 本轮要处理的 QQ 条目
+  { id: "agg_netease_7", title: "花心", artist: "周华健" },
+  { id: "agg_netease_1809759264", title: "难念的经", artist: "周华健" }, // 可播版本排在**后面**
+];
+const 可播的 = 经典.filter((x) => songKeyOf(x).split(":")[0] !== "qq"); // 调用方的平台过滤
+check("排在后面的可播版本也看得见（旧写法扫 keep 前缀，看不见 → 加了第二遍）",
+  sameSongIn(可播的, 经典[0], 经典[0])?.id, "agg_netease_1809759264");
+check("整串里没这首歌的另一个版本 —— 返回 undefined（该去搜候选，不是删）",
+  sameSongIn(可播的, { id: "agg_qq_B", title: "沿途有你", artist: "周华健" }, undefined), undefined);
+check("skip 自己：不会把自己当成「已有版本」而把唯一那条删掉",
+  sameSongIn(经典, 经典[0], 经典[0])?.id, "agg_netease_1809759264");
+check("没传 list 不炸", sameSongIn(undefined, 经典[0], undefined), undefined);
+
+// ---- 末尾兜底去重：按身份键，保留第一次出现的那条 ----
+const dd = dedupeById([
+  { id: "agg_netease_1809759264", title: "难念的经", artist: "周华健" },
+  { id: "agg_netease_7", title: "花心", artist: "周华健" },
+  { id: "agg_netease_1809759264", title: "难念的经", artist: "周华健（Live）" },
+  { id: "local-D:/a.mp3", title: "本地歌", artist: "某人" },
+  { id: "local-D:/b.mp3", title: "本地歌", artist: "某人" },
+]);
+check("去重后条数", dd.list.length, 4);
+check("保留第一次出现的那条（不是后到的）", dd.list[0].artist, "周华健");
+check("重复品计数", dd.dropped.length, 1);
+// 后面几条要能读第 0 条：判据被改坏时 dd.dropped 可能是空的，写成可选访问才能留下 FAIL 行而不是整个测试崩掉
+check("重复品带着「留下的是哪一条」，报告才写得清", dd.dropped[0] ? `${dd.dropped[0].song.artist}|${dd.dropped[0].kept.artist}` : '没有重复品', "周华健（Live）|周华健");
+check("无身份键的条目不参与去重（本地文件同名两条都留着）", dd.list.filter((s) => !songKeyOf(s)).length, 2);
+check("空输入不炸", dedupeById(undefined).list.length, 0);
 
 console.log(`song-match 判据：${pass} 项通过${fails.length ? `，${fails.length} 项失败：` : "，0 项失败"}`);
 fails.forEach((f) => console.log(`  FAIL ${f}`));

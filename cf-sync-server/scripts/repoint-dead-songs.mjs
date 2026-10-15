@@ -17,10 +17,14 @@
  *   - 标题与歌手都做规范化（去空白/标点/全半角差、转小写）；
  *   - 先要"完全相等"，一条都没有才退让到"去掉括号里的版本说明后相等"（报告里标 `relaxed`）；
  *   - 歌手要求**人名段整段相等**（`张靓颖, 卢昶宇…` 这种合作署名认，`田馥甄的小迷妹` 这种翻唱艺名不认）。
- *     判据本身在 `scripts/lib/song-match.mjs`，由 `tests/song-match.test.mjs` 钉住（26 项，含"不该认的必须不认"）。
+ *     判据本身在 `scripts/lib/song-match.mjs`，由 `tests/song-match.test.mjs` 钉住（46 项，含"不该认的必须不认"）。
  *   - 候选不止验一次：网关的 `action=url` 对洛雪源是"第一条同平台线路给什么就是什么"，
  *     所以这里逐条**可播线路**试到出字节为止（见 `verifyPlayable`），否则一条镜像挂了就把好歌判成换不了。
  *   - 换成的那条如果同一首歌在这个歌单里**已经有可播版本**，就直接删掉原条目，不再重复加。
+ *     「已经有」要看**整张歌单**（不是已经处理过的那一段），而且**先比 `platform:rawID`，再比同名同歌手**：
+ *     上一轮就是这两条都没做，在「经典」里写下 3 条同 id 重复（见 §29.7）。排在后面的可播版本看不见
+ *     （`难念的经`、`沿途有你`），标题多个「（R&B版）」就认不出是同一个 id（`黄昏`）。
+ *   - 每个歌单收尾再按身份键走一遍 `dedupeById` 兜底，并且**写完回读数出同 id 重复就报错**（不为 0 就不写）。
  *
  * 用法：
  *   # ① 只算不改（先跑这个看报告）
@@ -40,7 +44,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { sniffAudio } from '../functions/lib/protocols.js';
-import { norm, artistHit, artistMatchLabel, titleTier } from './lib/song-match.mjs';
+import { artistHit, artistMatchLabel, titleTier, songKeyOf, sameKeyAs, sameSongIn, dedupeById } from './lib/song-match.mjs';
 
 const BASE = process.env.PRIMUSE_SYNC_BASE || 'https://primuse-sync-server.pages.dev';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -84,39 +88,59 @@ if (LOCAL_STORE) {
   const map = JSON.parse(fs.readFileSync(MAP_FILE, 'utf8'));
   const from = String(map.from || FROM).toLowerCase();
   const byRaw = new Map();
-  (map.replacements || []).forEach((r) => byRaw.set(`${r.from.platform}:${r.from.rawID}`, r));
-  const drops = new Map();
-  (map.drops || []).forEach((d) => drops.set(`${d.from.platform}:${d.from.rawID}`, d));
+  // 计数而不是"一条决定管所有同键条目"：本机万一有两份同样的 QQ 条目，云端只换/删一份，
+  // 本机也必须只动一份 —— 否则这一步自己就把重复做出来了（上一轮栽的正是同 id 重复）。
+  const counted = (arr) => {
+    const m = new Map();
+    arr.forEach((x) => {
+      const k = `${x.from.platform}:${x.from.rawID}`;
+      m.set(k, (m.get(k) || 0) + 1);
+    });
+    return m;
+  };
+  (map.replacements || []).forEach((r) => {
+    const k = `${r.from.platform}:${r.from.rawID}`;
+    if (!byRaw.has(k)) byRaw.set(k, r);
+  });
+  const replaceLeft = counted(map.replacements || []);
+  const dropLeft = counted(map.drops || []);
   const before = fs.readFileSync(storePath, 'utf8');
   const j = JSON.parse(before);
   let replaced = 0;
   let dropped = 0;
   let left = 0;
-  const patch = (list) => list
-    .map((s) => {
-      const key = `${String(s.platform || '').toLowerCase()}:${String(s.rawID || '')}`;
-      if (String(s.platform || '').toLowerCase() !== from || !s.rawID) {
+  let deduped = 0;
+  const patch = (list) => {
+    const stepped = list
+      .map((s) => {
+        const key = `${String(s.platform || '').toLowerCase()}:${String(s.rawID || '')}`;
+        if (String(s.platform || '').toLowerCase() !== from || !s.rawID) return s;
+        if ((replaceLeft.get(key) || 0) > 0) {
+          replaceLeft.set(key, replaceLeft.get(key) - 1);
+          const r = byRaw.get(key);
+          replaced += 1;
+          // 本机形状：同一首可播版本，只换平台与 rawID，封面/专辑/时长以候选为准（候选没给就留原值）
+          return { ...s, platform: r.to.platform, rawID: r.to.rawID, album: r.to.album || s.album,
+            duration: Number(r.to.duration) > 0 ? Number(r.to.duration) : s.duration,
+            coverURL: r.to.coverURL !== undefined ? (r.to.coverURL || null) : (s.coverURL || null),
+            unresolved: false };
+        }
+        if ((dropLeft.get(key) || 0) > 0) {
+          dropLeft.set(key, dropLeft.get(key) - 1);
+          dropped += 1;
+          return null;
+        }
+        console.log(`  本机这条不在 map 里（第②步没换成、也没让删）：${s.title} / ${s.artist} · ${key}`);
         left += 1;
         return s;
-      }
-      const r = byRaw.get(key);
-      if (r) {
-        replaced += 1;
-        // 本机形状：同一首可播版本，只换平台与 rawID，封面/专辑/时长以候选为准（候选没给就留原值）
-        return { ...s, platform: r.to.platform, rawID: r.to.rawID, album: r.to.album || s.album,
-          duration: Number(r.to.duration) > 0 ? Number(r.to.duration) : s.duration,
-          coverURL: r.to.coverURL !== undefined ? (r.to.coverURL || null) : (s.coverURL || null),
-          unresolved: false };
-      }
-      if (drops.has(key)) {
-        dropped += 1;
-        return null;
-      }
-      console.log(`  本机这条不在 map 里（第②步也没换成）：${s.title} / ${s.artist} · ${key}`);
-      left += 1;
-      return s;
-    })
-    .filter(Boolean);
+      })
+      .filter(Boolean);
+    // 与云端第②步同一道兜底：按 platform:rawID 去重，保留第一次出现的那条
+    const d = dedupeById(stepped);
+    deduped += d.dropped.length;
+    d.dropped.forEach(({ song: s, kept: k }) => console.log(`  本机去重：删掉 ${s.title} / ${s.artist}（与已有的 ${songKeyOf(k)} 同 id）`));
+    return d.list;
+  };
   (j.playlists || []).forEach((pl) => {
     pl.songs = patch(Array.isArray(pl.songs) ? pl.songs : []);
     pl.updatedAt = Date.now();
@@ -125,7 +149,10 @@ if (LOCAL_STORE) {
   const preImage = `${storePath}.before-repoint-${ts}`;
   fs.writeFileSync(preImage, before, 'utf8');
   fs.writeFileSync(storePath, JSON.stringify(j, null, 2), 'utf8');
-  console.log(`本机存档：换成 ${replaced} 条、删掉 ${dropped} 条、不属于本轮 ${left} 条`);
+  console.log(`本机存档：换成 ${replaced} 条、删掉 ${dropped} 条、同 id 去重 ${deduped} 条、本轮没动的 QQ 条目 ${left} 条（非 QQ 的条目不参与统计）`);
+  const mapDedupe = (map.dedupe || []);
+  if (mapDedupe.length) console.log(`第②步在云端还删了 ${mapDedupe.length} 条"与本轮无关"的同 id 重复：`);
+  mapDedupe.forEach((d) => console.log(`  - [${d.playlist}] ${d.removedTitle} / ${d.removedArtist} = ${d.key}（留下的是 ${d.keptTitle} / ${d.keptArtist}）`));
   console.log(`原样在 ${preImage}（想回去把它覆盖回来即可）。现在可以开 App 了。`);
   process.exit(0);
 }
@@ -176,6 +203,9 @@ const playableCache = new Map();
 const notes = [];
 const replacements = [];
 const drops = [];
+// 兜底去重删掉的"与本轮换源无关"的同 id 条目（例如上一轮把云端写坏过的那几条）——
+// 只删不补，第③步（本机存档）靠它把本机也收成同一个形状
+const dedupes = [];
 
 /**
  * 按平台搜（不是全站搜一把抓）。
@@ -302,6 +332,10 @@ for (let i = 0; i < playlists.length; i += 1) {
     const m = /^agg_[a-z0-9]+_(.+)$/i.exec(String(s.id || ''));
     return String(s.rawID || (m ? m[1] : '') || '');
   };
+  // 歌单里**原样存在**的可播版本（整串，不是"处理过的那一段"）—— 上一轮的重复条目就是因为只看了前缀。
+  const playable = songs.filter((s) => platformOf(s) !== FROM);
+  // 已经处理出来的那一段里，非 FROM 的那部分（本轮换出来的条目也算"已经有了"）
+  const builtPlayable = () => keep.filter((s) => platformOf(s) !== FROM);
   for (const song of songs) {
     if (platformOf(song) !== FROM) {
       keep.push(song);
@@ -310,9 +344,9 @@ for (let i = 0; i < playlists.length; i += 1) {
     const label = `${song.title} / ${song.artist}`;
     const fromRef = { platform: FROM, rawID: rawOf(song) };
     // ① 这个歌单里已经有同一首歌的可播版本 —— 直接删，不重复加
-    const dup = keep.find((s) => platformOf(s) !== FROM && norm(s.title) === norm(song.title) && artistHit(s.artist, song.artist));
+    const dup = sameSongIn(playable.concat(builtPlayable()), song, song);
     if (dup) {
-      notes.push({ playlist: pl.name, song: label, action: 'drop-duplicate', detail: `同歌单已有 ${platformOf(dup)}:${dup.rawID || dup.id}` });
+      notes.push({ playlist: pl.name, song: label, action: 'drop-duplicate', detail: `同歌单已有 ${songKeyOf(dup) || `${platformOf(dup)}:${dup.rawID || dup.id}`}（${dup.title} / ${dup.artist}）` });
       drops.push({ playlist: pl.name, song: label, from: fromRef, reason: 'duplicate-in-playlist' });
       continue;
     }
@@ -345,6 +379,16 @@ for (let i = 0; i < playlists.length; i += 1) {
       filePath: `/aggregated/${c.platform}/${c.rawID}.mp3`,
       sourceId: 'system-aggregated-music',
     };
+    // ② 换出来的这条**身份键**已经在歌单里了（用户自己早就加过同一首，只是标题写法不同）——
+    //    上一轮就是缺这一步：`黄昏（纵然青丝如霜）` 换出的 `netease:3391575975`，与歌单里那条
+    //    `黄昏（纵然青丝如霜）（R&B版）` 是同一个 id，标题差三个字，判据认不出来，于是加成了两遍。
+    //    这里只删不补：留下用户自己那条（标题/时长是搜索原始形状，比我拼出来的这条更可信）。
+    const collide = playable.concat(builtPlayable()).find((s) => sameKeyAs(s, replacement));
+    if (collide) {
+      notes.push({ playlist: pl.name, song: label, action: 'drop-same-id', detail: `换出来就是歌单里已有的 ${songKeyOf(collide)}（${collide.title} / ${collide.artist}），只删不补` });
+      drops.push({ playlist: pl.name, song: label, from: fromRef, reason: 'replacement-collides-with-existing', collidedWith: { key: songKeyOf(collide), title: collide.title, artist: collide.artist } });
+      continue;
+    }
     keep.push(replacement);
     replacements.push({
       playlist: pl.name,
@@ -374,8 +418,29 @@ for (let i = 0; i < playlists.length; i += 1) {
       detail: `${FROM} → ${c.platform}:${c.rawID}（真出过声的线路：${sourceNameOf(picked.via) || c.sourceName || c.sourceId || '未记'}）· ${c.title} / ${c.artist} · 认下的歌手段「${artistMatchLabel(c.artist, song.artist)}」 · 候选 ${ranked.length} 条`,
     });
   }
-  target[key] = keep;
+  // ③ 兜底：按身份键（platform:rawID）去重，**保留第一次出现的那条**。
+  //    上面两道已经不该再有重复，这一道是给"以后新增的处理分支忘了查重"用的 ——
+  //    上一轮的教训是：写完才发现同一个歌单里出现两遍同一个 id，客户端会显示两行、播放也重复。
+  const { list: deduped, dropped: dupes } = dedupeById(keep);
+  dupes.forEach(({ song: s, kept: k }) => {
+    const lbl = `${s.title} / ${s.artist}`;
+    notes.push({ playlist: pl.name, song: lbl, action: 'dedupe-id', detail: `与已有 ${songKeyOf(k)}（${k.title} / ${k.artist}）同 id，删掉后出现的这条` });
+    if (platformOf(s) === FROM) {
+      drops.push({ playlist: pl.name, song: lbl, from: { platform: FROM, rawID: rawOf(s) }, reason: 'duplicate-id' });
+    } else {
+      // 不是本轮源条目的重复（云端本来就写坏了的那种）：本机也得删，按 key 记进去给第③步用
+      dedupes.push({ playlist: pl.name, playlistId: pl.id, key: songKeyOf(s), removedTitle: s.title, removedArtist: s.artist, keptTitle: k.title, keptArtist: k.artist });
+    }
+  });
+  target[key] = deduped;
 }
+
+/** 同 id 重复计数：整个流程的地盘线，写完必须是 0。 */
+const dupeCount = (pls) => pls.reduce((n, pl) => {
+  const keysArr = songsOf(pl).map((s) => songKeyOf(s)).filter(Boolean);
+  const seen = new Set();
+  return n + keysArr.reduce((m, k) => (seen.has(k) ? m + 1 : (seen.add(k), m)), 0);
+}, 0);
 
 // ---------- 3. 报告 ----------
 const tally = (arr) => {
@@ -393,16 +458,25 @@ const actions = {};
 notes.forEach((n) => (actions[n.action] = (actions[n.action] || 0) + 1));
 console.log('\n处置统计：', JSON.stringify(actions));
 notes.filter((n) => n.action.startsWith('kept')).forEach((n) => console.log(`  留下没换：[${n.playlist}] ${n.song} —— ${n.detail}`));
+notes.filter((n) => n.action.startsWith('drop') || n.action === 'dedupe-id').forEach((n) => console.log(`  只删不补：[${n.playlist}] ${n.song} —— ${n.detail}`));
+// 地盘线：写前就有的同 id 重复一条不许变多（上一轮就是这里没人看，云端多出 3 条重复）
+const dupeBefore = dupeCount(playlists);
+const dupeAfter = dupeCount(out);
+console.log(`\n同 id 重复：写前 ${dupeBefore} 条 → 本轮产出 ${dupeAfter} 条`);
+if (dupeAfter > dupeBefore) {
+  console.error('★ 产出里有同 id 重复，拒绝写入。这是上一轮的事故形状（同一个 netease id 在同一个歌单出现两遍）。');
+  process.exit(1);
+}
 
 const reportFile = path.join(HERE, '..', `.repoint-${DEVICE.slice(0, 8)}-${ts}.json`);
-fs.writeFileSync(reportFile, JSON.stringify({ deviceId: DEVICE, from: FROM, apply: APPLY, at: new Date().toISOString(), actions, notes }, null, 2), 'utf8');
+fs.writeFileSync(reportFile, JSON.stringify({ deviceId: DEVICE, from: FROM, apply: APPLY, at: new Date().toISOString(), actions, dupeBefore, dupeAfter, notes }, null, 2), 'utf8');
 // map 单独一份：dry-run 也写，方便先只读看决定；第③步（本机存档）吃的就是它
 const mapFile = path.join(HERE, '..', `.repoint-${DEVICE.slice(0, 8)}-${ts}-map.json`);
 fs.writeFileSync(mapFile, JSON.stringify({
   deviceId: DEVICE, deviceName: device.deviceName, from: FROM, at: new Date().toISOString(),
-  apply: APPLY, okPlatforms: [...okPlatforms], replacements, drops,
+  apply: APPLY, okPlatforms: [...okPlatforms], replacements, drops, dedupe: dedupes,
 }, null, 2), 'utf8');
-console.log(`决定清单：${mapFile}（换 ${replacements.length} 条 / 只删不补 ${drops.length} 条 / 留下 ${Object.keys(actions).filter((a) => a.startsWith('kept')).reduce((n, k) => n + actions[k], 0)} 条）`);
+console.log(`决定清单：${mapFile}（换 ${replacements.length} 条 / 只删不补 ${drops.length} 条 / 兜底去重 ${dedupes.length} 条 / 留下 ${Object.keys(actions).filter((a) => a.startsWith('kept')).reduce((n, k) => n + actions[k], 0)} 条）`);
 
 if (!APPLY) {
   console.log(`\n[dry-run] 没写任何东西。报告：${reportFile}\n确认无误后加 --apply 再跑一次。`);
@@ -425,9 +499,16 @@ if (!back || back.code !== 0) {
   process.exit(1);
 }
 const after = await jget(`${BASE}/api/sync-playlists?deviceId=${encodeURIComponent(DEVICE)}`);
+const readPlaylists = after.playlists || [];
 const allAfter = [];
-(after.playlists || []).forEach((pl) => songsOf(pl).forEach((s) => allAfter.push(s)));
+readPlaylists.forEach((pl) => songsOf(pl).forEach((s) => allAfter.push(s)));
 console.log(`回读：${after.playlistCount} 个歌单 / ${after.songCount} 首 · 按平台 ${JSON.stringify(tally(allAfter))}`);
+const dupeReadBack = dupeCount(readPlaylists);
+console.log(`回读的同 id 重复：${dupeReadBack} 条（写前 ${dupeBefore} 条 —— 这一轮事故就是这里多了 3 条）`);
+if (dupeReadBack > dupeBefore) {
+  console.error(`★ 云端回读出来的重复比写前还多，本轮写入有问题。原样在 ${preImage}，先贴回去再说。`);
+  process.exit(1);
+}
 const left = allAfter.filter((s) => platformOf(s) === FROM).length;
 console.log(`还剩 ${FROM} 条目 ${left} 首（这些是"没找到可播的同曲同歌手"或"验播全失败"的，故意留在原地）`);
 console.log(`原样备份：${preImage}\n处置报告：${reportFile}`);

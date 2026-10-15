@@ -1,7 +1,7 @@
 // 变异自查（`npm run test:match:mutate`）：故意把判据改坏，看守必须变红。跑完逐字节还原（连失败也要还原）。
 //
-// 为什么这个文件值得入库：`tests/song-match.test.mjs` 那 26 项如果没人做过红色验证，
-// 就不知道它们是真在管事还是"只会绿"。这里把三种改坏方式固定下来，改判据时先跑它。
+// 为什么这个文件值得入库：`tests/song-match.test.mjs` 那 46 项如果没人做过红色验证，
+// 就不知道它们是真在管事还是"只会绿"。这里把五种改坏方式固定下来，改判据时先跑它。
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
@@ -24,6 +24,16 @@ const MUTATIONS = [
     name: '标题不再退让 relaxed 档',
     from: "  if (norm(candidateTitle) !== norm(wantedTitle) && baseTitle(candidateTitle) === baseTitle(wantedTitle)) return 'relaxed';",
     to: '  // 退让档被删掉',
+  },
+  {
+    name: '「同一首歌」退回只看标题字符串（现网那个同 id 重复就是这么写出来的）',
+    from: 'export const sameSongAs = (a, b) => sameKeyAs(a, b) || sameTitleAndArtistAs(a, b);',
+    to: 'export const sameSongAs = (a, b) => sameTitleAndArtistAs(a, b);',
+  },
+  {
+    name: '末尾的身份键去重不再起作用',
+    from: '    if (seen.has(k)) { dropped.push({ song: s, kept: seen.get(k) }); return; }',
+    to: '    // 兜底去重被关掉',
   },
 ];
 
