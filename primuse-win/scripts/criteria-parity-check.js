@@ -21,7 +21,10 @@
  *       且收口只有一处（Windows 是 aggregated.enabledSources()，渲染层只读 loaded 不再自己判）；
  *   12. 封面占位色：色相表 + FNV-1a 常数 + UTF-16 迭代口径两端一致，音乐源那一档的写真底图文件在位；
  *   13. 歌词：当前行金色（两套主题都有 token）、基准 20px；
- *   14. 任务栏歌词条：出场条件五项、换歌自动解除 ✕、通道名两侧都在、不抢焦点不进任务栏。
+ *   14. 任务栏歌词条：出场条件五项、换歌自动解除 ✕、通道名两侧都在、不抢焦点不进任务栏；
+ *   15. macOS 外壳：底下那四格就是 iPhone 的 TabView 与 Windows 的 .tabbar —— 同一组
+ *       tab、同一组图标、同一个云端首页名；三栏侧栏壳不得复活；侧栏原来装的目的地
+ *       （分区在资料库页内、源与工具在设置页里）得有落点，返回有后手。
  *
  * 用法：node scripts/criteria-parity-check.js
  */
@@ -43,6 +46,23 @@ const SWIFT_MODELS = read('primuse/Primuse/Services/AggregatedMusic/AggregatedMu
 const SWIFT_CLOUD = read('primuse/Primuse/Services/AggregatedMusic/CloudMusicSources.swift');
 const SWIFT_STORE = read('primuse/Primuse/Services/AggregatedMusic/AggregatedSourceStore.swift');
 const SWIFT_ART = read('primuse/Primuse/Views/Components/CachedArtworkView.swift');
+const SWIFT_PLAYER = read('primuse/Primuse/Views/NowPlaying/NowPlayingView.swift');
+const SWIFT_MAC_PLAYER = read('primuse/Primuse/Views/Mac/MacNowPlayingView.swift');
+const SWIFT_COVER = read('primuse/Primuse/Views/Components/CoverArtView.swift');
+const SWIFT_ARTWORK = read('primuse/Primuse/Views/NowPlaying/ArtworkView.swift');
+const SWIFT_STORED_COVER = read('primuse/Primuse/Views/Components/StoredCoverArtView.swift');
+const SWIFT_SEARCH = read('primuse/Primuse/Views/Search/SearchView.swift');
+const SWIFT_LIBRARY = read('primuse/Primuse/Views/Library/LibraryView.swift');
+const SWIFT_IPHONE_SHELL = read('primuse/Primuse/Views/ContentView.swift');
+const SWIFT_IPHONE_SETTINGS = read('primuse/Primuse/Views/Settings/SettingsView.swift');
+const SWIFT_MAC_SHELL = read('primuse/Primuse/Views/Mac/MacContentView.swift');
+const SWIFT_MAC_TABBAR = read('primuse/Primuse/Views/Mac/MacTabBar.swift');
+const SWIFT_MAC_DETAIL = read('primuse/Primuse/Views/Mac/MacDetailContainer.swift');
+const SWIFT_MAC_SETTINGS = read('primuse/Primuse/Views/Mac/MacSettingsView.swift');
+const SWIFT_MAC_TITLEBAR = read('primuse/Primuse/Views/Mac/PMTitleBar.swift');
+const SWIFT_MAC_ROUTE = read('primuse/Primuse/Views/Mac/MacRoute.swift');
+const SWIFT_MAC_THEME = read('primuse/Primuse/Views/Mac/Theme/PrimuseTheme.swift');
+const SWIFT_APP = read('primuse/Primuse/App/PrimuseApp.swift');
 const WIN_STYLES = read('primuse-win/src/renderer/styles.css');
 const WIN_AGG = read('primuse-win/src/main/aggregated.js');
 const WIN_STORE = read('primuse-win/src/main/store.js');
@@ -317,6 +337,26 @@ record('音乐源那一档用的是写真封面底图，且文件真的在渲染
 record('结论色走那一圈内描（照片底上底色分不出三档）',
   /\.sico\.photo \{[\s\S]{0,300}box-shadow: inset 0 0 0 1\.5px var\(--ring/.test(WIN_STYLES), '');
 
+// Apple 那侧以前只有 CachedArtworkView 用得上这套渐变，别处各自留着灰底 ——
+// 结果同一张没封面的专辑，Windows 彩色、iPhone 灰色。这一组盯的是"灰底有没有回来"。
+group('12b. 占位封面：Swift 侧只剩 CoverPlaceholder 这一条路，灰底不许再长出来');
+record('CoverPlaceholder 确实住在 CachedArtworkView 里，并且走的还是那张色相表',
+  /struct CoverPlaceholder: View \{/.test(SWIFT_ART) && /CachedArtworkView\.placeholderColors\(for: identity\)/.test(SWIFT_ART), '');
+record('CachedArtworkView 自己的占位也改成调它（不留第二份渐变代码）',
+  /private var symbolicPlaceholder: some View \{\s*CoverPlaceholder\(/.test(SWIFT_ART), '');
+record('CoverArtView / ArtworkView 的材质灰底已换成占位封面',
+  /CoverPlaceholder\(/.test(SWIFT_COVER) && !/\.fill\(\.ultraThinMaterial\)/.test(SWIFT_COVER)
+    && /CoverPlaceholder\(/.test(SWIFT_ARTWORK) && !/\.fill\(\.ultraThinMaterial\)/.test(SWIFT_ARTWORK),
+  '.ultraThinMaterial 在浅色墙上就是一块灰');
+record('歌单占位不再是 secondary 灰梯度，且种子用歌单名（与 Windows 的 bgStyle(url, name) 同一口径）',
+  /private var symbolicPlaceholder: some View \{\s*CoverPlaceholder\(/.test(SWIFT_STORED_COVER)
+    && !/Color\.secondary\.opacity\(0\.18\)/.test(SWIFT_STORED_COVER)
+    && /let name = currentPlaylist\.name[\s\S]{0,160}return name\.isEmpty \? "playlist:/.test(SWIFT_STORED_COVER), '');
+record('资料库叠封预览的底版取色，不再是一块 secondary.opacity(0.1)',
+  /CoverPlaceholder\(identity: seed/.test(SWIFT_LIBRARY) && !/\.fill\(Color\.secondary\.opacity\(0\.1\)\)/.test(SWIFT_LIBRARY), '');
+record('聚合搜索结果的封面种子用「标题|歌手」，和 Windows 歌行的种子一模一样',
+  /private func aggregatedMusicRow[\s\S]{0,1400}CoverPlaceholder\(\s*identity: "\\\(songItem\.title\)\|\\\(songItem\.artist\)"/.test(SWIFT_SEARCH), '');
+
 // MARK: - 6. 歌词颜色与字号（需求 5）
 
 group('13. 歌词：当前行金色、基准 20px，两套主题都有值');
@@ -331,6 +371,36 @@ record('.lyric-line 用 var(--gold)、当前行用 var(--gold-now)，都不再�
   /\.lyric-line \{[\s\S]{0,400}color: var\(--gold\)/.test(WIN_STYLES) && /\.lyric-line\.now \{[\s\S]{0,200}color: var\(--gold-now\)/.test(WIN_STYLES), '');
 record('基准字号收到 20px（原来抄 iPhone 的 26px），档位仍乘这个基准',
   /\.lyric-line \{[\s\S]{0,200}font-size: 20px/.test(WIN_STYLES) && /Math\.round\(20 \* scale\)/.test(WIN_APP), '');
+
+// 需求 5 说的是"歌词"，不是"Windows 的歌词"。iPhone 那份原本就不灰（它是参考实现），
+// 但它是白/蓝，字号基准还是 26 —— 这一组把四支 hex 与基准字号钉成两端同一个值。
+const WIN_GOLD = (WIN_STYLES.match(/--gold(?:-now)?: #[0-9a-f]{6}/g) || []).map((s) => s.slice(-6).toLowerCase());
+const WIN_GOLD_UNIQ = [...new Set(WIN_GOLD)].sort();
+group('13b. 歌词金色与基准字号：Windows 与 Swift 两端同一个值');
+// 深色那两支在 CSS 里写了两遍（media query + html[data-appearance=dark]），所以命中数会 >4；
+// 真正要比的是"去重以后就这四支"。
+record('Windows 侧四支金值齐了（浅深各一对：--gold 与 --gold-now）',
+  WIN_GOLD_UNIQ.join(',') === 'b8860b,d99a2b,e6c068,ffd75e'
+    && (WIN_STYLES.match(/--gold: #/g) || []).length >= 2 && (WIN_STYLES.match(/--gold-now: #/g) || []).length >= 2,
+  JSON.stringify(WIN_GOLD_UNIQ));
+record('iOS 播放页两支金色用的就是 Windows 那四支 hex（大小写不敏感比对）',
+  ['d99a2b', 'e6c068'].every((h) => new RegExp(`lyricGold: Color[\\s\\S]{0,120}${h}`, 'i').test(SWIFT_PLAYER))
+    && ['b8860b', 'ffd75e'].every((h) => new RegExp(`lyricGoldNow: Color[\\s\\S]{0,120}${h}`, 'i').test(SWIFT_PLAYER)),
+  `Windows = ${JSON.stringify(WIN_GOLD)}；两端不同金 = 同一首歌两台设备两种颜色，没人会当 bug 报`);
+record('macOS 播放页同样两支金色，值与 iOS 一致',
+  /lyricGold: Color \{[\s\S]{0,120}D99A2B[\s\S]{0,40}E6C068/i.test(SWIFT_MAC_PLAYER)
+    && /lyricGoldNow: Color \{[\s\S]{0,120}B8860B[\s\S]{0,40}FFD75E/i.test(SWIFT_MAC_PLAYER), '');
+record('当前行走金色（默认色模式下不再拿 appearance.primary 当歌词色）',
+  /case \.defaultColor:\s*return AnyShapeStyle\(appearance\.lyricGoldNow/.test(SWIFT_PLAYER), '');
+record('非当前行也走金色阶梯；用户显式选了自定义色/渐变时不抢戏',
+  /private var lyricBaseColor: Color \{\s*lyricsColorMode == \.defaultColor \? appearance\.lyricGold : appearance\.primary/.test(SWIFT_PLAYER), '');
+record('两端基准字号都是 20（iOS 26→20、macOS 25→20，全屏档同比例 32→26）',
+  /lyricsLayoutBaseSize: CGFloat = 20/.test(SWIFT_PLAYER)
+    && /lyricsBaseSize: CGFloat = 20/.test(SWIFT_MAC_PLAYER)
+    && /lyricsBaseSizeFS: CGFloat = 26/.test(SWIFT_MAC_PLAYER), '');
+record('歌词字号倍率区间没动（0.7..1.8 仍由设置里的 lyricsFontScale 决定）',
+  /lyricsMinScale: Double = 0\.7/.test(SWIFT_PLAYER) && /lyricsMaxScale: Double = 1\.8/.test(SWIFT_PLAYER)
+    && /lyricsMinScale: Double = 0\.7/.test(SWIFT_MAC_PLAYER), '');
 
 // MARK: - 7. 任务栏歌词条（需求 8）
 
@@ -366,6 +436,103 @@ record('不抢焦点、不进任务栏、不跟随主窗口节流（否则最小
   /focusable: false/.test(WIN_STRIP) && /skipTaskbar: true/.test(WIN_STRIP) && /backgroundThrottling: false/.test(WIN_STRIP), '');
 record('只贴工作区下沿，不盖任务栏',
   /workArea/.test(WIN_STRIP) && /STRIP_HEIGHT - BOTTOM_GAP/.test(WIN_STRIP), '');
+
+// MARK: - 15. macOS 外壳：底下那四格必须就是 iPhone 那四格
+
+group('15. 三端主导航同源：首页 / 资料库 / 搜索 / 设置（macOS 的三栏侧栏壳已废）');
+
+// Mac 的 tab 名单：enum MacTab 的 case 顺序就是屏幕上从左到右的顺序。
+const macTabBlock = braceBlock(SWIFT_MAC_TABBAR, SWIFT_MAC_TABBAR.indexOf('enum MacTab'));
+const macTabs = Array.from(macTabBlock.matchAll(/^\s*case\s+([a-z]+)/gm)).map((m) => m[1]);
+// Windows 的 TABS：id / 中文文案 / SF Symbol 三元组，顺序同样是渲染顺序。
+const winTabsAt = WIN_APP.indexOf('const TABS = [');
+const winTabBlock = WIN_APP.slice(winTabsAt, WIN_APP.indexOf('];', winTabsAt) + 1);
+const winTabRows = Array.from(winTabBlock.matchAll(/\['([a-z]+)',\s*'[^']*',\s*'([a-z._]+)'\]/g));
+const winTabs = winTabRows.map((m) => m[1]);
+const winTabIcons = winTabRows.map((m) => m[2]);
+// iPhone 的 TabView：搜索那一格走 `role: .search`（系统自己画图），所以只有三个 systemImage。
+const iphoneTabCount = (SWIFT_IPHONE_SHELL.match(/^\s+Tab\(/gm) || []).length;
+const iphoneTabIcons = Array.from(new Set(
+  Array.from(SWIFT_IPHONE_SHELL.matchAll(/systemImage:\s*"([a-z._]+)"/g)).map((m) => m[1])
+));
+const macIconBlock = braceBlock(SWIFT_MAC_TABBAR, SWIFT_MAC_TABBAR.indexOf('var icon: String'));
+const macTabIcons = Array.from(macIconBlock.matchAll(/case \.([a-z]+):\s*return "([a-z._]+)"/g)).map((m) => m[2]);
+
+record('四格名单与顺序：Mac = Windows = iPhone 那四个',
+  macTabs.join(',') === 'home,library,search,settings'
+    && winTabs.join(',') === macTabs.join(',')
+    && iphoneTabCount === 4,
+  `mac=${macTabs.join('/')} win=${winTabs.join('/')} iphoneTabs=${iphoneTabCount}`);
+record('图标逐格同源（Windows 与 iPhone 用到的 symbol 名，Mac 一格都没换）',
+  macTabIcons.length === 4
+    && winTabIcons.every((i) => macTabIcons.includes(i))
+    && iphoneTabIcons.every((i) => macTabIcons.includes(i)),
+  `mac=${macTabIcons.join('/')} win=${winTabIcons.join('/')} iphone=${iphoneTabIcons.join('/')}`);
+record('首页那一格仍念云端按 deviceId 下发的文案（三端同一个来源）',
+  SWIFT_MAC_TABBAR.includes('HomeTitle.defaultsKey') && /HomeTitle\.text\(/.test(SWIFT_MAC_TABBAR)
+    && /Tab\(HomeTitle\.text\(remoteHomeTitle\)/.test(SWIFT_IPHONE_SHELL)
+    && /function homeTitle\(\)/.test(WIN_APP), '服务端改了名，三端一起改；只有一端跟着改就是飘');
+record('三栏壳是真拆了，不是藏起来了（文件、路由、菜单三处都不许留）',
+  !fs.existsSync(path.join(ROOT, 'primuse/Primuse/Views/Mac/MacSidebar.swift'))
+    && !/MacSidebar\(/.test(SWIFT_MAC_SHELL)
+    && !/sidebarCollapsed/.test(SWIFT_MAC_SHELL)
+    && !/SidebarCommands\(\)/.test(SWIFT_APP), '留着 SidebarCommands 就是菜单里多一条点不动的「显示/隐藏侧栏」');
+
+const macLibraryCase = (SWIFT_MAC_DETAIL.match(/case \.library:([\s\S]*?)case \.settings:/) || ['', ''])[1];
+record('Mac 的「资料库」就是 iPhone 那份 LibraryView，分区在页内切换（不是又抄一遍分区列表）',
+  macLibraryCase.includes('LibraryView(') && macLibraryCase.includes('onActiveSectionChange')
+    && SWIFT_IPHONE_SHELL.includes('onActiveSectionChange:'),
+  '两端共用一份视图，分区/歌单/电台的样式与持久化才不会各走各的');
+
+// MacRoute 每加一条，`var tab` 的 switch 就得归到某一格，否则高亮与「返回」都算不出来。
+const macRouteBlock = braceBlock(SWIFT_MAC_ROUTE, SWIFT_MAC_ROUTE.indexOf('enum MacRoute'));
+const macRouteCases = Array.from(new Set(
+  Array.from(macRouteBlock.matchAll(/^\s*case\s+([a-zA-Z]+)/gm)).map((m) => m[1])
+));
+const macTabSwitch = braceBlock(SWIFT_MAC_TABBAR, SWIFT_MAC_TABBAR.indexOf('var tab: MacTab'));
+const orphanRoutes = macRouteCases.filter((name) => !new RegExp(`\\.${name}\\b`).test(macTabSwitch));
+record(`MacRoute 的 ${macRouteCases.length} 条路由全部归得到某一格（漏一条就是底下四格与正文不同步）`,
+  macRouteCases.length >= 10 && orphanRoutes.length === 0 && /var isTabRoot: Bool/.test(SWIFT_MAC_TABBAR),
+  orphanRoutes.length ? `没归类：${orphanRoutes.join('/')}` : macRouteCases.join('/'));
+
+// 侧栏原来装的目的地：源 / 聚合源 / 五个工具 —— 现在必须都在「设置」tab 的页脚。
+const macToolBlock = braceBlock(SWIFT_MAC_ROUTE, SWIFT_MAC_ROUTE.indexOf('enum MacTool'));
+const macTools = Array.from(macToolBlock.matchAll(/^\s*case\s+([a-zA-Z]+)/gm)).map((m) => m[1]);
+const missingToolRows = macTools.filter((t) => !SWIFT_MAC_SETTINGS.includes(`onOpenTool(.${t})`));
+const missingToolSheets = macTools.filter((t) => !SWIFT_MAC_SHELL.includes(`case .${t}:`));
+record('设置页页脚把源、聚合源、五个工具全接住了（少一个就是目的地凭空消失）',
+  SWIFT_MAC_SETTINGS.includes('embeddedDestinationRows')
+    && /Text\("manage_sources"\)/.test(SWIFT_MAC_SETTINGS)
+    && SWIFT_MAC_SETTINGS.includes('聚合音乐源设置')
+    && /embeddedGroupHeader\("mac_sidebar_tools"\)/.test(SWIFT_MAC_SETTINGS)
+    && missingToolRows.length === 0 && missingToolSheets.length === 0,
+  `工具行缺 ${missingToolRows.join('/') || '无'}；弹框缺 ${missingToolSheets.join('/') || '无'}`);
+record('源管理与聚合源两条路由真能渲染，且聚合源用的是 iPhone 同一份视图',
+  /case \.sources:[\s\S]{0,80}MacSourcesView\(\)/.test(SWIFT_MAC_DETAIL)
+    && /case \.aggregatedSources:[\s\S]{0,160}AggregatedSourcesSettingsView\(\)/.test(SWIFT_MAC_DETAIL)
+    && SWIFT_IPHONE_SETTINGS.includes('AggregatedSourcesSettingsView()'), '');
+record('没有系统返回按钮，就有外壳级的返回（标题栏箭头 + 再点本格回根页）',
+  /var showsBack: Bool/.test(SWIFT_MAC_TITLEBAR) && SWIFT_MAC_TITLEBAR.includes('"chevron.left"')
+    && /private var showsTitleBarBack: Bool/.test(SWIFT_MAC_SHELL)
+    && /guard tab != selection\.tab[\s\S]{0,220}backToTabRoot\(\)/.test(SWIFT_MAC_SHELL),
+  'windowToolbar 是隐藏的，NavigationStack 里钻进去就没了返回 —— 只有外壳能补');
+
+const macTabH = num(SWIFT_MAC_THEME, /static let tabBar: CGFloat = (\d+)/);
+const winTabH = num(WIN_STYLES, /--tab-h:\s*(\d+)px/);
+record(`那一排的高度跟另外两端同量级（iPhone 系统 49 ≤ mac ${macTabH} ≤ win ${winTabH}）`,
+  macTabH >= 49 && macTabH <= winTabH && winTabH === 56
+    && /frame\(height: PMSize\.tabBar\)/.test(SWIFT_MAC_TABBAR),
+  JSON.stringify({ iphone: 49, mac: macTabH, win: winTabH }));
+// 迷你条 + tab 这一叠：两者必须在同一个底部 VStack 里，且 tab 在最下面。
+// 只看文本先后是不够的 —— 把 MacTabBar 挪出 VStack 之后，它在源码里仍然排在后面。
+const insetAt = SWIFT_MAC_SHELL.indexOf('.safeAreaInset(edge: .bottom');
+const insetIf = braceBlock(SWIFT_MAC_SHELL, SWIFT_MAC_SHELL.indexOf('if !isFullScreenNowPlaying {', insetAt));
+const bottomStack = braceBlock(insetIf, insetIf.indexOf('VStack(spacing: 0)'));
+const bottomFirst = bottomStack.indexOf('MacBottomBar(');
+record('迷你条在上、tab 贴窗口底边，两边同一叠放次序（同一个底部 VStack）',
+  insetAt >= 0 && bottomFirst >= 0
+    && bottomStack.indexOf('MacTabBar(') > bottomFirst,
+  '顺序反了或 tab 掉出这一叠，就变成 tab 压在迷你条上面，跟 Windows/iPhone 都不一样');
 
 // MARK: - 汇总
 
