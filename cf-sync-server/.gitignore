@@ -16,3 +16,7 @@ tests/.eval-probe/
 # 现网验证的一次性落盘/临时探针：runner 状态、清单、体检名单（名单内容会写进 docs，不入库）
 .live-*
 .check-live.json
+
+# 设备歌单换源工具的落盘：pre-image、报告、单设备只读快照 —— 全是用户数据，不入库
+.repoint-*
+.device-*-backup.json
