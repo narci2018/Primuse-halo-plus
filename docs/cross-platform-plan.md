@@ -1721,14 +1721,16 @@ v1.9.19 的三端 CI 全绿（macOS 38708382230 / iOS 38708382050 / Windows，Re
 
 四格壳把系统工具栏整条藏了（`.toolbar(.hidden, for: .windowToolbar)`，§27.4）。iPhone 那边
 `LibraryView` 的 `.navigationTitle("library_title")` 由系统导航栏渲染，Mac 这边导航栏根本没落脚处 ——
-于是那一格里 250 首歌、83 张专辑摆在屏上，头顶一个字都没有。Windows 用 `page-title` 那个 div 写死了标题，
-所以三端只有 Mac 缺一行字。
+于是那一格里 250 首歌、83 张专辑摆在屏上，头顶一个字都没有。Windows 那边一直有 ——
+`navBar({ title: '资料库', large: true })` 那一条大标题（`--fs-large-title: 28px`，注释写着"iOS 是 34；
+窗口里读起来过重，收窄一档"），所以三端只有 Mac 缺一行字。
 
 不能在共享视图里加 `#if` 画一条 bar 完事：那条 bar 的字号、左对齐、下分割线都得跟 Mac 自己的
 `PMColor` / `PMSpace` 走，而这些常量只在 `PrimuseTheme.swift` 的 `#if os(macOS)` 分支里存在
 （整个文件从第 1 行到第 1822 行都在这个条件编译里）。做法是新加一个 Mac-only 的文件
 `Primuse/Views/Mac/MacLibraryPageTitle.swift`（1790 字节），整份包在 `#if os(macOS)` 里：
-28pt bold、`tracking(-0.4)`、`.padding(.horizontal, 16)`（对齐 `sectionHeader` 与分类行的水平内边距），
+28pt bold（正好是 Windows 那档 `--fs-large-title: 28px`）、`tracking(-0.4)`、
+`.padding(.horizontal, 16)`（对齐 `sectionHeader` 与分类行的水平内边距），
 底色 `PMColor.bg`，底部 0.5px `PMColor.divider`。
 
 `LibraryView` 侧用 `.safeAreaInset(edge: .top)` 挂它，两处：hub（`rootSection?.title ?? "library_title"`）
@@ -1797,7 +1799,8 @@ received: p.text === '第 7 行冒烟歌词' && p.playing === true && p.hasLyric
 
 需求 4 之后那一步断言的是"至少一条结果带封面 URL，且那张真解出尺寸"。但上游给不给 URL 不由我们决定 ——
 公开线路经常一条都不给（酷狗 meting 的 `type=pic` 直接返回空 body），于是这一步红在
-"渲染层自检失败"上，报的却是没坏的东西。本轮那两次 FAIL 就是这个。
+"渲染层自检失败"上，报的却是没坏的东西。本轮红的那次原文是 `"coverSamples":[]`、`"coverLoads":{}`
+—— 一条 URL 都没带，A 侧必然过不了，而这跟渲染层没关系。
 
 现在的门两种过法都在，`main.js`：
 
@@ -1847,9 +1850,16 @@ iOS 侧能不能编过要看 `build-ipa.yml`（`primuse/**` 的 push 触发会�
 v1.9.20 的 tag 构建再确认一次）；macOS 真机（任务 #5）挂着，本轮把"进三层没有返回"从
 "真机才知道"变成"代码上已经补了"，剩下的是页名与返回的视觉对齐。
 
-还有一件已识别、本轮没做的：老存档里持久化下来的 Mac 路由 `"section:*"` 走 `route(for:)` 回到
-`MacDetailContainer` 那套 Mac-only 的 `.section(...)` 视图，而不是 iPhone 的 `LibraryView` —— 与新页名
-那条路是两套渲染。 candidate 修法是把它们映射成 `.library` + `libraryDeepLink = .section(section)`，
-让"资料库"在 Mac 上永远只有一个入口。
+还有一件已识别、本轮没做的：Mac 外壳的 `.section(...)` 那条路。`MacDetailContainer` 里
+`case .section(let section)` 挂的是**同样的那些共享视图**（`SongListView` / `AlbumGridView` /
+`ArtistListView` / `PlaylistListView` 都自带 `macBody` 页头），差别只在它是外壳直接挂进去的，
+绕过了 `LibraryView` 的快捷访问与分类条，也就绕过了 §28.1 那条页名。而这条路**不只是老存档才会碰到** ——
+首页那个「继续听」入口就是 `openLibrary(.section(.songs))`。另有三处与 iPhone 不同：
+iPhone 的 `.favorites` 是页内 quickAccess 那一块、Mac 是 `LibraryView(rootSection: .favorites)`；
+电台两端是两个视图（`RadioStationsView` / `MacRadioStationsView`）；iPhone 在 minimal 模式下给
+`HomeFolderManagementView` / `ListeningStatsView` 传 `usesInlineControls:`，Mac 那条没传。
+candidate 修法是把 `.section(x)` 统一映射成 `.library` + `libraryDeepLink = .section(x)`，
+让"资料库"在 Mac 上永远只有一个入口 —— 本轮没动它，因为改的是路由语义，要连着
+`route(for:)` 的持久化还原与「再点一次回根页」一起重验。
 
 
