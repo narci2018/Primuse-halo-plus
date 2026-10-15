@@ -78,6 +78,12 @@ const WIN_SYNC = read('primuse-win/src/main/sync.js');
 const CF_SYNC_API = read('cf-sync-server/functions/api/sync-playlists.js');
 const SWIFT_SYNC = read('primuse/Primuse/Services/Playlist/PlaylistSyncService.swift');
 const SWIFT_SYNC_VIEW = read('primuse/Primuse/Views/Settings/PlaylistSyncSettingsView.swift');
+const WIN_STRIP_HTML = read('primuse-win/src/renderer/taskbar-lyric.html');
+const WIN_STRIP_CSS = read('primuse-win/src/renderer/taskbar-lyric.css');
+const WIN_STRIP_VIEW = read('primuse-win/src/renderer/taskbar-lyric-view.js');
+const SWIFT_MAC_LYRIC = read('primuse/Primuse/Views/Mac/MacMiniaturizedLyrics.swift');
+const SWIFT_MAC_SOURCES = read('primuse/Primuse/Views/Mac/MacSourcesView.swift');
+const SWIFT_MAC_MENUBAR = read('primuse/Primuse/App/MacMenuBarController.swift');
 
 // MARK: - 断言器（与 cloud-sources-contract-test.js 同一形状）
 
@@ -798,6 +804,184 @@ const winDlyPattern = (WIN_SYNC.match(/\/(\^dly_\(\.\+\?\)_\(\.\+\)\$)\//) || []
 record('dly_ 的正则两端字面一致（源 id 非贪婪、rawID 贪婪）',
   winDlyPattern !== '' && SWIFT_SYNC.includes(winDlyPattern),
   `win=${JSON.stringify(winDlyPattern)} swift 含同一段=${winDlyPattern !== '' && SWIFT_SYNC.includes(winDlyPattern)}`);
+
+// MARK: - 17. macOS 最小化歌词条 = Windows 任务栏歌词条；Mac 来源页/搜索页不许把在线那半藏起来
+
+group('17. 最小化后的单行歌词：macOS 那份的五项条件、窗口属性、尺寸、金色、身份算法逐条照 Windows；来源页与搜索页不许装死');
+
+const macStripFn = braceBlock(SWIFT_MAC_LYRIC, SWIFT_MAC_LYRIC.indexOf('private func shouldShow()'));
+// Swift/SF 源码里同一句话常被换行拆写（`macFilterChip(\n .online,`），比形状时先把空白压平。
+const oneLine = (t) => t.replace(/\s+/g, ' ');
+const winStripFn = braceBlock(WIN_STRIP, WIN_STRIP.indexOf('function shouldShow()'));
+const macViewBlock = braceBlock(SWIFT_MAC_LYRIC, SWIFT_MAC_LYRIC.indexOf('struct MacMiniaturizedLyricsView'));
+const conjCount = (t) => (t.match(/&&/g) || []).length + 1;
+// 五项条件一一对应。Windows 多出的那一项是 `lastPayload &&`（JS 里 lastPayload 可能是 null），
+// Swift 那边 payload 是个有默认值的 struct，不需要这一项 —— 项数差必须正好是 1，
+// 谁往一边加了条件、另一边没跟上，这条就红。
+const STRIP_CONDS = [
+  ['开关开着', 'deps.isEnabled()', 'isEnabled'],
+  ['主窗口真的看不见', 'deps.mainWindowHidden()', 'mainWindowIsOutOfSight()'],
+  ['这一首没被 ✕ 掉', '!dismissed', '!isDismissedForCurrentTrack'],
+  ['真的在播', 'lastPayload.playing', 'payload.playing'],
+  ['当前这句有字', "String(lastPayload.text || '').trim()", 'hasCurrentLine'],
+];
+const missingConds = STRIP_CONDS.filter(([, winTok, macTok]) =>
+  !winStripFn.includes(winTok) || !macStripFn.includes(macTok));
+record('出场条件五项逐条对应（少一项 = 一端冒在用户桌面上、另一端不冒）',
+  missingConds.length === 0
+    && conjCount(macStripFn) === 5
+    && conjCount(winStripFn) === 6
+    && conjCount(winStripFn) - conjCount(macStripFn) === 1,
+  `缺=${missingConds.map((c) => c[0]).join('/') || '无'} win=${conjCount(winStripFn)} 项 mac=${conjCount(macStripFn)} 项`);
+
+// 那条窗口的物理属性成对抄。任一边改一个属性（可否拖、是否抢焦点、跟不跟 Space），
+// 另一边就得同时改 —— 不然"最小化后那条"在两台上是两种东西。
+record('那条窗口的属性成对：不抢焦点 / 不进窗口列表 / 浮层级别 / 每个空间都在 / 不给全屏加成 / 不可拖动',
+  /focusable: false/.test(WIN_STRIP) && /skipTaskbar: true/.test(WIN_STRIP)
+    && /setAlwaysOnTop\(true, 'floating'\)/.test(WIN_STRIP)
+    && /visibleOnFullScreen: false/.test(WIN_STRIP) && /movable: false/.test(WIN_STRIP)
+    && SWIFT_MAC_LYRIC.includes('.nonactivatingPanel')
+    && SWIFT_MAC_LYRIC.includes('panel.level = .floating')
+    && SWIFT_MAC_LYRIC.includes('.canJoinAllSpaces')
+    && SWIFT_MAC_LYRIC.includes('panel.isMovable = false')
+    // 注释里写着"不给 .fullScreenAuxiliary"不算给了 —— 负向断言一律先看掉整行注释（第 16 组栽过一次）。
+    && !stripLineComments(SWIFT_MAC_LYRIC).includes('.fullScreenAuxiliary'),
+  'win: focusable/skipTaskbar/floating/visibleOnFullScreen/movable ↔ mac: nonactivatingPanel/.floating/canJoinAllSpaces/isMovable');
+
+const macNum = (name) => num(SWIFT_MAC_LYRIC, new RegExp(`static let ${name}: CGFloat = (\\d+)`));
+const winNum = (name) => num(WIN_STRIP, new RegExp(`const ${name} = (\\d+)`));
+const sizePairs = [['560', winNum('STRIP_WIDTH'), macNum('stripWidth')],
+                   ['44', winNum('STRIP_HEIGHT'), macNum('stripHeight')],
+                   ['6', winNum('BOTTOM_GAP'), macNum('bottomGap')]];
+record('那条的尺寸与缝隙逐一对齐（560×44、离 Dock/任务栏 6px），且都贴工作区/可视区下沿、不盖住 Dock',
+  sizePairs.every(([, w, m]) => w > 0 && w === m)
+    && /area\.y \+ area\.height - STRIP_HEIGHT - BOTTOM_GAP/.test(WIN_STRIP)
+    && /workArea/.test(WIN_STRIP)
+    && SWIFT_MAC_LYRIC.includes('visibleFrame')
+    && SWIFT_MAC_LYRIC.includes('(area.minY + Self.bottomGap)'),
+  sizePairs.map(([label, w, m]) => `${label}:win=${w}/mac=${m}`).join(' '));
+
+// 当前句那支金：从 Windows 的 CSS 里取出来比，而不是把常量抄第二遍进这个脚本 ——
+// CSS 改了色号而 Swift 没改，这条同样该红。
+const winStripGold = (WIN_STRIP_CSS.match(/\.line\s*\{[^}]*color:\s*#([0-9a-fA-F]{6})/s) || [])[1] || '';
+record('当前句金色与 Windows 那条同一支（且浅色档也有，不许拿白色糊过去）',
+  winStripGold.toUpperCase() === 'E6C068' && SWIFT_MAC_LYRIC.includes(`Color(hex: "${winStripGold.toUpperCase()}")`),
+  `win css=#${winStripGold} mac 含同一支=${SWIFT_MAC_LYRIC.includes('E6C068')}`);
+
+// Swift 的字符串插值写进正则会撞上反斜杠，这里拆成 token 再拼回去比形状。
+const macSongKey = (SWIFT_MAC_LYRIC.match(/var songKey: String \{ "\\\((\w+)\)\|\\\((\w+)\)" \}/) || []);
+record('歌曲身份两侧同形：标题 + 一个竖线 + 歌手（✕ 的作用域就靠它，多一个字段就飘）',
+  macSongKey[1] === 'title' && macSongKey[2] === 'artist'
+    && WIN_STRIP.includes('`${next.title}|${next.artist}`'),
+  `mac=${(macSongKey[1] || '?')}|${(macSongKey[2] || '?')} win=title|artist`);
+
+const macDismissBlock = braceBlock(SWIFT_MAC_LYRIC, SWIFT_MAC_LYRIC.indexOf('func dismissCurrentTrack()'));
+const winDismissBlock = (WIN_STRIP.match(/ipcMain\.on\('taskbar-lyric:dismiss'[\s\S]{0,160}/) || [''])[0];
+record('✕ 只收这一首：不落盘、不唤回主窗口（写成持久化 = 点一次这轮 app 再也不出现，那种 bug 只在真机上看得见）',
+  macDismissBlock.includes('dismissedSongKey = payload.songKey')
+    && !/UserDefaults|AppStorage|setBool/.test(macDismissBlock)
+    && !macDismissBlock.includes('restoreMainWindow')
+    && !macDismissBlock.includes('makeKeyAndOrderFront')
+    && winDismissBlock.includes('dismissed = true')
+    && !/store\.(set|save|write)/.test(winDismissBlock),
+  `mac dismiss 体=${macDismissBlock.replace(/\s+/g, ' ').slice(0, 90)}`);
+
+const macUserDefaultsAt = SWIFT_MAC_LYRIC.indexOf('UserDefaults.didChangeNotification');
+record('开关从关到开 = 用户改主意，上一首的 ✕ 一并作废（两侧都有这条 reset 语义）',
+  /'taskbar-lyric:reset'[\s\S]{0,80}dismissed = false/.test(WIN_STRIP)
+    && macUserDefaultsAt >= 0
+    && SWIFT_MAC_LYRIC.slice(macUserDefaultsAt).includes('dismissedSongKey = nil'),
+  `mac 在 didChange 观察里清 ✕=${macUserDefaultsAt >= 0}`);
+
+const macRestoreBlock = braceBlock(SWIFT_MAC_LYRIC, SWIFT_MAC_LYRIC.indexOf('func restoreMainWindow()'));
+record('点整条 = 唤回主窗口；主窗口已被关掉时走 openWindow(id:) 重建（Windows 那边是 deps.onRestore()）',
+  /ipcMain\.on\('taskbar-lyric:restore'/.test(WIN_STRIP)
+    && macRestoreBlock.includes('deminiaturize')
+    && macRestoreBlock.includes('makeKeyAndOrderFront')
+    && macRestoreBlock.includes('MainWindowOpener.openMainWindow()')
+    && macViewBlock.includes('.onTapGesture { onRestore() }'), '');
+
+const appStripInitAt = SWIFT_APP.indexOf('MacMiniaturizedLyricsController()');
+record('默认开着、设置页有开关、并且真的在 AppDelegate 里建起来了（三样少一样，这功能等于没做）',
+  /taskbarLyric: true/.test(WIN_STORE)
+    && SWIFT_MAC_LYRIC.includes('static let key = "macMiniaturizedLyricsEnabled"')
+    && SWIFT_MAC_LYRIC.includes('register(defaults: [Self.settingsKey: true])')
+    && SWIFT_MAC_SETTINGS.includes('MacMiniaturizedLyricsSettings.key')
+    && SWIFT_MAC_SETTINGS.includes('miniaturizedLyricsEnabled')
+    && appStripInitAt >= 0,
+  `app 里实例化=${appStripInitAt >= 0}，设置页绑 key=${SWIFT_MAC_SETTINGS.includes('MacMiniaturizedLyricsSettings.key')}`);
+
+// "找主窗口"在这个 app 里有三份抄本（AppDelegate / 菜单栏 / 这一条歌词条）。名单漂一格的后果是
+// 歌词条把桌面歌词面板当主窗口、或者把副窗口当主窗口，最小化判断立刻失真。
+const quotedNames = (t) => (t.match(/"([^"]+)"/g) || []).map((s) => s.slice(1, -1));
+const menubarListAt = SWIFT_MAC_MENUBAR.indexOf('nonMainAutosaveNames: Set<String> = [');
+const menuBarNames = quotedNames(SWIFT_MAC_MENUBAR.slice(menubarListAt, SWIFT_MAC_MENUBAR.indexOf(']', menubarListAt)));
+const appDelegateNames = Array.from(
+  SWIFT_APP.matchAll(/window\.frameAutosaveName != "([^"]+)"/g)
+).map((m) => m[1]);
+const stripListAt = SWIFT_MAC_LYRIC.indexOf('nonMainAutosaveNames: Set<String> = [');
+const stripNames = quotedNames(SWIFT_MAC_LYRIC.slice(stripListAt, SWIFT_MAC_LYRIC.indexOf(']', stripListAt)));
+const sharedMainNames = [...new Set([...menuBarNames, ...appDelegateNames])];
+const lostNames = sharedMainNames.filter((n) => !stripNames.includes(n));
+const extraNames = stripNames.filter((n) => !sharedMainNames.includes(n));
+record('找主窗口的排除名单三份同源（这一条只允许多把自己的面板加进去）',
+  menuBarNames.length >= 4 && appDelegateNames.length >= 4 && lostNames.length === 0
+    && extraNames.length === 1 && extraNames[0] === 'PrimuseLyricStrip',
+  `丢了=${lostNames.join('/') || '无'} 多了=${extraNames.join('/') || '无'}`);
+
+record('这条是独立的一条，不是把桌面歌词那块多行面板拿来复用（两者用途不同：常驻面板 vs 最小化才露）',
+  macViewBlock.length > 200
+    && SWIFT_MAC_LYRIC.includes('rootView: MacMiniaturizedLyricsView')
+    && !SWIFT_MAC_LYRIC.includes('DesktopLyricsView'),
+  `视图体量=${macViewBlock.length} 字符`);
+
+record('判显隐只有一处：渲染侧只交数据（Windows 不许建窗口、macOS 视图不许 orderFront/orderOut）',
+  !/new BrowserWindow/.test(WIN_STRIP_VIEW) && !/shouldShow/.test(WIN_STRIP_VIEW)
+    && !/orderFront|orderOut/.test(macViewBlock)
+    && macViewBlock.includes('onPush(') && WIN_APP.includes('api.taskbarLyric.push('), '');
+
+// —— 用户 2026-10-15 那两句投诉的看守：屏幕上的"0 个音乐源""搜不到"都是 Mac 独有的显示缺口。
+
+const macSourcesContent = braceBlock(SWIFT_MAC_SOURCES, SWIFT_MAC_SOURCES.indexOf('private var content: some View'));
+const macSummaryBlock = braceBlock(SWIFT_MAC_SOURCES, SWIFT_MAC_SOURCES.indexOf('private var summaryText: String'));
+const sourcesEmptyGate = braceBlock(SWIFT_MAC_SOURCES, SWIFT_MAC_SOURCES.indexOf('private var sources: [MusicSource]'));
+const macOnlineCard = braceBlock(SWIFT_MAC_SOURCES, SWIFT_MAC_SOURCES.indexOf('private var onlineLinesCard: some View'));
+const macEmptyHint = braceBlock(SWIFT_MAC_SOURCES, SWIFT_MAC_SOURCES.indexOf('private var emptyOnlineLinesHint: String'));
+// content 里那一行只许写卡片名，前面不能挂 `if` —— 挂了就是把在线那半又藏回去了。
+const onlineRowInContent = (macSourcesContent.split('\n').find((line) => line.includes('onlineLinesCard')) || '').trim();
+record('Mac 来源页两组恒在（照 Windows 的 renderSources，它两组都渲染、不看对方的脸）：在线卡无条件出现、整页 ContentUnavailableView 已删、本地空态只数本地；两种"在线为空"分开给话术；页脚仍报在线那半句',
+  onlineRowInContent === 'onlineLinesCard'
+    && !macSourcesContent.includes('ContentUnavailableView')
+    && !macSourcesContent.includes('hasOnlineLines')
+    && macSourcesContent.includes('if sources.isEmpty')
+    && macSourcesContent.includes('localSourcesEmptyCard')
+    && oneLine(macOnlineCard).includes('Text(emptyOnlineLinesHint)')
+    && macEmptyHint.includes('if hasOnlineLines')
+    && macEmptyHint.includes('还没有任何在线线路')
+    && macSummaryBlock.includes('loadedOnlineLines.count')
+    && macSummaryBlock.includes('aggregatedStore.sources.count')
+    && SWIFT_MAC_SOURCES.includes('aggregatedStore.sources.filter { $0.isInPlaybackPath }')
+    && SWIFT_MAC_SOURCES.includes('AggregatedSourcesSettingsView()')
+    // 被滤掉的那三类（appleMusic / aggregated / 系统源）是"这一页不讲它们"的名单，
+    // 不是"它们不存在" —— 名单本身要和 Windows 那侧一致，不能顺手把在线加回空态判断。
+    && sourcesEmptyGate.includes('.aggregated')
+    && sourcesEmptyGate.includes('AggregatedMusicService.systemSourceID'),
+  `content 里的在线行="${onlineRowInContent}"，hint 两种=${macEmptyHint.replace(/\s+/g, ' ').slice(0, 60)}…`);
+
+const macAllResults = braceBlock(SWIFT_SEARCH, SWIFT_SEARCH.indexOf('private var macAllSearchResultsView'));
+const macAggSection = braceBlock(SWIFT_SEARCH, SWIFT_SEARCH.indexOf('private var macAggregatedMusicSection'));
+const hasAnyBlock = braceBlock(SWIFT_SEARCH, SWIFT_SEARCH.indexOf('private var hasAnySearchResults'));
+record('Mac 搜索页不许藏在线的错误态：有错误就算"有内容"，并且那句错误必须上屏（iOS 那侧原本就在说，Mac 一条都不露）',
+  hasAnyBlock.includes('aggregatedMusic.lastSearchError != nil')
+    && macAllResults.includes('aggregatedMusic.lastSearchError != nil')
+    && macAggSection.includes('if let error = aggregatedMusic.lastSearchError')
+    // iOS 那两处一个字符都没动过：整行条件 + 兜底那句。
+    && SWIFT_SEARCH.includes('if !aggregatedMusic.searchResults.isEmpty || aggregatedMusic.isSearching || (aggregatedMusic.lastSearchError != nil && searchResults.isEmpty)')
+    && SWIFT_SEARCH.includes('else if let error = aggregatedMusic.lastSearchError, aggregatedMusic.searchResults.isEmpty')
+    // 「在线」那一格与它的落点：Swift 爱把参数换行写，所以按归一化空白后的文本比形状。
+    && oneLine(SWIFT_SEARCH).includes('case .online: macAggregatedMusicSection')
+    && oneLine(SWIFT_SEARCH).includes('macFilterChip( .online, title: "在线 ·'),
+  `hasAny=${hasAnyBlock.replace(/\s+/g, ' ').slice(0, 120)}`);
 
 // MARK: - 汇总
 

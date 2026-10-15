@@ -24,6 +24,12 @@ struct MacSourcesView: View {
     @State private var directorySelectionSession: SourceDirectorySelectionSession?
     @State private var sourceToDelete: MusicSource?
     @State private var cloudDirectoryNameRefreshID = UUID()
+    /// 在线线路（云端清单下发的聚合源）。这里取 `.shared` 而不是 `@Environment` ——
+    /// 这一页有好几个入口，漏一处注入就是一次运行时崩溃
+    ///（`AggregatedSourcesSettingsView` 头部写的就是同一条理由）。
+    @State private var aggregatedStore = AggregatedSourceStore.shared
+    @State private var cloudSources = CloudMusicSources.shared
+    @State private var showingAggregatedSettings = false
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -136,6 +142,15 @@ struct MacSourcesView: View {
         } message: { _ in
             Text("source_remove_confirm_message")
         }
+        // 「管理在线线路」打开的就是设置页里那份同一视图（云端清单 URL + 线路开关）。
+        // 用 sheet 而不是路由：`MacRoute` 不是这个详情栈的 destination（容器按 tab 切
+        // `route` 重建正文），从这一页 push 不进主栈。
+        .sheet(isPresented: $showingAggregatedSettings) {
+            NavigationStack {
+                AggregatedSourcesSettingsView()
+            }
+            .frame(minWidth: 720, idealWidth: 820, minHeight: 560, idealHeight: 680)
+        }
     }
 
     // MARK: - Action bar
@@ -192,22 +207,24 @@ struct MacSourcesView: View {
 
     // MARK: - Content
 
+    /// 两组**恒在**，和 Windows 那份音乐源页一样（`app.js` 的 `renderSources`：本地服务器组
+    /// + 「聚合音乐源」组）。以前这一页只渲染本地文件源，空库的人看到的就是一整屏
+    /// 「没有音乐源」，而在线线路其实有几十条、歌也在出声。
+    /// 一整屏 `ContentUnavailableView` 的写法一并去掉：它把"这一屏只讲本地文件源"这个前提，
+    /// 说成了"这台机器什么都没有" —— 正好是要治的那个病。
     @ViewBuilder
     private var content: some View {
-        if sources.isEmpty {
-            ContentUnavailableView(
-                "no_sources",
-                systemImage: "externaldrive.badge.plus",
-                description: Text("no_sources_desc").font(.callout)
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: PMSpace.m14) {
-                    if !attentionSources.isEmpty {
-                        attentionBanner
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: PMSpace.m14) {
+                onlineLinesCard
 
+                if !attentionSources.isEmpty {
+                    attentionBanner
+                }
+
+                if sources.isEmpty {
+                    localSourcesEmptyCard
+                } else {
                     MacSourceWaterfallLayout(
                         minimumColumnWidth: 440,
                         spacing: PMSpace.m14
@@ -219,12 +236,165 @@ struct MacSourcesView: View {
                         }
                     }
                 }
-                .padding(.horizontal, PMSpace.xxxl)
-                .padding(.vertical, PMSpace.l)
-                .padding(.bottom, 80)
             }
-            .background(PMColor.bg.ignoresSafeArea())
+            .padding(.horizontal, PMSpace.xxxl)
+            .padding(.vertical, PMSpace.l)
+            .padding(.bottom, 80)
         }
+        .background(PMColor.bg.ignoresSafeArea())
+    }
+
+    // MARK: - 在线线路（聚合音乐源，云端清单下发）
+
+    private var hasOnlineLines: Bool { !aggregatedStore.sources.isEmpty }
+
+    /// 空在线线路的两种病因分开说：清单里有线路但全被压在播放路径之外（去管理页看逐条
+    /// 为什么没加载），和这台机器根本没落进线路（清单一次都没刷成功）。两者的下一步动作不同，
+    /// 合成一句话就等于谁都没告诉。
+    private var emptyOnlineLinesHint: String {
+        if hasOnlineLines {
+            return "一条在线线路都没启用，所以在线搜索不会出声。打开「管理在线线路」看每条为什么没加载。"
+        }
+        return "这台 Mac 上还没有任何在线线路：云端清单一次都没刷下来。打开「管理在线线路」刷新清单，仍为空就是后台里没启用线路。"
+    }
+
+    /// 真的在播放路径里的那几条：搜索、取流、歌词都只走它们（判据 `loaded`，与 Windows
+    /// `isLoadable()` 同源，见 `criteria-parity-check.js` 第 11 组）。
+    private var loadedOnlineLines: [AggregatedSourceItem] {
+        aggregatedStore.sources.filter { $0.isInPlaybackPath }
+    }
+
+    private var onlineLinesSummary: String {
+        let total = aggregatedStore.sources.count
+        let loaded = loadedOnlineLines.count
+        var line = "\(loaded)/\(total) 条在线线路在播放路径里"
+        if let fetchedAt = cloudSources.fetchedAt {
+            let when = Self.relativeFormatter.localizedString(for: fetchedAt, relativeTo: Date())
+            line += " · 清单\(when)刷新"
+        } else {
+            line += " · 清单还没拉到过"
+        }
+        return line
+    }
+
+    private var onlineLinesCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(theme.uiAccentColor, in: .rect(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("在线音乐源")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text(onlineLinesSummary)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    showingAggregatedSettings = true
+                } label: {
+                    Text("管理在线线路")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background(PMColor.matBtn, in: .rect(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if loadedOnlineLines.isEmpty {
+                // 这一条就是"无法在线搜索"真正的答案：不是界面坏了，是一条线路都不在
+                // 播放路径里。把它说出来，而不是让用户去猜。
+                // 两种空法要分开讲：清单里有线路但全没加载（去「管理在线线路」看为什么），
+                // 和这台 Mac 手上根本没有线路（清单从没刷新成功，得先刷清单）。
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(PMColor.bad)
+                    Text(emptyOnlineLinesHint)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+            } else {
+                // 按平台分组报数，让人一眼看出"哪些平台能搜"。用 HStack 而不是自造
+                // flow 布局：平台最多七个，一行放得下，少一处只在部分 SDK 版本上才有的 API。
+                onlinePlatformChips
+            }
+
+            if !cloudSources.lastError.isEmpty {
+                Text(cloudSources.lastError)
+                    .font(.system(size: 11))
+                    .foregroundStyle(PMColor.bad)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .pmCard(cornerRadius: PMRadius.l)
+    }
+
+    /// 在播放路径里的线路按平台分组（`QQ 音乐 ×12` 这样的小胶囊）。
+    private var onlinePlatformChips: some View {
+        let grouped = Dictionary(grouping: loadedOnlineLines, by: { $0.platform })
+            .sorted { lhs, rhs in
+                if lhs.value.count != rhs.value.count { return lhs.value.count > rhs.value.count }
+                return lhs.key.rawValue < rhs.key.rawValue
+            }
+        return HStack(spacing: 8) {
+            ForEach(grouped, id: \.key) { entry in
+                Text("\(entry.key.displayName) ×\(entry.value.count)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(PMColor.textMuted)
+                    .padding(.horizontal, 9)
+                    .frame(height: 22)
+                    .background(PMColor.matBtn, in: .capsule)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// 本地文件源为空、但在线线路在的时候的那张卡：说清"这一屏只讲本地库"，
+    /// 而不是把整页变成"没有音乐源"。
+    private var localSourcesEmptyCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "externaldrive.badge.plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(PMColor.textMuted)
+                    .frame(width: 30, height: 30)
+                    .background(PMColor.matBtn, in: .rect(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("no_sources")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(PMColor.text)
+                    Text("no_sources_desc")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    showAddSource = true
+                } label: {
+                    Text("add_source")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background(theme.uiAccentColor, in: .rect(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .pmCard(cornerRadius: PMRadius.l)
     }
 
     // MARK: - Attention banner (SRC-24)
@@ -771,6 +941,12 @@ struct MacSourcesView: View {
         if scanning > 0 { parts.append("\(scanning) \(String(localized: "scanning"))") }
         if attention > 0 { parts.append("\(attention) \(String(localized: "source_state_attention"))") }
         if disabled > 0 { parts.append("\(disabled) \(String(localized: "disabled"))") }
+        // 「共 0 个音乐源」以前是这页的全部真相：它只数本地文件源，在线线路一条都不算，
+        // 于是空库的人以为同步白做了。现在把在线那半句报出来（与 Windows 设置页那两行
+        // `已加载 X/Y 条线路` 同一口径）。
+        if !aggregatedStore.sources.isEmpty {
+            parts.append("\(loadedOnlineLines.count)/\(aggregatedStore.sources.count) 条在线线路")
+        }
         return parts.joined(separator: " · ")
     }
 

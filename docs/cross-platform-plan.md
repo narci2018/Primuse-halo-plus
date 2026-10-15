@@ -2313,3 +2313,197 @@ Mac 上标题走 `hubRowTitle` = `playlist_liked_name`（我喜欢），副标�
   把 `#af52de` 的绿通道 82 改成 83 → 只有"配色逐行同源"那条红。改完即还原，本地 `109 项通过，0 项失败`。
 - 界面效果由他验。需要他回传两样东西：资料库页截图（看六行对不对）、
   设置页「云端设备」列表截图（看设备名 / 计数 / 时间有没有解码出来）。
+
+## 31. Mac 的「共 0 个音乐源」是屏幕在撒谎；搜索不出声没人报；最小化后补上 Windows 那条歌词条（2026-10-15，v1.9.23 / build 85）
+
+用户这一轮的原话是三句，一句比一句具体：
+
+> **macos版没有有效音乐源，无法在线搜索歌曲！请检查iPhone版是否有相同的bug！还有app最小化，
+> 歌词显示模式跟win版一样策略。**
+
+随话带来的截图里，同屏有两件互相打脸的事：上面写着「共 0 个音乐源」「没有音乐源 / 添加 NAS、WebDAV
+或本地文件夹开始扫描音乐」，下面那条迷你播放器正在出声 ——「趁早（女声摇滚版）/ 叶芷涵 · 在线音源」。
+**歌在用在线线路播，屏幕说一个源都没有。** 所以这一轮从头就不是"Mac 没源"，是"Mac 不肯说有源"，
+两处显示缺口 + 一个从没做过的功能（最小化歌词条），三件事分别记在 31.2 / 31.3 / 31.5。
+
+### 31.1 判据先立住：数据侧是满的，缺的只有渲染
+
+`AggregatedSourceStore.shared.sources` 由 CF 清单落地（§21/§22 那一套），播放路径的判据
+`isInPlaybackPath` 又与 Windows 的 `isLoadable()` 同源（§25 第 11 组已在钉）。这三样本轮一个都没动，
+也不需要动 —— 证据就是那张截图里正在出声的歌。所以本轮所有改动都只在"把它已经知道的事说出来"。
+
+### 31.2 病因一：来源页把「这一页不讲它们」写成了「它们不存在」
+
+`MacSourcesView` 里那份 `sources` 是一份**过滤后的本地文件源名单**：`appleMusic` 那种平台账号型条目、
+聚合在线线路（`sourceType == .aggregated`）、以及 `AggregatedMusicService.systemSourceID` 那几条系统源，
+全被滤掉 —— 因为它们各有各的地盘，这一页只画 NAS / WebDAV / 本地文件夹。这个过滤本身是对的。
+
+错的是这份名单被拿去当**两个别的东西**用：整页空态（`if sources.isEmpty { ContentUnavailableView("没有音乐源"…) }`）
+和页脚那句「共 N 个音乐源」。于是本地没挂文件夹的人 —— 也就是他这种全靠云端清单的人 ——
+看到的是一整屏"这台机器什么都没有"，而在线线路有几十条、歌正在播。
+
+第一版我只做了一件最小的事：给那个布尔补上"在线也空"（`sources.isEmpty && !hasOnlineLines`）。
+**这个改法当场被我推翻**，原因是它留了个同样刺眼的错：如果这台 Mac 上一条在线线路都没落进来
+（清单从没刷成功过），页面又会退回一整屏「没有音乐源」。真正与 Windows 同构的做法是
+§30 那条口径的直接延续 —— Windows 的 `app.js` 里 `renderSources` **两组恒在**，
+本地服务器组和「聚合音乐源」组各画各的，谁都不看对方的脸。于是 `content` 改成：
+
+- `onlineLinesCard` 无条件排在最前（在线那半永远在场）；
+- 本地那半才谈空：`sources.isEmpty` → `localSourcesEmptyCard`（一张"这台机器没挂本地文件夹"的卡，
+  不再冒充整页结论），否则走瀑布流；
+- 整页 `ContentUnavailableView` 删掉。那句"没有音乐源"把"这一页不讲它们"这个前提说成了
+  "什么都没有"，正是要治的病本身。
+
+顺带把「在线为空」的两种病因分开给话术（`emptyOnlineLinesHint`），因为下一步动作根本不同：
+清单里有线路但全被压在播放路径之外 → 去「管理在线线路」看逐条为什么没加载；
+这台机器一条都没落进来 → 先刷清单，仍为空就是 CF 后台没启用。合成一句话等于谁都没告诉。
+页脚那句也补上在线那半（`\(loadedOnlineLines.count)/\(aggregatedStore.sources.count) 条在线线路`）。
+
+### 31.3 病因二：搜索页把「在线出错了」当成「什么都没有」
+
+「无法在线搜索歌曲」这句话本身没坏 —— 聚合判据确实可能在某些时刻全灭（§24/§25 那三轮误杀就是它）。
+坏的是**它灭了自己不说**。三处：
+
+1. `hasAnySearchResults` 里没算 `aggregatedMusic.lastSearchError`。搜索结果、专辑、艺人、语义、
+   Apple Music、在线全空时，这个布尔返回 false，macOS 那一支就落到 `ContentUnavailableView.search`
+   —— 屏幕上是一句"没有搜索结果"，而服务侧刚报过"未启用任何聚合音乐源，请在设置中配置并启用音源"。
+2. `macAggregatedMusicSection` 只有"进行中 / 有结果 / 什么都没有"三个分支，**没有错误分支**，
+   那句有用的话没有落点。
+3. 「在线」那颗筛选格在没结果时整格消失，于是用户连"在线这一路存在"都看不见，
+   更看不见它为什么不出声。
+
+改法就是把错误当成内容的一部分：`hasAnySearchResults` 加 `|| aggregatedMusic.lastSearchError != nil`；
+`.all` 那一支的在线段落条件加上 `|| lastSearchError != nil`；`macAggregatedMusicSection` 补一条
+`else if let error = …, searchResults.isEmpty` 的红色卡（原文 + 一句"在「资料库 → 来源」里点
+「管理在线线路」，启用能出声的线路后再搜"）；那颗 chip 改成恒在并把计数写在 label 上
+（`在线 · N`）。`macSelectedFilterHasContent` 里 `.online` 原本要求"有结果才算有内容"，
+现在错误态也算，选中它才不会被自己的空判定挤掉。
+
+### 31.4 他明确问的那一句：iPhone 版有没有同一个 bug —— 没有，两处都查过
+
+这是源码级核对，不是装机实测（这台机器看不见 iPhone 屏幕），但两处都不是模糊印象：
+
+- **「共 0 个音乐源」不会出现在 iPhone 上。** iOS 的 `SourcesView` 走的是另一份名单：聚合条目
+  在 `SourcesView.swift:512` 一带是**留在列表里**渲染的，没有 Mac 那份 `.aggregated` 过滤，
+  所以它拿不到"过滤后为空"这个假阴性。
+- **在线搜索的错误 iPhone 本来就报。** `SearchView.swift:1743` 那一整行条件里原本就带着
+  `aggregatedMusic.lastSearchError != nil && searchResults.isEmpty`，`:1783` 有兜底那句错误文案。
+  本轮 iOS 那两条一个字符都没动。
+
+为了不让它将来悄悄漂掉，看守第 17 组里那两条断言把"iOS 原样"钉成了字面量比对
+（整行条件与 `else if let error …, aggregatedMusic.searchResults.isEmpty` 各自逐字相同）。
+所以给他的答复是：**iPhone 不用改，Mac 才是那半边没说话的一端。**
+
+### 31.5 最小化后的单行歌词条：照 Windows 那一套逐条抄，不是"差不多"
+
+需求 8 当年只做完了 Windows 侧（§26，任务 #46）。这一轮补 macOS 的对应物 ——
+新文件 `Primuse/Views/Mac/MacMiniaturizedLyrics.swift`（425 行，整份包在 `#if os(macOS)` 里），
+控制器在 `PrimuseAppDelegate.applicationDidFinishLaunching` 的 `Task { @MainActor in … }` 里建起来，
+位置就紧挨着 `DesktopLyricsWindowController`。
+
+五个条件（`shouldShow()`，`&&` 恰好五个，Windows 那侧六个，多出来的是 `!isDestroyed()` 那句
+—— macOS 没有"窗口被销毁"这个中间态，看守按这个口径写死 5 / 6，不是随手比的）：
+
+| # | macOS | Windows `taskbar-lyric.js` |
+|---|---|---|
+| 1 | `isEnabled`（`macMiniaturizedLyricsEnabled`，默认开） | `store.settings().taskbarLyric !== false` |
+| 2 | `mainWindowIsOutOfSight()`（最小化 / 不可见 / 找不到主窗口） | `isMinimized() \|\| !isVisible()` |
+| 3 | `!isDismissedForCurrentTrack` | `!dismissed` |
+| 4 | `payload.playing`（暂停即收走） | `payload.playing` |
+| 5 | `hasCurrentLine`（去空白非空） | `text.trim()` 非空 |
+
+那条窗口的物理属性也是逐条配的，不是"看着像"：`560×44`、离 Dock 6pt（Windows 是任务栏上方 6px，
+且 `y` 从 `workArea` 算，macOS 用 `visibleFrame.minY` —— 那个值天生就是 Dock 上沿）；
+`skipTaskbar` ↔ `NSPanel` 天生不进窗口菜单；`focusable:false` ↔ `[.borderless, .nonactivatingPanel]`
+（一条歌词不许抢走用户正在打的字，但收得到点击）；`showInactive()` ↔ `orderFrontRegardless()`；
+`alwaysOnTop 'floating'` ↔ `level = .floating`，并且**不给** `.fullScreenAuxiliary`
+（等于 Electron 那句 `visibleOnFullScreen:false`）；`movable:false` ↔ `isMovable = false`；
+每个 Space 都在 ↔ `.canJoinAllSpaces, .stationary, .ignoresCycle`。配色同一支金：
+`#e6c068`（从 Windows 的 `taskbar-lyric.css` 里读出来再比，不写第二份常量）、
+胶囊底 `rgba(18,19,23,0.86)`、描边 white 0.14。
+
+行为上的三件小事也是照抄：
+
+- **✕ 是"这一首"级别、不落盘。** `dismissedSongKey = payload.songKey`，
+  而 `songKey` 就地算成 `"\(title)|\(artist)"`（与 Windows 那个模板串逐字符同形，
+  看守用正则把两侧各自那个串抠出来比形状）。换歌自然失效，不需要"检测 key 变了没"那段状态机。
+- **开关从关到开 = 用户改主意**，上一首的 ✕ 一并作废（Windows 那边是 `taskbar-lyric:reset`，
+  这里是 `UserDefaults.didChange` 里判断"enabled 真的变了"才动 —— 这条通知是全局的，
+  音量/主题写入都会来，不能每次刷）。
+- **点整条 = 唤回主窗口**（`deminiaturize` + `makeKeyAndOrderFront`），
+  主窗口已经被关掉时走 `MainWindowOpener.openMainWindow()` 让 `WindowGroup` 重建一份。
+
+为什么不复用现成的桌面歌词面板：`DesktopLyricsWindowController` 是多行、带十个按钮、可拖、常驻、
+由用户手动开关的那块；这一条的语义是"我把 app 收起来了，别占地方，只在本有一句的时候露一条"。
+两者并存，看守里专门有一条断言"这条不是那块"（比对两份视图体量与各自的 symbol 名单）。
+渲染侧一个字不判断显隐 —— 它只 `onPush(text, title, artist, playing, hasLyrics)`，
+Windows 那侧同理（不许建窗口、不许调 `shouldShow`），判显隐只有一处，这条也钉了。
+
+设置页那一行落在 `MacSTLyricsView` 的 `lyrics_display_section`，在 `player_tap_lyrics_to_seek`
+之前：`MacSTRow("最小化时显示单行歌词", hint: "只在 app 收起来、正在播、且当前这一句有字时露出；点 ✕ 这一首不再显示")`，
+`settingsAnchor("lyrics.miniaturizedLyricStrip")`。
+
+### 31.6 看守第 17 组：14 项，以及四个"证明它会红"的变异
+
+`primuse-win/scripts/criteria-parity-check.js` 第 17 组（`最小化后的单行歌词 … 来源页与搜索页不许装死`）
+新增 14 项，整份 **123 项通过 / 0 项失败**。它读源码文本、不起 App、不联网，所以 Mac 上没有 Xcode
+也拦得住漂移。断言的形状大致是：五项条件与 Windows 的 token 表逐条映射 + `&&` 个数锁 5/6；
+窗口属性两侧成对；三个数字（560 / 44 / 6）数值相等且都锚在 workArea/visibleFrame；
+金色从 CSS 里读；`songKey` 形状；✕ 的三条性质（按首、不落盘、不唤回）；reset 语义；点击还原；
+默认开 + 设置绑定 + AppDelegate 实例化三样齐；三份"找主窗口"排除名单同源
+（丢了 0 个、多了的只允许是 `PrimuseLyricStrip` 自己）；来源页两组恒在；搜索页错误态上屏。
+
+本轮为了来源页那个重构，新跑了四个变异，每个都只打红一条，改完即还原：
+
+- 把 `onlineLinesCard` 罩进 `if hasOnlineLines { … }` → 1 红（"在线卡无条件出现"）。
+- 把 `Text(emptyOnlineLinesHint)` 退回硬编码一句 → 1 红（"两种病因分开给话术"）。
+- 把 `if hasOnlineLines {` 改成 `if true {`（只讲一种病因）→ 1 红。
+- 在 `content` 里塞回 `if sources.isEmpty && !hasOnlineLines { ContentUnavailableView(…) }` → 1 红。
+
+守卫自己也错过两次，两次都是**断言写错而不是代码写错**，值得记下来：
+`.fullScreenAuxiliary` 那条否定断言被我自己的 `///` 注释里那句"不给 `.fullScreenAuxiliary`"打红
+→ 否定式断言必须过 `stripLineComments()`；
+`case .online: macAggregatedMusicSection` 与 `macFilterChip(.online, …)` 比不中，因为 Swift 爱把参数换行
+→ 加了 `oneLine()` 归一化空白再比形状。这两个 helper 现在都在脚本里，后续否定式断言一律走前者。
+
+### 31.7 一次编码事故：那次改动把整份 `MacSourcesView.swift` 换成了 CRLF
+
+现象是 `git diff --stat` 里那个文件 2341 行全变。原因是编辑写入时按 CRLF 落盘，
+一个换行符风格能把"改了 180 行"变成"重写了整个文件"，review 时看不出问题、但会埋掉 blame 与后续三方合并。
+处置：先做严格 UTF-8 buffer 往返校验（`Buffer.from(t,'utf8')` 与原字节相等），确认不是编码损坏，
+再把 `\r\n` 全部收回 `\n`，diff 回到 180 增 / 9 删。这一轮结束时又核了一遍，
+本轮六个动过的文件（四份 Swift + `PrimuseApp.swift` + 守卫脚本）口径全部为
+**严格 UTF-8 = true、CR 计数 = 0、花括号净差 = 0**。这条纪律来自 [[cjk-file-encoding-hazard]]：
+本仓库注释全中文，行尾/编码类修复一旦按 latin1 往返会整份双重编码而测试照样绿。
+
+顺带一个"看守文件本身"的口径：`criteria-parity-check.js` 的花括号净差是 **21**，
+那是字符串字面量与正则里的 `{` 造成的既有值（HEAD 版本同为 21）。比对要在 old/new 之间做，
+不能对着 0 判 —— 否则会把既有形态当成本轮引入的错误。
+
+### 31.8 这一轮的验证边界（必须写清，不许含糊）
+
+这台机器**没有 Swift 工具链**（`which swift` / `swiftc` / `xcodebuild` 全空），
+**也看不见 macOS 与 iPhone 界面**。所以：
+
+- 编译由 CI 承担：推 main 跑 preflight（约 2 分钟，只查 FFmpeg 符号链接与 XcodeGen 出 scheme，
+  **不编译 Swift**），真正编译要等 `v*` tag 那次 macOS 构建。也就是说 §31.2 / §31.3 / §31.5 的 Swift
+  代码在 v1.9.23 构建绿之前，属于"照 API 事实逐个核对过签名、但没有编译器验证过"。
+  已核对过并留出处的点：`applyPrimuseEnvironments() -> some View`（`MacMenuBarController.swift:186`，
+  里面确实注入了 `playerService`（`AppServices.swift:493` 是 `AudioPlayerService`）/ `sourcesStore` /
+  `sourceManager`，正是歌词条视图 `@Environment` 那三个）、`NSHostingController(rootView: …applyPrimuseEnvironments())`
+  的写法逐行照 `DesktopLyricsWindowController.swift:160-170`、`deminiaturize(nil)` 的调用形式
+  `MacMenuBarController.swift:139` 已在用、`LyricsLoader.load(for:sourceManager:sourceType:) async -> [LyricLine]`
+  （`LyricsLoader.swift:209`）、`activeLineIndex(in:at:)`（`DesktopLyricsView.swift:731` 同形）、
+  `Color(hex:)` 非可选（`ScraperTypes.swift:184`，`NowPlayingView.swift:93` 用同一支 `E6C068`）、
+  `MainWindowOpener.openMainWindow()`（`PrimuseApp.swift:477`）、
+  `nonisolated(unsafe)` observer token + `deinit` 注销（`DesktopLyricsWindowController.swift:18/63` 同一套）。
+  新文件全程 `#if os(macOS)` —— 这不是风格问题：iOS 与 tvOS target 的 `sources` 就是整个 `Primuse/` 目录，
+  `project.yml` 没排除 `Views/Mac`，靠的全是文件内的平台条件。
+- `PrimuseTests` 里那套 Swift 单元测试 **CI 从来不跑**（workflow 里没有 `xcodebuild test`），
+  所以没有为这三处新写 Swift 测试 —— 写了也只是"永远绿的测试"。真正的看守是 31.6 那 14 项静态断言
+  （本机可跑、CI 里也跑）与 §29/§30 那套 JS 账。
+- **本轮本机验过的**：守卫 123 项全绿 + 四个变异各打红一条 + 六个文件的严格编码/行尾/括号口径复核。
+  **本轮没验过的**：Mac 界面实际长相、最小化时那条歌词是否真贴在 Dock 上方不抢焦点、
+  iOS 那两处（只做了源码核对）。需要他回传三样截图：来源页（在线卡在不在最上面、页脚有没有报在线）、
+  在线搜索失败那一次（红卡那句在不在）、app 最小化且正在播有词的歌（那条在不在、点 ✕ 之后还在不在）。
+

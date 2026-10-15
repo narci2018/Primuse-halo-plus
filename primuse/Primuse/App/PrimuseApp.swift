@@ -492,6 +492,8 @@ final class PrimuseAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor static weak var shared: PrimuseAppDelegate?
     @MainActor private var menuBar: MacMenuBarController?
     @MainActor private var desktopLyrics: DesktopLyricsWindowController?
+    /// 最小化后的单行歌词条（Windows 任务栏歌词条在 macOS 上的对应物）。
+    @MainActor private var miniaturizedLyrics: MacMiniaturizedLyricsController?
     @MainActor private var miniPlayer: MiniPlayerWindowController?
     @MainActor private var keyboardShortcutMonitor: Any?
 
@@ -511,6 +513,10 @@ final class PrimuseAppDelegate: NSObject, NSApplicationDelegate {
 
             let lyrics = DesktopLyricsWindowController()
             self.desktopLyrics = lyrics
+
+            // 最小化后那条单行歌词（跟 Windows 同一套五个条件）。只在第一条真要上屏时才建
+            // 那条 NSPanel，启动时不留一个隐形窗口。
+            self.miniaturizedLyrics = MacMiniaturizedLyricsController()
 
             self.miniPlayer = MiniPlayerWindowController()
             plog("🪟 AppDelegate didFinishLaunching: menuBar=ok lyrics=ok miniPlayer=\(self.miniPlayer == nil ? "nil" : "ok") delegateType=\(type(of: NSApp.delegate as Any))")

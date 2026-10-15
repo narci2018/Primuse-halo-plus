@@ -187,6 +187,9 @@ private enum MacSearchResultFilter: Hashable {
     case artists
     case lyrics
     case appleMusic
+    /// 在线（全网聚合）那一格。以前 Mac 的筛选格里没有它，聚合结果只在「全部」里
+    /// 顺带出现 —— 而 Windows 的搜索页是有本机/全网两档的（`app.js` 的 scope）。
+    case online
 }
 #endif
 
@@ -334,6 +337,11 @@ struct SearchView: View {
             || !visibleSemanticResults.isEmpty
             || !visibleAppleMusicSearchResults.isEmpty
             || !aggregatedMusic.searchResults.isEmpty
+            // 在线线路报错也算「有内容」。此前这一条缺失会让 iOS 里那句
+            // `lastSearchError != nil && searchResults.isEmpty` 的分支永远走不到
+            // （整页先被"无结果"空态拦掉了），macOS 同理：用户只看到"没有结果"，
+            // 看不到"一条在线线路都没启用"。
+            || aggregatedMusic.lastSearchError != nil
             || semanticSearchFeedback.isVisible
     }
 
@@ -347,7 +355,7 @@ struct SearchView: View {
         let kinds: [LibrarySearchMatchKind] = [.metadata, .path, .lyrics, .fuzzy]
         #if os(macOS)
         switch macResultFilter {
-        case .albums, .artists, .appleMusic:
+        case .albums, .artists, .appleMusic, .online:
             return []
         case .lyrics:
             return searchResults
@@ -642,6 +650,11 @@ struct SearchView: View {
                             title: "Apple Music · \(visibleAppleMusicSearchResults.count)"
                         )
                     }
+                    // 在线这一格恒在（哪怕 0 条）：它空的时候恰恰是最需要点进去看原因的时候。
+                    macFilterChip(
+                        .online,
+                        title: "在线 · \(aggregatedMusic.searchResults.count)"
+                    )
                 }
                 .padding(.vertical, 1)
             }
@@ -752,7 +765,9 @@ struct SearchView: View {
                     macAppleMusicSection()
                         .frame(maxWidth: 900, alignment: .leading)
                 }
-                if !aggregatedMusic.searchResults.isEmpty || aggregatedMusic.isSearching {
+                if !aggregatedMusic.searchResults.isEmpty
+                    || aggregatedMusic.isSearching
+                    || aggregatedMusic.lastSearchError != nil {
                     macAggregatedMusicSection
                         .frame(maxWidth: 900, alignment: .leading)
                 }
@@ -808,6 +823,9 @@ struct SearchView: View {
                     .frame(maxWidth: 900, alignment: .leading)
                 case .appleMusic:
                     macAppleMusicSection(showsAllResults: true)
+                        .frame(maxWidth: 900, alignment: .leading)
+                case .online:
+                    macAggregatedMusicSection
                         .frame(maxWidth: 900, alignment: .leading)
                 case .all:
                     EmptyView()
@@ -999,6 +1017,22 @@ struct SearchView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(PMColor.textMuted)
                 }
+                .padding(14)
+                .pmCard(cornerRadius: 10)
+            } else if let error = aggregatedMusic.lastSearchError,
+                      aggregatedMusic.searchResults.isEmpty {
+                // 与 iOS 同一个分支，但 macOS 上要说清"下一步去哪儿"：
+                // 这句错误（例如"未启用任何聚合音乐源"）是用户唯一能看懂的线索，
+                // 之前整个 section 被 if 挡掉了，屏幕上一个字都没有。
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(PMColor.bad)
+                    Text("在「资料库 → 来源」里点「管理在线线路」，启用能出声的线路后再搜。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(PMColor.textMuted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
                 .pmCard(cornerRadius: 10)
             } else {
@@ -1497,6 +1531,10 @@ struct SearchView: View {
             return searchResults.contains { $0.matchKind == .lyrics }
         case .appleMusic:
             return appleMusicSearchEnabled
+        case .online:
+            return !aggregatedMusic.searchResults.isEmpty
+                || aggregatedMusic.isSearching
+                || aggregatedMusic.lastSearchError != nil
         }
     }
 

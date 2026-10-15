@@ -3452,6 +3452,8 @@ private struct MacSTLyricsView: View {
     @AppStorage("lyricsFontScale") private var lyricsFontScale = 1.0
     @AppStorage(PlayerAppearancePreferences.tapLyricsToSeekKey)
     private var tapLyricsToSeek = PlayerAppearancePreferences.tapLyricsToSeekByDefault
+    @AppStorage(MacMiniaturizedLyricsSettings.key)
+    private var miniaturizedLyricsEnabled = true
     @State private var showTranscriptionSettings = false
 
     var body: some View {
@@ -3528,6 +3530,15 @@ private struct MacSTLyricsView: View {
                         )
                     }
                     .settingsAnchor("lyrics.fontSize")
+                    // 需求 8 的 macOS 版：跟 Windows「设置 → 播放 → 任务栏歌词」同一个开关位。
+                    MacSTRow(
+                        "最小化时显示单行歌词",
+                        hint: "只在 app 收起来、正在播、且当前这一句有字时露出；点 ✕ 这一首不再显示"
+                    ) {
+                        MacSTToggle(isOn: $miniaturizedLyricsEnabled)
+                            .accessibilityLabel(Text("最小化时显示单行歌词"))
+                    }
+                    .settingsAnchor("lyrics.miniaturizedLyricStrip")
                     MacSTRow(
                         String(localized: "player_tap_lyrics_to_seek"),
                         divider: false
