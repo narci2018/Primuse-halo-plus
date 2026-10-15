@@ -3,28 +3,37 @@ import SwiftUI
 import AppKit
 import PrimuseKit
 
-/// 1.6 重设计后的 macOS 根布局: 自定义 TitleBar + Sidebar + Detail + BottomBar 四件套,
-/// 不再依赖 NavigationSplitView。标题栏背景透明且内容延伸至顶部,导航和搜索由
+/// macOS 根布局: 自定义 TitleBar + 正文 + BottomBar + 四 tab。
+///
+/// 目的地这一层跟 iPhone (`ContentView.swift` 的 `TabView`) 和 Windows
+/// (`index.html` 的 `.tabbar`) 是同一套：首页 / 资料库 / 搜索 / 设置。以前的
+/// 三栏壳把资料库的十个分区、全部歌单、音乐源和五个工具都摊在最外层的侧栏里,
+/// 那些内容现在回到它们在另外两端本来的位置 —— 分区在资料库页内切换,
+/// 源和工具在设置页里。标题栏背景透明且内容延伸至顶部,导航和搜索由
 /// `PMTitleBar` 绘制,窗口控制保留 AppKit 原生实现。
 struct MacContentView: View {
     @State private var selection: MacRoute = .home
     @State private var detailNavigationID = UUID()
-    @State private var sidebarCollapsed: Bool = false
-    @State private var savedSidebarCollapsed: Bool = false
+    /// 每个 tab 上次停在哪儿（存成持久化 ID，回来时用 `route(for:)` 校验对象
+    /// 还在不在，歌单被删了就退回根页）。iPhone 的 `TabView` 天然记住每条栈，
+    /// 这里补上同样的行为，切走再切回不会被甩回根页。
+    @State private var lastRouteIDPerTab: [MacTab: String] = [:]
     @State private var nowPlayingPresented = false
     @State private var queuePresented = false
     @State private var isWindowFullScreen = false
     @State private var hostWindow: NSWindow?
     @State private var searchText = ""
     @State private var songLocationRequest: SongLibraryLocationRequest?
+    /// 发给资料库页的入口指令（「全部歌曲」/「在资料库中显示」/电台「全部」）。
+    @State private var libraryDeepLink: LibraryDeepLink?
+    /// 资料库页当前停在哪个分区（`LibraryView` 通过 `onActiveSectionChange` 报上来）。
+    /// 非 nil = 已经从 hub 钻进去了，标题栏的「返回」因此出现 —— 外壳没有侧栏，
+    /// 也没有能画在导航栏上的系统返回按钮（`windowToolbar` 是隐藏的），
+    /// 所以钻多深都一键回到本 tab 的根页。
+    @State private var libraryActiveSection: LibrarySection?
     @State private var didRestorePersistedRoute = false
     @State private var preferences = MacUIPreferences.shared
-    @State private var showNewPlaylist = false
-    @State private var showSmartEditor = false
-    @State private var showAIPlaylistEditor = false
     @State private var showInitialOnboarding = false
-    @State private var newPlaylistName = ""
-    @State private var newPlaylistDescription = ""
     /// Keep the one-tap lyrics scrape above `MacNowPlayingView`'s lifetime.
     /// The expanded player is removed from the view tree when it is collapsed;
     /// a task/state owned by that child can therefore lose its UI completion
@@ -36,7 +45,7 @@ struct MacContentView: View {
     @State private var lyricsTranscriptionEditorTargetSong: Song?
     @State private var lyricsScrapeAlertMessage: String?
     @State private var showNoScraperSourceAlert = false
-    /// 当前打开的工具弹框 (nil = 没开)。侧栏「工具」区点击设置它, sheet 关掉清空。
+    /// 当前打开的工具弹框 (nil = 没开)。「设置」tab 页脚的工具行设置它, sheet 关掉清空。
     @State private var activeTool: MacTool?
 
     @Environment(\.openWindow) private var openWindow
@@ -55,27 +64,27 @@ struct MacContentView: View {
             if !isFullScreenNowPlaying {
                 PMTitleBar(
                     searchText: $searchText,
-                    sidebarCollapsed: $sidebarCollapsed,
                     selection: navigationSelection,
+                    showsBack: showsTitleBarBack,
+                    onBack: backToTabRoot,
                     onAddSource: { selectRoute(.sources) },
                     onAudioOutput: { /* 由 BottomBar 右侧的喇叭按钮 popover 接管 */ }
                 )
             }
 
             HStack(spacing: 0) {
-                if !sidebarCollapsed {
-                    MacSidebar(selection: navigationSelection, onOpenTool: { activeTool = $0 })
-                        .frame(width: preferences.sidebarWidth)
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-
                 ZStack {
                     MacDetailContainer(
                         route: selection,
                         searchText: $searchText,
                         songLocationRequest: $songLocationRequest,
+                        libraryDeepLink: $libraryDeepLink,
+                        libraryActiveSection: $libraryActiveSection,
                         onShowSongInLibrary: showSongInLibrary,
-                        onOpenLibrarySongs: { selectRoute(.section(.songs)) }
+                        onOpenLibrarySongs: { openLibrary(.section(.songs)) },
+                        onOpenSourcesPage: { selectRoute(.sources) },
+                        onOpenAggregatedSourcesPage: { selectRoute(.aggregatedSources) },
+                        onOpenTool: { activeTool = $0 }
                     )
                         .id(detailNavigationID)
                         .background(PMColor.bg.ignoresSafeArea())
@@ -110,44 +119,40 @@ struct MacContentView: View {
                     .transition(.move(edge: .trailing))
                 }
             }
-            // 手柄放在整个 HStack 的顶层 overlay,保证跨进正文的右半边不会被
-            // MacDetailContainer 里的 NSScrollView / NSClipView 抢走鼠标事件。
-            .overlay(alignment: .leading) {
-                if !sidebarCollapsed {
-                    SidebarResizeHandle(preferences: preferences)
-                        .frame(width: 10)
-                        .frame(maxHeight: .infinity)
-                        .offset(x: preferences.sidebarWidth - 5)
-                }
-            }
-            // BottomBar 用 safeAreaInset 挂在内容 HStack 底部, 而不是当 VStack 的
+            // 迷你播放条 + 四 tab 一起挂在内容 HStack 底部, 而不是当 VStack 的
             // 第三行 —— 后者会让底栏自带一条等高的窗口底色 (PMColor.bg) 横条, 浮动
-            // 卡片的圆角和左右留白处透出的就是这条底色, 跟上方 sidebar 的玻璃色对不上,
-            // 看着像卡片背后压了一个方块。改成 safeAreaInset 后 sidebar / detail 的
-            // ignoresSafeArea 背景会一直延伸到窗口底部、铺到卡片背后, 圆角处透出的就是
-            // 各自那一列的背景色, 卡片真正"浮"在内容上。
+            // 卡片的圆角和左右留白处透出的就是这条底色, 看着像卡片背后压了一个方块。
+            // 改成 safeAreaInset 后正文的 ignoresSafeArea 背景会一直延伸到窗口底部、
+            // 铺到卡片背后, 圆角处透出的是它自己的背景色, 卡片真正"浮"在内容上。
+            // 顺序跟 Windows 渲染层一致: 迷你条在上, tab 贴着窗口底边。
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !isFullScreenNowPlaying {
-                    MacBottomBar(
-                        isExpanded: nowPlayingPresented,
-                        isQueueShown: queuePresented,
-                        onToggleNowPlaying: {
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                nowPlayingPresented.toggle()
+                    VStack(spacing: 0) {
+                        MacBottomBar(
+                            isExpanded: nowPlayingPresented,
+                            isQueueShown: queuePresented,
+                            onToggleNowPlaying: {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    nowPlayingPresented.toggle()
+                                }
+                            },
+                            onToggleQueue: {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    queuePresented.toggle()
+                                }
+                            },
+                            onMiniPlayer: {
+                                PrimuseAppDelegate.shared?.toggleMiniPlayer()
+                            },
+                            onFullScreen: {
+                                PrimuseAppDelegate.shared?.toggleFullScreenPlayer()
                             }
-                        },
-                        onToggleQueue: {
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                queuePresented.toggle()
-                            }
-                        },
-                        onMiniPlayer: {
-                            PrimuseAppDelegate.shared?.toggleMiniPlayer()
-                        },
-                        onFullScreen: {
-                            PrimuseAppDelegate.shared?.toggleFullScreenPlayer()
+                        )
+
+                        MacTabBar(selection: selection.tab) { tab in
+                            selectTab(tab)
                         }
-                    )
+                    }
                 }
             }
         }
@@ -172,29 +177,8 @@ struct MacContentView: View {
                 )
             }
         }
-        .sheet(isPresented: $showNewPlaylist) {
-            MacNewPlaylistSheet(
-                name: $newPlaylistName,
-                description: $newPlaylistDescription,
-                onCancel: {
-                    newPlaylistName = ""
-                    newPlaylistDescription = ""
-                    showNewPlaylist = false
-                },
-                onCreate: { name in
-                    _ = library.createPlaylist(name: name)
-                    newPlaylistName = ""
-                    newPlaylistDescription = ""
-                    showNewPlaylist = false
-                }
-            )
-        }
-        .sheet(isPresented: $showSmartEditor) {
-            SmartPlaylistEditorView(existing: nil)
-        }
-        .sheet(isPresented: $showAIPlaylistEditor) {
-            AIPlaylistEditorView(existing: nil)
-        }
+        // 新建歌单 / 智能歌单 / AI 歌单的入口在资料库的「歌单」分区里
+        // (`PlaylistListView` 自己的 + 菜单, 与 iPhone 同一处), 外壳不再各留一份。
         .alert(
             String(localized: "server_favorite_update_failed_title"),
             isPresented: Binding(
@@ -232,17 +216,6 @@ struct MacContentView: View {
         .onChange(of: selection) { _, route in
             persistedRouteID = persistenceID(for: route)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .primuseSidebarRequestNewPlaylist)) { _ in
-            newPlaylistName = ""
-            newPlaylistDescription = ""
-            showNewPlaylist = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .primuseSidebarRequestNewSmartPlaylist)) { _ in
-            showSmartEditor = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .primuseSidebarRequestNewAIPlaylist)) { _ in
-            showAIPlaylistEditor = true
-        }
         .onReceive(NotificationCenter.default.publisher(for: .primuseRequestExpandNowPlaying)) { note in
             let animated = note.userInfo?[PrimuseNowPlayingExpansion.animatedKey] as? Bool ?? true
             if animated {
@@ -263,12 +236,12 @@ struct MacContentView: View {
             activeTool = .scrobble
         }
         .onReceive(NotificationCenter.default.publisher(for: .primuseSelectPlaylists)) { _ in
-            // 歌单总览页已移除 (侧栏已直接列出全部歌单 + 智能歌单)。删除当前歌单后
-            // 回到首页, 而不是再跳那个不稳定的总览页。
-            selectRoute(.home)
+            // 删除当前歌单之后回到资料库的「歌单」分区 —— 外壳没有侧栏了，
+            // 回首页等于把用户放到了一个跟刚才无关的页面。
+            openLibrary(.section(.playlists))
         }
         .onReceive(NotificationCenter.default.publisher(for: .primuseSelectRadio)) { _ in
-            selectRoute(.section(.radio))
+            openLibrary(.section(.radio))
         }
         .onReceive(NotificationCenter.default.publisher(for: .primuseDetailOpenAlbum)) { note in
             guard note.object is Album else { return }
@@ -286,17 +259,10 @@ struct MacContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
             guard let window = note.object as? NSWindow, window === hostWindow else { return }
             isWindowFullScreen = true
-            savedSidebarCollapsed = sidebarCollapsed
-            withAnimation(.easeInOut(duration: 0.25)) {
-                sidebarCollapsed = true
-            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
             guard let window = note.object as? NSWindow, window === hostWindow else { return }
             isWindowFullScreen = false
-            withAnimation(.easeInOut(duration: 0.25)) {
-                sidebarCollapsed = savedSidebarCollapsed
-            }
         }
     }
 
@@ -420,20 +386,67 @@ struct MacContentView: View {
         Binding(get: { selection }, set: { selectRoute($0) })
     }
 
+    /// 标题栏要不要出返回键。两条来源：路由本身不是本 tab 的根页（例如从设置
+    /// 进了音乐源管理），或者资料库 tab 已经从 hub 钻进了某个分区。
+    private var showsTitleBarBack: Bool {
+        if !selection.isTabRoot { return true }
+        return selection == .library && libraryActiveSection != nil
+    }
+
+    private func backToTabRoot() {
+        if selection == .library {
+            openLibrary(.root)
+        } else {
+            selectRoute(selection.tab.route)
+        }
+    }
+
     private func selectRoute(_ route: MacRoute) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             nowPlayingPresented = false
+            if route.tab != selection.tab {
+                // 离开一个 tab 时记住它停在哪儿，回来时用 `route(for:)` 还原
+                // （那个函数顺带校验歌单/来源还在不在，被删了就退回根页）。
+                lastRouteIDPerTab[selection.tab] = persistenceID(for: selection)
+            }
             selection = route
-            // 直接目标 NavigationLink 的展示状态不在 path 内，侧栏导航需重建整栈。
+            libraryActiveSection = route.tab == .library ? libraryActiveSection : nil
+            // 直接目标 NavigationLink 的展示状态不在 path 内，换页需重建整栈。
             detailNavigationID = UUID()
         }
     }
 
+    /// 底下四格之一的点击。跟 iPhone 的 `TabView` 一样：切走的 tab 停在它上次
+    /// 那一页；**已经在这格上再点一次 = 回到本 tab 的根页** —— macOS 的系统
+    /// 导航栏是隐藏的（`toolbar(.hidden, for: .windowToolbar)`），`LibraryView`
+    /// 恢复上次浏览位置时也不会回报分区，所以这一记永远是把栈清干净的后手。
+    private func selectTab(_ tab: MacTab) {
+        guard tab != selection.tab else {
+            if !selection.isTabRoot || selection == .library {
+                backToTabRoot()
+            }
+            return
+        }
+        selectRoute(lastRouteIDPerTab[tab].flatMap { route(for: $0) } ?? tab.route)
+    }
+
+    /// 把「跳到资料库的某一处」交给 iPhone 那份 `LibraryView` 自己做，
+    /// 外壳只负责切到资料库 tab。
+    private func openLibrary(_ link: LibraryDeepLink) {
+        if selection == .library {
+            libraryDeepLink = link
+            if link == .root { libraryActiveSection = nil }
+            return
+        }
+        libraryDeepLink = link
+        selectRoute(.library)
+    }
+
     private func showSongInLibrary(_ song: Song) {
         songLocationRequest = SongLibraryLocationRequest(songID: song.id)
-        selectRoute(.section(.songs))
+        openLibrary(.song(song.id))
     }
 
     private func restorePersistedRouteIfNeeded() {
@@ -445,9 +458,12 @@ struct MacContentView: View {
     private func persistenceID(for route: MacRoute) -> String {
         switch route {
         case .home: return "home"
+        case .library: return "library"
         case .stats: return "stats"
         case .search: return "search"
+        case .settings: return "settings"
         case .sources: return "sources"
+        case .aggregatedSources: return "aggregated-sources"
         case .section(let section): return "section:\(section.rawValue)"
         case .liked: return "liked"
         case .playlist(let playlist): return "playlist:\(playlist.id)"
@@ -459,9 +475,12 @@ struct MacContentView: View {
     private func route(for persistedID: String) -> MacRoute? {
         switch persistedID {
         case "home": return .home
+        case "library": return .library
         case "stats": return .stats
         case "search": return .search
+        case "settings": return .settings
         case "sources": return .sources
+        case "aggregated-sources": return .aggregatedSources
         case "liked": return .liked
         default: break
         }
@@ -496,113 +515,4 @@ struct MacContentView: View {
     }
 }
 
-// MARK: - Sidebar resize handle
-
-/// 侧栏宽度拖拽手柄。设计稿里侧栏可在 180–300pt 之间拖动调整。
-///
-/// 用 AppKit NSView 而不是 SwiftUI DragGesture: 手柄需要自己持有鼠标追踪、
-/// resize 光标和拖拽生命周期, 避免跟窗口拖动或 SwiftUI 命中测试互相抢事件。
-/// 这里的 NSView 把 `mouseDownCanMoveWindow` 返回 false, 拖拽完全由它自己处理,
-/// 实时改 `MacUIPreferences.sidebarWidth` (夹到 [min, max] 并持久化)。
-private struct SidebarResizeHandle: NSViewRepresentable {
-    let preferences: MacUIPreferences
-
-    func makeNSView(context: Context) -> NSView {
-        ResizeHandleNSView(preferences: preferences)
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    /// overlay 默认贴在侧栏 trailing 内侧, 右移半个宽度让 10pt 命中区跨在边界线上。
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
-        CGSize(width: 10, height: proposal.height ?? 0)
-    }
-}
-
-private final class ResizeHandleNSView: NSView {
-    private let preferences: MacUIPreferences
-    private var startWidth: CGFloat = 0
-    private var startX: CGFloat = 0
-    private var trackingAreaRef: NSTrackingArea?
-
-    init(preferences: MacUIPreferences) {
-        self.preferences = preferences
-        super.init(frame: .zero)
-    }
-    required init?(coder: NSCoder) { return nil }
-
-    /// 关键: 落在手柄上的 mouseDown 不触发窗口移动。
-    override var mouseDownCanMoveWindow: Bool { false }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        invalidateCursorRects()
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        invalidateCursorRects()
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .resizeLeftRight)
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingAreaRef {
-            removeTrackingArea(trackingAreaRef)
-        }
-
-        let trackingArea = NSTrackingArea(
-            rect: .zero,
-            options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .cursorUpdate],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(trackingArea)
-        trackingAreaRef = trackingArea
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        NSCursor.arrow.set()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-        startWidth = preferences.sidebarWidth
-        startX = event.locationInWindow.x
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-        // 用窗口坐标系里的绝对位移算, 避免 deltaX 累加在夹紧后产生死区。
-        let dx = event.locationInWindow.x - startX
-        preferences.sidebarWidth = min(
-            PMSize.sidebarMax,
-            max(PMSize.sidebarMin, startWidth + dx)
-        )
-    }
-
-    private func invalidateCursorRects() {
-        window?.invalidateCursorRects(for: self)
-        updateTrackingAreas()
-    }
-}
 #endif

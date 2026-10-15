@@ -1644,7 +1644,8 @@ struct PrimuseApp: App {
         .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentMinSize)
         .commands {
-            SidebarCommands()
+            // 侧栏已经去掉（四 tab 外壳），`SidebarCommands` 那条「显示/隐藏侧栏」
+            // 会点不出东西，所以删掉；`ToolbarCommands` 留着，全屏播放的标题栏仍然有工具栏。
             ToolbarCommands()
             CommandGroup(replacing: .newItem) {}
             // 自定义设置窗口 (独立 NSWindow, 见 SettingsWindowController) 取代

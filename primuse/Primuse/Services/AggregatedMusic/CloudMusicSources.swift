@@ -119,7 +119,8 @@ struct CloudEnvelope<T: Decodable>: Decodable {
 /// 没设置时回落到本地的 `home_title`。
 ///
 /// 为什么走 UserDefaults 而不是直接读 `CloudMusicSources.shared`：
-/// 首页那几个入口（iPhone 的 TabView、iPad 侧栏、Mac 侧栏、以及 `SidebarItem` 这个枚举）
+/// 首页那几个入口（iPhone 的 TabView、iPad 侧栏、Mac 底部那四格 `MacTabBar`、
+/// 以及 `SidebarItem` 这个枚举）
 /// 里有相当一部分是 `body` **之外**的 computed var —— Swift 6 下它们不是 MainActor，
 /// 去读一个 MainActor 单例就是隔离错误。`CloudMusicSources` 在清单落地时把文案写进这一份键，
 /// 视图再用 `@AppStorage` 读，两边都不越界，标题也能自己刷上去。

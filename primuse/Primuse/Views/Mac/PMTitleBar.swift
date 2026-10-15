@@ -5,10 +5,15 @@ import PrimuseKit
 
 /// 主窗口顶部 48pt 自定义 title bar — 跟设计稿里的 TitleBar 对齐:
 /// 原生窗口按钮、居中搜索、右侧工具按钮。
+///
+/// 四 tab 外壳里它同时是「返回」的落点：底下那排 tab 相当于 iPhone 的
+/// `TabView`，页内钻进去的分区/源详情没有侧栏可以退回，就退回本 tab 的根页。
 struct PMTitleBar: View {
     @Binding var searchText: String
-    @Binding var sidebarCollapsed: Bool
     @Binding var selection: MacRoute
+    /// 当前页不是它所属 tab 的根页时置真 —— 只有这时左侧才出现返回箭头。
+    var showsBack: Bool = false
+    var onBack: () -> Void = {}
     var onAddSource: () -> Void = {}
     var onAudioOutput: () -> Void = {}
 
@@ -29,6 +34,11 @@ struct PMTitleBar: View {
             // bar's geometric center.
             HStack(spacing: 8) {
                 PMStandardWindowButtonArea()
+                if showsBack {
+                    PMRoundBtn(icon: "chevron.left", iconSize: 12, style: .glass,
+                               help: "back_to_options", action: onBack)
+                }
+                brandMark
                 windowDragSpacer
                 trailingControls
             }
@@ -57,15 +67,22 @@ struct PMTitleBar: View {
             .frame(minWidth: 12, maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// 侧栏去掉之后，「猿音 / Primuse」这个品牌标识只剩标题栏这一个落点了
+    /// （以前它画在侧栏顶部）。放在窗口按钮右边，宽度不够时自动被拖拽区挤掉。
+    private var brandMark: some View {
+        HStack(spacing: 8) {
+            BrandMonogram(slot: .sidebar)
+
+            Text(verbatim: PMAppDisplayName())
+                .font(.system(size: 14, weight: .semibold))
+                .tracking(-0.3)
+                .foregroundStyle(PMColor.text)
+        }
+        .padding(.leading, 2)
+    }
+
     private var trailingControls: some View {
         HStack(spacing: 8) {
-            PMRoundBtn(
-                icon: sidebarCollapsed ? "sidebar.right" : "sidebar.left",
-                iconSize: 13, style: .glass,
-                help: "sidebar_toggle"
-            ) {
-                withAnimation(.easeInOut(duration: 0.22)) { sidebarCollapsed.toggle() }
-            }
             PMRoundBtn(icon: "hifispeaker.2.fill", iconSize: 12, style: .glass,
                        help: "audio_output") {
                 audioOutputShown.toggle()

@@ -99,7 +99,8 @@ final class ScrapeWindowController: NSObject, NSWindowDelegate {
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     static let shared = SettingsWindowController()
 
-    private let navigation = MacSettingsNavigationModel()
+    /// 与主窗口「设置」tab 共用同一份选中状态（见 `MacSettingsNavigationModel.shared`）。
+    private let navigation = MacSettingsNavigationModel.shared
     private var window: NSWindow?
 
     private override init() { super.init() }

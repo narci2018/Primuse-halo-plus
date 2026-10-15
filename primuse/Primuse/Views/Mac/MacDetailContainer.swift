@@ -2,15 +2,27 @@
 import SwiftUI
 import PrimuseKit
 
-/// Right-pane container. Owns its own NavigationStack so drilling into
-/// AlbumDetail / ArtistDetail / PlaylistDetail still works inside the
-/// macOS split view. Stack resets whenever sidebar selection changes.
+/// 主内容区容器。四 tab 外壳里它就是 tab 上方那一整块正文（不再有三栏壳的左栏）。
+/// 自带一个 NavigationStack，所以从资料库点进专辑 / 艺术家 / 歌单仍然能往下钻。
+/// 每次外壳切换 tab（`route` 变）时整栈会被重建 —— `MacContentView` 用
+/// `detailNavigationID` 做这件事。
 struct MacDetailContainer: View {
     let route: MacRoute
     @Binding var searchText: String
     @Binding var songLocationRequest: SongLibraryLocationRequest?
+    /// 「资料库」tab 的入口指令：首页的「全部歌曲」、搜索里的「在资料库中显示」、
+    /// 首页电台区的「全部」都往这里塞一个 `LibraryDeepLink`，由 iPhone 那份
+    /// `LibraryView` 自己切到对应分区。
+    @Binding var libraryDeepLink: LibraryDeepLink?
+    /// 反向通道：`LibraryView` 报上来它现在停在哪个分区，外壳据此决定标题栏的
+    /// 「返回」出不出现在资料库 tab 上。
+    @Binding var libraryActiveSection: LibrarySection?
     let onShowSongInLibrary: (Song) -> Void
     let onOpenLibrarySongs: () -> Void
+    /// 「设置」tab 页脚那几行的动作，由外壳翻译成路由 / 弹框。
+    let onOpenSourcesPage: () -> Void
+    let onOpenAggregatedSourcesPage: () -> Void
+    let onOpenTool: (MacTool) -> Void
     @Environment(MusicLibrary.self) private var library
     @Environment(SourcesStore.self) private var sourcesStore
     @State private var path = NavigationPath()
@@ -85,6 +97,25 @@ struct MacDetailContainer: View {
         switch route {
         case .home:
             MacHomeView(openLibrarySongs: onOpenLibrarySongs)
+        case .library:
+            // 与 iPhone 的「资料库」tab 同一份视图：快捷访问、分类条、
+            // 歌单/电台/统计都在它页内切换，不再由外壳摊成侧栏路由。
+            LibraryView(
+                deepLink: $libraryDeepLink,
+                onActiveSectionChange: { libraryActiveSection = $0 }
+            )
+        case .settings:
+            MacSettingsView(
+                navigation: MacSettingsNavigationModel.shared,
+                embedded: true,
+                onOpenSourcesPage: onOpenSourcesPage,
+                onOpenAggregatedSourcesPage: onOpenAggregatedSourcesPage,
+                onOpenTool: onOpenTool
+            )
+        case .aggregatedSources:
+            // 与 iPhone 设置里同一页（云端清单 URL + 线路开关）。以前 macOS 没有
+            // 任何入口能打开它 —— 现在挂在「设置」tab 页脚。
+            AggregatedSourcesSettingsView()
         case .stats:
             ListeningStatsView()
         case .sources:

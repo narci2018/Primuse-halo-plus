@@ -156,6 +156,9 @@ enum PMSize {
     /// 框 / 按钮更多呼吸空间, 不至于看起来挤。
     static let titlebar: CGFloat = 48
     static let bottomBar: CGFloat = 74
+    /// iPhone 的系统 tab bar 是 49pt (再加安全区)。macOS 窗口没有底部安全区,
+    /// 取 52pt 让「图标 17 + 间距 3 + 标题 10.5」这一列的高度比例跟 iPhone 对齐。
+    static let tabBar: CGFloat = 52
     static let sidebarDefault: CGFloat = 220
     static let sidebarMin: CGFloat = 180
     static let sidebarMax: CGFloat = 300

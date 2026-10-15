@@ -88,6 +88,11 @@ enum MacSettingsTab: String, Hashable, CaseIterable, Identifiable {
 @MainActor
 @Observable
 final class MacSettingsNavigationModel {
+    /// 主窗口「设置」tab 与 ⌘, 打开的独立设置窗口共用这一份选中状态：
+    /// 两边看到的是同一个页面，`ScraperSourceGate` / 搜索结果跳转之类
+    /// 「按 settingID 选中某一项」的调用也不用关心自己是从哪个入口进来的。
+    static let shared = MacSettingsNavigationModel()
+
     var tab: MacSettingsTab = .playback
     var settingID: String?
     var showsCacheSync = false
@@ -169,6 +174,16 @@ private extension MacSettingsTab {
 
 struct MacSettingsView: View {
     let navigation: MacSettingsNavigationModel
+    /// 内嵌模式 = 主窗口「设置」tab 里的那一份。跟独立设置窗口的区别只有三点：
+    /// 不画自己的标题栏（窗口标题栏是外壳的 `PMTitleBar`，而且真正的红黄绿按钮
+    /// 不能出现两次）、不抢窗口 chrome（`PMWindowChromeConfigurator` 与
+    /// `ignoresSafeArea(.top)` 会让正文钻到标题栏底下）、以及最小尺寸收小，
+    /// 免得把主窗口的最小宽度顶到 940。页脚多出的几行是音乐源 / 聚合音乐源 /
+    /// 工具 —— 四 tab 外壳没有侧栏，这些目的地得有个家。
+    var embedded: Bool = false
+    var onOpenSourcesPage: () -> Void = {}
+    var onOpenAggregatedSourcesPage: () -> Void = {}
+    var onOpenTool: (MacTool) -> Void = { _ in }
 
     @Environment(MusicIntelligenceService.self) private var intelligence
     @State private var sidebarFilter = ""
@@ -187,24 +202,40 @@ struct MacSettingsView: View {
     }
 
     var body: some View {
+        Group {
+            if embedded {
+                settingsCore(minWidth: 620, idealWidth: 900, minHeight: 360, idealHeight: 620)
+            } else {
+                settingsCore(minWidth: 940, idealWidth: 960, minHeight: 680, idealHeight: 720)
+                    .background(PMColor.bg.ignoresSafeArea())
+                    .background(PMWindowChromeConfigurator())
+                    .ignoresSafeArea(.container, edges: .top)
+            }
+        }
+    }
+
+    /// 两种模式共用的部分。设计稿 Settings 窗口尺寸: sidebar 200 + content
+    /// max-width 720 + L/R padding 32×2 ≈ 984pt 宽。之前设 1040×720, 右侧
+    /// max-width 限制让 56pt 留白; 用户截图看着 "右边空一片"。改成 940×680,
+    /// content 几乎贴右边缘。内嵌时这套窗口级尺寸不成立, 只保留一个够用的下限。
+    private func settingsCore(
+        minWidth: CGFloat,
+        idealWidth: CGFloat,
+        minHeight: CGFloat,
+        idealHeight: CGFloat
+    ) -> some View {
         VStack(spacing: 0) {
-            settingsTitleBar
+            if !embedded { settingsTitleBar }
 
             HStack(spacing: 0) {
                 sidebar
-                    .frame(width: 200)
+                    .frame(width: embedded ? 196 : 200)
                 Divider()
                 contentPane
             }
         }
-        // 设计稿 Settings 窗口尺寸: sidebar 200 + content max-width 720 + L/R padding 32×2
-        // ≈ 984pt 宽。之前设 1040×720, 右侧 max-width 限制让 56pt 留白; 用户截图看着
-        // "右边空一片"。改成 940×680, content 几乎贴右边缘。
-        .frame(minWidth: 940, idealWidth: 960, minHeight: 680, idealHeight: 720)
+        .frame(minWidth: minWidth, idealWidth: idealWidth, minHeight: minHeight, idealHeight: idealHeight)
         .environment(\.pmAppearance, MacUIPreferences.shared.appearance)
-        .background(PMColor.bg.ignoresSafeArea())
-        .background(PMWindowChromeConfigurator())
-        .ignoresSafeArea(.container, edges: .top)
         .onChange(of: sidebarFilter) { _, value in
             showingSearchResults = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -252,6 +283,10 @@ struct MacSettingsView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(availableTabs) { sidebarItem($0) }
+
+                    if embedded {
+                        embeddedDestinationRows
+                    }
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 10)
@@ -264,6 +299,93 @@ struct MacSettingsView: View {
             }
             .ignoresSafeArea()
         }
+    }
+
+    // MARK: - 内嵌模式页脚（音乐源 / 聚合音乐源 / 工具）
+
+    /// 四 tab 外壳把侧栏去掉了，原先挂在侧栏里的三个目的地改挂在这里，
+    /// 与 iPhone（设置 → 音乐源管理 / 聚合音乐源设置）和 Windows（设置里同名两行）
+    /// 的位置一致。工具保持弹框（`.sheet`）而不是页面，因为它们本来就是用完即关的面板。
+    private var embeddedDestinationRows: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Divider().padding(.vertical, 8)
+
+            embeddedGroupHeader("manage_sources")
+            embeddedActionRow(
+                icon: "externaldrive.connected.to.line.below",
+                title: Text("manage_sources")
+            ) { onOpenSourcesPage() }
+            embeddedActionRow(
+                icon: "sparkles.rectangle.stack",
+                title: Text("聚合音乐源设置")
+            ) { onOpenAggregatedSourcesPage() }
+
+            embeddedGroupHeader("mac_sidebar_tools")
+            embeddedActionRow(icon: "externaldrive.badge.wifi",
+                              title: Text(verbatim: CacheSyncLocalization.text("cache_sync_title"))) {
+                onOpenTool(.cacheSync)
+            }
+            embeddedActionRow(icon: "laptopcomputer.and.iphone",
+                              title: Text(verbatim: WiFiTransferText.string("nativeTitle"))) {
+                onOpenTool(.deviceTransfer)
+            }
+            embeddedActionRow(icon: "arrow.left.arrow.right",
+                              title: Text(verbatim: String(localized: "lyrics_converter_title"))) {
+                onOpenTool(.lyricsConverter)
+            }
+            embeddedActionRow(icon: "arrow.triangle.2.circlepath",
+                              title: Text(verbatim: String(localized: "Duplicate Song Cleanup"))) {
+                onOpenTool(.duplicates)
+            }
+            embeddedActionRow(icon: "waveform.path.ecg",
+                              title: Text(verbatim: String(localized: "Scrobble Configuration"))) {
+                onOpenTool(.scrobble)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func embeddedGroupHeader(_ key: LocalizedStringKey) -> some View {
+        Text(key)
+            .font(.system(size: 10.5, weight: .semibold))
+            .tracking(0.8)
+            .textCase(.uppercase)
+            .foregroundStyle(PMColor.textFaint)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+    }
+
+    /// 跟 `sidebarItem` 同一套行样式，但没有选中态 —— 它不是设置分区，
+    /// 点击是把另一个页面 / 面板带出来，右侧用一个箭头暗示这件事。
+    private func embeddedActionRow(icon: String, title: Text, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(PMColor.brand.opacity(0.16))
+                    .frame(width: 22, height: 22)
+                    .overlay {
+                        Image(systemName: icon)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(PMColor.brand)
+                    }
+
+                title
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(PMColor.text)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(PMColor.textFaint)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var sidebarSearch: some View {
