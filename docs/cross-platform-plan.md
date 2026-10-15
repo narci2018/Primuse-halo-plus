@@ -1416,9 +1416,192 @@ iPhone 的全屏播放页本来就把 tab bar 整个盖住，所以这不是妥�
 **Swift 侧没有这个坑**：iPhone 那份歌词本来就在 VStack 里（§25.2 就是照它改的），
 macOS 复用同一套视图。所以这一节只动 Windows。
 
+## 26. 八个需求一轮过：闸门、颜色、后台那两个洞，和任务栏上那一条（2026-10-15，v1.9.18 / build 80）
 
+这轮用户提了 8 条。四条是"服务端早就判完了，客户端没照做"（1/2/3/6），两条是视觉（4/5），
+一条是纯困惑（7），一条是新功能（8）。它们的落点分散在五层（CF Functions、CF 后台页、Windows 主进程、
+Windows 渲染层、Swift），所以逐条把判据落在哪一层、为什么是那一层写清楚。
 
+### 26.1 需求 1 + 3：`isEnabled` 只能有一个含义 —— 在不在播放路径里
 
+在改之前，Windows 的线路表和 Swift 的 `AggregatedSourceItem` 里 `isEnabled` 的含义是"这条源启用了吗"，
+而搜索/取流/歌词恰恰就是按"已启用"取列表 —— 于是服务端体检判完，客户端还是把不可播的源留在播放路径里。
+这一轮把它收成一句话，两端各一处：
 
+```js
+// primuse-win/src/main/cloud-sources.js —— 需求 1/3 的唯一判据
+function isLoadable(s) {
+  return Boolean(s) && s.enabled && !s.suggestDelete && (s.check && s.check.status) === 'ok';
+}
+```
 
+```swift
+// CloudMusicSources.swift: apply() —— 同一个判据的 Swift 抄本
+let loaded = dto.enabled && !(dto.suggestDelete ?? false) && check?.status == "ok"
+```
 
+`ok` 之外一律不加载，**包括 `no_sample`（未检出）** —— "我们没测出来"不等于"它能播"。
+但这一行照样落成一行：界面上必须答得出"云端 50 条，本机为什么只加载 14 条"，所以未加载的那些按结论
+分成三组胶囊（可用 / 未检出 / 不可播），组名旁边写理由。
+
+执行点收敛成一个：Windows 的 `enabledSources(sources[, platform])`、Swift 的 `AggregatedSourceStore`
+同名方法，搜索 / 解析直链 / 取歌词三条路径都只从这里拿列表（`checkable` 那一条见 §26.2，是另一件事）。
+Swift 侧多落两个字段：`loaded`（写进存档，界面和播放路径都读它）与 `isInPlaybackPath`（`loaded != false`）；
+可选是为了让改判据之前存的存档还能解码，没有这个字段的按"在播放路径里"处理。
+
+本轮现网（`check:live` 跑完，rev 339）：50 条源 · 服务端启用 17 · 体检 `ok` 14 · 本机加载 14 · 建议删除 33 · 盲区 3。
+
+### 26.2 需求 2：「未检出」是观测盲区，不是判决书 —— 两端各留一个出口
+
+先回答那句"啥意思？是没测试的意思吗"：**是**。`no_sample` 的确切含义是"这条线路所在的平台，
+我们手上没有一个可考的歌曲 id，所以播放这一跳压根没跑成" —— 既不是它死了，也不是它活着。
+现网那 3 条全都是咪咕的洛雪源：洛雪音源本身不声明 search，样本池（`SAMPLE_POOL`）里的 id 是靠
+会搜索的源顺手喂进去的，而 migu 平台一条会搜的都没有，池子就一直是空的。`check:live` 这一轮的原文：
+
+```
+⚠️  7/17 非常刀 (咪咕音乐)（lxjs）· no_sample · 0B
+      非常刀 · migu 拿不到可考的歌曲 id（样本池空，且这条源的同伴里没有一个会搜索），
+      暂无法验证；可在后台「样本池」给 migu 填一个真实歌曲 id 再复测
+```
+
+出口有三个，本轮把三个都补齐了：
+
+1. **CF 后台「样本池」卡片**（`action: "samples"` + `updateSamplePool()`）：按平台填真实歌曲 id，
+   `add`/`replace`/`clear` 三种模式，上限 24 个。填一次，同平台所有源下次体检都能用。
+2. **CF 后台单条「用歌曲 id 复测」**（`check-one` 多收一个 `rawId`）：跳过搜索直接验播放，
+   而且用过的 id 顺手落进池子 —— 盲区是被填平的，不是一次性绕过的。
+3. **客户端的「检测全部可用」不再跳过这些行**。这条是本轮才修的真 bug：上一轮为了让"不可播的不要加载"
+   把本地 `isEnabled` 改成了"在不在播放路径"，于是 `checkAll` 里那句 `filter(s => s.isEnabled)`
+   把最需要再验一次的未加载行（未检出 / 被判不可播）一并跳过了 —— 客户端自己的体检反而只测好源。
+   闸门换成服务端那一位：
+
+```js
+function checkable(s) {
+  if (!s || !s.id) return false;
+  return s.cloud ? s.enabledOnServer !== false : s.isEnabled !== false;
+}
+```
+
+Swift 侧同口径的 `AggregatedSourceItem.isCheckable`（云端行读 `enabledOnServer`，本机备用行读 `isEnabled`），
+`checkAllAvailable()` 的过滤器换成它，空列表时的提示语也从"没有已启用的线路"改成"没有服务端启用的线路"。
+服务端停用的不占流量，服务端开着而本机没加载的照测 —— 结论只用于显示，`isEnabled` 仍由清单说了算（决策③）。
+
+### 26.3 需求 4：灰色退休，以及一次真的"两端不同色"
+
+`Color.gray.opacity(0.2)` 那类灰底在八处出现（歌单、歌曲行、歌手/分类封面、首页卡、数据格……），
+本轮全部换成一个 CSS 令牌：
+
+```css
+--ph-hue: 268;
+--cover-placeholder: linear-gradient(140deg, hsl(var(--ph-hue) 82% 58%) 0%,
+                                     hsl(calc(var(--ph-hue) + 46) 78% 41%) 100%);
+```
+
+`--ph-hue` 由 `bgStyle(url, seed)` 按"这条叫什么名字"哈希出来（`COVER_HUES` 八档：348/22/45/96/158/300/330/68，
+都在高饱和、亮度够的区间），同名恒定同色、不同名岔开。Swift 侧 `CachedArtworkView.placeholderColors(for:)`
+是同一张表、同一对 HSB 色值（0.745/0.924 与 0.876/0.730 就是那两条 `hsl()` 换过来的）。
+
+音乐源那一档给的是"写真照片"：`source-cover.png` 打底 + 0.2 蒙层 + `box-shadow: inset 0 0 0 1.5px var(--ring)`，
+所以体检结论的颜色要断言 `boxShadow` 而不是 `backgroundColor` —— 背景是照片，不是色块。
+
+**这里抓到一次真漂移**：Swift 那份哈希原本写成 64 位 FNV-1a，Windows 用 32 位。中文标题在 UTF-16 下
+一个码元、在 UTF-8 下三个字节，两种迭代顺序 + 两种位宽，结果就是"同一张没封面的专辑在 iPhone 和 Windows
+上是两个颜色"，而这个断言当时看着是绿的（它只验"同 id 两次同色"，验不出跨端同色）。Swift 改成
+`UInt32 = 0x811c_9dc5` / `&* 0x0100_0193` over `identity.utf16`，与 JS 的 `Math.imul(...) >>> 0` 逐位一致；
+parity 里现在同时钉种子、素数、`UInt32`、`utf16` 四件事。
+
+### 26.4 需求 5：歌词 26px → 20px，当前行金色
+
+Windows 侧新增两个令牌（亮/暗各一对）：`--gold` = `#d99a2b` / `#e6c068`，`--gold-now` = `#b8860b` / `#ffd75e`；
+`.lyric-line { font-size: 20px; color: var(--gold) }`，当前行 `.now { color: var(--gold-now) }`，
+`lyricStyle()` 的缩放基数从 26 改 20。冒烟量的是计算值，不是类名：
+
+```
+lyricLook {"nowColor":"rgb(184, 134, 11)","idleColor":"rgb(217, 154, 43)","nowFontSize":20,
+           "nowGold":true,"idleGold":true,"anyGray":false}
+```
+
+iPhone 侧**没动**：那份歌词用的是 `appearance.primary`，从来不是灰；字号有滑块、颜色有自定义/渐变两档
+（`NowPlayingView.currentLyricStyle`）。按"UI 与功能忠于 iPhone"的既定原则，iPhone 是基准，改它得有理由，
+而这条需求的理由（字太大、颜色发灰）在 iPhone 上不成立。
+
+### 26.5 需求 6 + 7：后台那两个洞 —— 下拉里没有设备，以及令牌到底管什么
+
+「按设备覆盖」的下拉框当时是空的，因为列设备那个接口在管理令牌门禁后面，而界面上填文案这件事
+不该要求你先有令牌。修法不是放宽写权限，是**只读那条单独开门**：
+
+```js
+// functions/api/music-sources.js
+if (url.searchParams.get("devices") === "1") {
+  const ds = await env.DB.prepare("SELECT device_id, device_name, platform, playlist_count, song_count, updated_at …").all();
+  return ok({ devices: (ds && ds.results) || [], samplePool: await getSamples(env) }, "设备列表");
+}
+```
+
+这不算扩大暴露面：同一批 `device_id / device_name / 计数` 在 `/api/sync-playlists` 的 GET 上早就无条件给了。
+顺带把样本池也回在这份响应里，后台那张卡片不用为"看看池子里有什么"再掏一次令牌。
+
+需求 7 的答案（后台界面里也写了说明文字）：**管理令牌 = Pages Secret `SOURCES_ADMIN_TOKEN`**，
+它管住 `/api/music-sources` 的所有写动作（upsert / toggle / delete / reorder / import-js / check-one / samples /
+prefs / global-settings / deploy-runner / trust-runner）；GET 清单不要令牌，所以 iPhone/Windows 拉线路不受影响。
+令牌由站主自己在 Cloudflare 控制台设置（`wrangler secret put SOURCES_ADMIN_TOKEN`），页面上那个
+「记住令牌」只把它存进 `sessionStorage` —— 关掉标签页就没了，不写 localStorage、不写文件。
+
+### 26.6 需求 8：最小化之后，任务栏上方那一条歌词
+
+新增五个文件（`taskbar-lyric.js` / `preload-lyric.js` / `taskbar-lyric.{html,css,js}` + 一张照片封面），
+三条边界是这节的全部难度：
+
+- **可见性只在主进程判**，渲染层只推数据：`isEnabled && mainWindowHidden && !dismissed && playing && text.trim()`。
+  渲染层够不到 `mainWindowHidden`，把条件写两处就会各说各话。
+- 窗口参数：`frame` + `transparent` + `alwaysOnTop('floating')` + `skipTaskbar` + `focusable: false` +
+  `movable: false` + `backgroundThrottling: false` —— 最后一条是必需的，主窗口最小化后它得继续跟着歌词走。
+  位置贴 `screen.getPrimaryDisplay().workArea` 的下沿（宽 `min(560, w-80)`、高 44、离任务栏 6px），
+  冒烟量到 `{"x":680,"y":1102,"width":560,"height":44}` 并断言它整条落在工作区内（压任务栏就是事故）。
+- 用户点 ✕ 之后这一句不再出现，但**换歌必须自动复位**：歌曲身份 `title|artist` 在主进程算。
+  这里先埋过一个雷 —— 渲染层传来的 `songKey` 字段其实从没被 `sanitize()` 发出来，于是 ✕ 会一路抑制到下次
+  重启；改成主进程自己算，死字段删掉。
+
+设置里那一行「任务栏歌词」走的是同一个坑的另一面：store 的 `load()` 只合并顶层键，所以
+`settings.taskbarLyric` 缺失时必须两侧都按"开"处理（都用 `!== false`），否则第一次启动主进程关、界面显示开。
+开关是真的往返主进程（冒烟第 20 步点两下、比对 `api.taskbarLyric.status()`），
+第 33 步是真的 `mainWindow.minimize()`、真的拍到 `smoke-ui-taskbar.png`、恢复后再断言条子收走了。
+
+### 26.7 看守从 38 项涨到 65 项，其中两条是自己先红的
+
+`criteria-parity-check.js` 新增四组：加载闸门与 `checkable` 闸门（11）、色相表与 FNV 常数与八处占位规则
+（12）、金色令牌与 20px 基数（13）、任务栏条那五个可见条件与 IPC 通道名（14）。
+
+两条教训记在这儿，因为它们都是"看守自己先出问题"：
+
+- 组 5（清单字段对齐）红过一次，报的是"Swift DTO 少认字段"。真因不在这儿：本轮新加的
+  `return ok({ devices, samplePool })` 抢走了 `CF_MANIFEST` 里**第一个** `return ok(` 的位置，
+  锚点抓错块，只读出 2 个字段。我起初照着报错去给 Swift 加白名单 —— 那是把看守的 bug 当成产品的 bug 修。
+  现在锚点是"取包含 `contract:` 的那个 `return ok(` 块"，外加字段数下限（≥8），锚点再抓错就直接红得明显。
+- 组 11 里 `/enabledSources\(\)/` 从不匹配真签名 `enabledSources(sources, platform)` —— 一条永假的断言
+  比没有断言更糟。重写成对着真代码的形式，并要求调用点 ≥3。
+
+反向验证又做了一遍：把 `audioMinBytes` 改 4096、`ftyp` 偏移改 0、金色令牌删一个、`checkable` 换成
+`isEnabled`、hue 表少一档、可见条件少一条 —— 六个变异六个红，改回来 65/0，字节级还原核对过。
+
+### 26.8 这轮验证到哪、没到哪
+
+本机绿：`npm run smoke` 35 步 `errors: []`（含新的第 20 / 31 / 33 步）；parity 65/0；
+`cloud-sources-contract-test` 83/0；daoliyu 7/0；playlist-sync 11/11；preload-api 全链 ok；
+CF `test:offline` 78/0。CF 侧本轮重新部署（Pages `primuse-sync-server`），
+`verify:live` 18/0（老功能 `/api/sync-playlists` 没被动坏、ETag→304、网关搜索/解析/直链真音频、
+runner 解析、死源 409 都在），`check:live` 17 条里 14 条真出声、0 条判死、3 条盲区。
+
+没验证的三件，说在这儿而不是藏在结论里：
+1. **Swift 那四处改动只能等 CI 编译** —— 这台 Windows 机没有 Xcode/swiftc，静态看守能钉住判据文本，
+   钉不住类型检查（§24.7 那件事）。
+2. **打包后的 exe 行为**：冒烟跑的是 dev electron，任务栏条的 `alwaysOnTop('floating')` 在打包与
+   不同 Windows 版本下的表现没实测。
+3. macOS 真机（#5）依旧挂着。
+
+顺带两处仓库卫生：`primuse/vibe_images/`（1.1MB 的 ImageGen 草稿，躺在 Xcode 工程目录里）先 MD5 比对确认
+与已入库的 `source-cover.png` 是同一张，再删；以及一次自己造的乱 —— 用一个按 latin1 读写的脚本"顺手"把
+`CachedArtworkView.swift` 的行尾换回 LF，把整份文件的双重编码写了出来（45 行中文注释变 mojibake，
+diff 一度虚涨到 89/44）。做法是从 `git show HEAD` 取回原始字节、只把这一处 hunk 贴回去，
+diff 回到 48/3。教训：**含 CJK 的文件不许按 latin1 读写**，行尾要用 `git ls-files --eol` 和字节数核对，
+不是看 `git diff --stat` 像不像话。
