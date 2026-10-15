@@ -33,6 +33,14 @@
  *   node scripts/repoint-dead-songs.mjs --device=<deviceId> --apply
  *   # ③ 把同一次的决定贴回本机 App 的歌单存档（离线，不联网；App 必须先退出）
  *   node scripts/repoint-dead-songs.mjs --local-store=%APPDATA%/Primuse/primuse.json --map=<②产出的 -map.json>
+ *   # ③ 的"只看不动"演练（只读，App 开着也能跑）：把改了之后的前后对照打出来，一个字节都不写
+ *   node scripts/repoint-dead-songs.mjs --local-store=... --map=... --verify-local
+ *   # 把多轮 --apply 的决定并成一份（云端换源是可重跑的，本机那 35 条却要一次到位）
+ *   node scripts/repoint-dead-songs.mjs --merge-maps=<a-map.json,b-map.json,...> --merge-out=<合并后的 map>
+ *
+ * 为什么要合并：现网线路会漂（上一轮换成的 3 条，这一轮可能因为 `503` 换不到），所以第②步可以重跑；
+ * 但本机存档只有一份，每轮 map 只覆盖"那一轮真正动了的条目"。分开跑第③步会漏，
+ * 所以先合并再喂给第③步。合并时同一个 `platform:rawID` 出现两种不同决定 → 直接报错不合并。
  *
  * 为什么需要第 ③ 步：`下载歌单（从云端恢复）` 走的是 `store.playlists.mergeIncoming`，
  * 它按 id 去重地**加**歌，不会删本机已有的条目。所以只在云端换源，本机那 35 条 QQ 还在，
@@ -62,7 +70,61 @@ const MAX_CANDIDATES = Math.max(1, Number(flag('max-candidates', 3)) || 3);
 const ONLY = String(flag('only-playlist', '')).trim();
 const LOCAL_STORE = String(flag('local-store', '')).trim();
 const MAP_FILE = String(flag('map', '')).trim();
+// 第③步的"只看不动"版本：读存档、按 map 算一遍、把结果打出来，**一个字节都不写**。
+// 为什么要它：那道"App 必须先退出"的闸使得③没法预先演练，而用户只有退出 App 那 10 秒窗口 ——
+// 演练过一遍，真跑时就只剩"照抄一次"，不至于在他的窗口里现场 debug。（只读，所以闸不需要放行。）
+const VERIFY_LOCAL = argv.includes('--verify-local');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const MERGE = String(flag('merge-maps', '')).trim();
+const MERGE_OUT = String(flag('merge-out', '')).trim();
+if (MERGE) {
+  // ---- 合并多轮 --apply 的决定，喂给第③步（本机存档只有一次机会，得覆盖全部 QQ 条目）----
+  const files = MERGE.split(',').map((s) => s.trim()).filter(Boolean);
+  if (files.length < 2) {
+    console.error('--merge-maps 要至少两份 map（逗号分隔）；只有一份就直接把 --map= 给它就行');
+    process.exit(2);
+  }
+  const byKey = new Map(); // `platform:rawID` → {kind, rec, src}
+  const merged = { replacements: [], drops: [], dedupe: [] };
+  const head = { deviceId: '', deviceName: '', from: '', okPlatforms: [] };
+  const seenDedupe = new Set();
+  const put = (key, kind, rec, src) => {
+    const prev = byKey.get(key);
+    if (prev) {
+      const sameReplace = kind === 'replace' && prev.kind === 'replace'
+        && prev.rec.to.platform === rec.to.platform && String(prev.rec.to.rawID) === String(rec.to.rawID);
+      const sameDrop = kind === 'drop' && prev.kind === 'drop';
+      if (!sameReplace && !sameDrop) {
+        console.error(`★ 同一个条目 ${key} 在两遍里决定不一样：${prev.src} 里是 ${prev.kind}（${prev.rec.to ? `${prev.rec.to.platform}:${prev.rec.to.rawID}` : prev.rec.reason}），${src} 里是 ${kind}（${rec.to ? `${rec.to.platform}:${rec.to.rawID}` : rec.reason}）—— 不合并，先看是哪一遍读到了脏数据。`);
+        process.exit(1);
+      }
+      return; // 同样的决定出现两次（App 中途把条目回灌过云端），留第一条
+    }
+    byKey.set(key, { kind, rec, src });
+    (kind === 'replace' ? merged.replacements : merged.drops).push({ ...rec, fromMap: path.basename(src) });
+  };
+  files.forEach((f) => {
+    const m = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (!head.deviceId) Object.assign(head, { deviceId: m.deviceId, deviceName: m.deviceName, from: m.from, okPlatforms: m.okPlatforms || [] });
+    else if (head.deviceId !== m.deviceId) {
+      console.error(`★ ${f} 是另一台设备的 map（${m.deviceId} ≠ ${head.deviceId}），不合并`);
+      process.exit(1);
+    }
+    (m.replacements || []).forEach((r) => put(`${r.from.platform}:${r.from.rawID}`, 'replace', r, f));
+    (m.drops || []).forEach((d) => put(`${d.from.platform}:${d.from.rawID}`, 'drop', d, f));
+    (m.dedupe || []).forEach((d) => { if (!seenDedupe.has(d.key)) { seenDedupe.add(d.key); merged.dedupe.push(d); } });
+  });
+  const outFile = MERGE_OUT || path.join(HERE, '..', `.repoint-${(head.deviceId || 'dev').slice(0, 8)}-merged-${ts}-map.json`);
+  fs.writeFileSync(outFile, JSON.stringify({
+    ...head, at: new Date().toISOString(), apply: true, mergedFrom: files.map((f) => path.basename(f)),
+    replacements: merged.replacements, drops: merged.drops, dedupe: merged.dedupe,
+  }, null, 2), 'utf8');
+  console.log(`合并 ${files.length} 份决定：换 ${merged.replacements.length} 条 / 只删不补 ${merged.drops.length} 条 / 兜底去重 ${merged.dedupe.length} 条`);
+  console.log(`→ ${outFile}`);
+  console.log('下一步（App 先退出）：node scripts/repoint-dead-songs.mjs --local-store=%APPDATA%/Primuse/primuse.json --map=上面这份');
+  process.exit(0);
+}
 
 if (LOCAL_STORE) {
   // ---- ③ 本机模式：离线，只吃第 ② 步产出的 map，绝不联网、绝不碰云端 ----
@@ -75,15 +137,17 @@ if (LOCAL_STORE) {
     console.error(`找不到本机歌单存档：${storePath}`);
     process.exit(1);
   }
-  try {
-    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq Primuse.exe', '/NH'], { encoding: 'utf8' });
-    if (/Primuse\.exe/i.test(out)) {
-      console.error('Primuse.exe 正在运行。它把歌单握在内存里，下一次保存会盖掉我这轮的写入 ——\n'
-        + '请先在 App 里退出（我不会替你结束这个进程），再跑一次。');
-      process.exit(1);
+  if (!VERIFY_LOCAL) {
+    try {
+      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq Primuse.exe', '/NH'], { encoding: 'utf8' });
+      if (/Primuse\.exe/i.test(out)) {
+        console.error('Primuse.exe 正在运行。它把歌单握在内存里，下一次保存会盖掉我这轮的写入 ——\n'
+          + '请先在 App 里退出（我不会替你结束这个进程），再跑一次。');
+        process.exit(1);
+      }
+    } catch {
+      console.warn('（tasklist 用不了，没能确认 App 是否开着 —— 请自己确认它已退出）');
     }
-  } catch {
-    console.warn('（tasklist 用不了，没能确认 App 是否开着 —— 请自己确认它已退出）');
   }
   const map = JSON.parse(fs.readFileSync(MAP_FILE, 'utf8'));
   const from = String(map.from || FROM).toLowerCase();
@@ -141,15 +205,42 @@ if (LOCAL_STORE) {
     d.dropped.forEach(({ song: s, kept: k }) => console.log(`  本机去重：删掉 ${s.title} / ${s.artist}（与已有的 ${songKeyOf(k)} 同 id）`));
     return d.list;
   };
+  const localTally = (list) => {
+    const c = {};
+    (list || []).forEach((s) => {
+      const p = String(s.platform || (s.kind === 'local' ? '本地' : '?')).toLowerCase();
+      c[p] = (c[p] || 0) + 1;
+    });
+    return c;
+  };
+  // 先照一张"改之前"的相，验证模式要打的是前后对照
+  const snap = (j.playlists || []).map((pl) => ({ name: pl.name, before: localTally(pl.songs), beforeCount: (pl.songs || []).length }));
   (j.playlists || []).forEach((pl) => {
     pl.songs = patch(Array.isArray(pl.songs) ? pl.songs : []);
     pl.updatedAt = Date.now();
   });
   if (Array.isArray(j.favorites)) j.favorites = patch(j.favorites);
+  // 本机这一侧也数一遍同 id 重复：第③步自己不该造出重复（上一轮的事故形状）
+  const localDupes = (j.playlists || []).reduce((n, pl) => {
+    const seen = new Set();
+    return n + (pl.songs || []).reduce((m, s) => {
+      const k = songKeyOf(s);
+      if (!k) return m;
+      return seen.has(k) ? m + 1 : (seen.add(k), m);
+    }, 0);
+  }, 0);
+  if (VERIFY_LOCAL) {
+    console.log(`[只看不写] ${storePath} · map=${path.basename(MAP_FILE)}`);
+    (j.playlists || []).forEach((pl, i) => console.log(`  - ${pl.name}: ${JSON.stringify(snap[i].before)}（${snap[i].beforeCount}首） → ${JSON.stringify(localTally(pl.songs))}（${(pl.songs || []).length}首）`));
+    console.log(`  预计：换成 ${replaced} 条、删掉 ${dropped} 条、同 id 去重 ${deduped} 条、本轮没动的 QQ 条目 ${left} 条 · 改完同 id 重复 ${localDupes} 条`);
+    if (localDupes) console.error('★ 演练结果里有同 id 重复，别真跑 —— 先查 map。');
+    console.log(localDupes ? '（没写任何东西）' : '（没写任何东西。这份 map 可以放心用。）');
+    process.exit(localDupes ? 1 : 0);
+  }
   const preImage = `${storePath}.before-repoint-${ts}`;
   fs.writeFileSync(preImage, before, 'utf8');
   fs.writeFileSync(storePath, JSON.stringify(j, null, 2), 'utf8');
-  console.log(`本机存档：换成 ${replaced} 条、删掉 ${dropped} 条、同 id 去重 ${deduped} 条、本轮没动的 QQ 条目 ${left} 条（非 QQ 的条目不参与统计）`);
+  console.log(`本机存档：换成 ${replaced} 条、删掉 ${dropped} 条、同 id 去重 ${deduped} 条、本轮没动的 QQ 条目 ${left} 条（非 QQ 的条目不参与统计）· 写后同 id 重复 ${localDupes} 条`);
   const mapDedupe = (map.dedupe || []);
   if (mapDedupe.length) console.log(`第②步在云端还删了 ${mapDedupe.length} 条"与本轮无关"的同 id 重复：`);
   mapDedupe.forEach((d) => console.log(`  - [${d.playlist}] ${d.removedTitle} / ${d.removedArtist} = ${d.key}（留下的是 ${d.keptTitle} / ${d.keptArtist}）`));
