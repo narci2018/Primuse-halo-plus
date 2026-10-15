@@ -182,8 +182,21 @@ public struct AggregatedSourceItem: Identifiable, Codable, Sendable, Hashable {
     public var verdict: AggregatedSourceVerdict?
     /// 服务端体检判死后的删除建议（需求 2 的后半句）。
     public var suggestDelete: Bool?
+    /// 这条源在不在本机的播放路径里（需求 1/3）。落清单时算一次，判据与 Windows 侧
+    /// `isLoadable()` 一字不差：`enabled && !suggestDelete && 体检结论 == ok`。
+    /// 可选是为了让老存档还能解码 —— 没有这个字段的按"在"处理。
+    public var loaded: Bool?
+    /// 服务端那一侧的启用位（清单里的 `enabled`）。`isEnabled` 已经被"在不在播放路径里"占了，
+    /// 「检测全部可用」需要的是另一位：**服务端还开着的才值得占流量**，
+    /// 服务端开着但本机没加载的那些（未检出 / 被判不可播）恰恰是最该再验一次的（需求 2）。
+    /// 可选同样是为了老存档能解码 —— 没有这个字段的按"开着"处理。
+    public var enabledOnServer: Bool?
 
     public var isCloudManaged: Bool { cloudSourced == true }
+    /// 界面与搜索/取流都只看这一个：`loaded == false` 的云端线路只负责被看见，不参与播放。
+    public var isInPlaybackPath: Bool { loaded != false }
+    /// 本机体检该不该过这一条（与 Windows `checkable()` 同一口径）。
+    public var isCheckable: Bool { isCloudManaged ? enabledOnServer != false : isEnabled }
 
     public init(
         id: String = UUID().uuidString,
@@ -199,7 +212,9 @@ public struct AggregatedSourceItem: Identifiable, Codable, Sendable, Hashable {
         quality: String? = nil,
         scriptHash: String? = nil,
         verdict: AggregatedSourceVerdict? = nil,
-        suggestDelete: Bool? = nil
+        suggestDelete: Bool? = nil,
+        loaded: Bool? = nil,
+        enabledOnServer: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -215,6 +230,8 @@ public struct AggregatedSourceItem: Identifiable, Codable, Sendable, Hashable {
         self.scriptHash = scriptHash
         self.verdict = verdict
         self.suggestDelete = suggestDelete
+        self.loaded = loaded
+        self.enabledOnServer = enabledOnServer
     }
 }
 

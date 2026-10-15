@@ -21,6 +21,8 @@ public struct AggregatedSourcesSettingsView: View {
 
     private var cloudManagedCount: Int { store.sources.filter { $0.isCloudManaged }.count }
     private var localCount: Int { store.sources.filter { !$0.isCloudManaged }.count }
+    /// 真的在播放路径里的那几条（需求 1/3）：搜索、取流、歌词都只走它们。
+    private var loadedCount: Int { store.sources.filter { $0.isInPlaybackPath }.count }
 
     public var body: some View {
         Form {
@@ -163,11 +165,11 @@ public struct AggregatedSourcesSettingsView: View {
             }
         } header: {
             HStack {
-                Text("音源线路（云端 \(cloudManagedCount) · 本机 \(localCount)）")
+                Text("音源线路（云端 \(cloudManagedCount) · 本机 \(localCount) · 已加载 \(loadedCount)）")
                 Spacer()
             }
         } footer: {
-            Text("按「能不能出声」上色：绿色可播，灰色是观测盲区（未检出 —— 我们没测出来，不等于它坏了），红色不可播并附删除建议。云端线路只读，本机的左右滑动可删除。")
+            Text("按「能不能出声」上色：绿色可播，灰色是观测盲区（未检出 —— 我们没测出来，不等于它坏了），红色不可播并附删除建议。带「未加载」的只在这里给一个说法，不参与搜索、不取流 —— 云端接管后本机的左右滑动只对本机线路有效。")
                 .font(.footnote)
         }
     }
@@ -228,6 +230,16 @@ public struct AggregatedSourcesSettingsView: View {
 
             VStack(alignment: .trailing, spacing: 4) {
                 verdictBadge(verdict)
+                // 需求 1/3：这行只是"看得见"，没在播放路径里 —— 得说清是哪一种原因，
+                // 否则用户只会看到"云端 50 条，我这边搜出来 14 条"，以为丢了东西。
+                if source.isCloudManaged && !source.isInPlaybackPath {
+                    Text(notLoadedReason(source, verdict: verdict))
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+                }
                 if source.suggestDelete == true || verdict.tone == .dead {
                     Text("建议删除")
                         .font(.system(size: 9, weight: .bold))
@@ -264,6 +276,14 @@ public struct AggregatedSourcesSettingsView: View {
         let who = verdict.origin == .local ? "本机实测" : "服务端结论"
         let bytes = verdict.bytes > 0 ? " · \(verdict.bytes)B" : ""
         return "\(verdict.detail)\(bytes) · \(who)".trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 「未加载」后面那句原因 —— 与 Windows 侧 `loadReason()` 同一套分档：
+    /// 不可播 / 未检出（我们没测成）/ 本机测出声了但服务端还没确认。
+    private func notLoadedReason(_ source: AggregatedSourceItem, verdict: AggregatedSourceVerdict) -> String {
+        if source.suggestDelete == true || verdict.tone == .dead { return "未加载 · 不可播" }
+        if verdict.tone == .blind { return "未加载 · 未检出" }
+        return "未加载 · 待服务端确认"
     }
 
     /// 不是 `@ViewBuilder`：`ViewBuilder` 会把函数体里的 `switch` 当成"条件视图"去 buildExpression，

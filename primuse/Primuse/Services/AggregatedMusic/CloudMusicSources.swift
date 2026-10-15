@@ -374,18 +374,26 @@ public final class CloudMusicSources {
     }
 
     /// 清单落成线路（只替换云端管下来的那些，保留本机手工加的备用线路）。
+    ///
+    /// 需求 1 + 3：**不可播放的源不要在 app 端加载**。`isEnabled` 在这份表里只有一个含义
+    /// —— 这条源在不在播放路径里（搜索、取流、歌词都只走已启用的线路），所以判据必须一次定死：
+    /// 服务端说 enabled、没被判死、而且体检结论真的是 `ok`。
+    /// 服务端自己那位怎么标（`enabledOnServer`）是它的事，本机不拿它当播放依据。
+    /// 未检出（no_sample / unchecked / runner_missing…）同样不进播放路径 ——
+    /// "我们没测出来"不等于"它能播"，但它照样落成一行，界面上答得出"为什么没加载"。
     private func apply(_ payload: CloudManifestDTO) {
         var mapped: [AggregatedSourceItem] = []
         for dto in payload.sources where dto.isUsableLocally {
             let check = dto.check
             let verdict = check.map { AggregatedSourceVerdict(status: $0.status, detail: $0.detail ?? "", bytes: $0.bytes ?? 0, origin: .server) }
+            let loaded = dto.enabled && !(dto.suggestDelete ?? false) && check?.status == "ok"
             mapped.append(AggregatedSourceItem(
                 id: dto.id,
                 name: dto.name,
                 platform: dto.platformValue,
                 protocolType: dto.protocolType,
                 baseURL: dto.baseURL ?? "",
-                isEnabled: dto.enabled,
+                isEnabled: loaded,
                 // 清单的 priority 是"越快越优先"的评分，直接沿用；洛雪源给 5 之类的低分，
                 // 让本机的 HTTP 线路先试，网关只在 HTTP 全挂时才顶上（省一次跨区往返）。
                 priority: dto.priority ?? 0,
@@ -395,7 +403,10 @@ public final class CloudMusicSources {
                 quality: dto.quality ?? "320k",
                 scriptHash: dto.scriptHash,
                 verdict: verdict,
-                suggestDelete: dto.suggestDelete ?? false
+                suggestDelete: dto.suggestDelete ?? false,
+                loaded: loaded,
+                // 服务端那位单独留着：本机体检的闸门是它，不是 isEnabled（后者已被"在不在播放路径"占了）。
+                enabledOnServer: dto.enabled
             ))
         }
         store.applyCloudSources(mapped)
@@ -470,16 +481,20 @@ public final class CloudMusicSources {
     /// 万一以后下发了，这里跟着换成清单的值即可。
     public var probeKeyword: String { "晴天" }
 
-    /// 逐条过一遍已启用的线路：搜索 → 解析直链 → Range 真取 64KB 字节 → 字节层判定。
+    /// 逐条过一遍线路表：搜索 → 解析直链 → Range 真取 64KB 字节 → 字节层判定。
     ///
     /// 与 Windows 侧同一条边界：**本机的结论只上报显示，不改 isEnabled** ——
     /// 停用与删除建议是 CF 后台的权力（决策③：音源增删改只在 CF 管理，App 侧只读 + 刷新）。
+    /// 这里也**不再按 isEnabled 过滤**：现在 isEnabled 就是"在不在播放路径"，而最需要本机
+    /// 再验一次的恰恰是那些没进播放路径的（未检出 / 被判不可播）。
     /// 并发压到 4，第三方站点都可能慢。
     public func checkAllAvailable() async {
         guard !isCheckingAvailability else { return }
-        let list = store.sources.filter { $0.isEnabled }
+        // 闸门是「服务端还开着」而不是「本机已加载」：未检出 / 被判不可播的那些恰恰最需要再验一次
+        //（需求 2），而服务端已经停用的不占流量。与 Windows 侧 `checkable()` 同一口径。
+        let list = store.sources.filter { !$0.id.isEmpty && $0.isCheckable }
         guard !list.isEmpty else {
-            lastError = "没有已启用的线路可检测"
+            lastError = "没有服务端启用的线路可检测"
             return
         }
         isCheckingAvailability = true

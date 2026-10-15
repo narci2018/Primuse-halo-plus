@@ -514,15 +514,60 @@ struct CachedArtworkView: View {
             RoundedRectangle(cornerRadius: cornerRadius)
                 .fill(
                     LinearGradient(
-                        colors: [Color.gray.opacity(0.2), Color.gray.opacity(0.3)],
+                        colors: placeholderColors,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
             Image(systemName: placeholderIcon)
                 .font(.system(size: (size ?? 200) * 0.25))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.92))
+                .shadow(color: .black.opacity(0.28), radius: 1.5, y: 1)
         }
+    }
+
+    /// 占位封面的身份串：优先用这张图自己的 ID，一个都没有时退回占位图标名。
+    /// 顺序与 `cacheKey` 一致（album → artist → song → coverRef），
+    /// 所以同一行列表在两台设备上取到的是同一个身份。
+    private var placeholderIdentity: String {
+        if let albumID { return "album:\(albumID)" }
+        if let artistID { return "artist:\(artistID)" }
+        if let songID { return "song:\(songID)" }
+        if let coverRef, !coverRef.isEmpty { return "ref:\(coverRef)" }
+        return "placeholder:\(placeholderIcon)"
+    }
+
+    /// 八档色相（度数）—— 与 Windows 端 app.js 的 `COVER_HUES` 同一张表。
+    /// 不是随便挑的八种：都在饱和度高、亮度够的区间里，缩略图并排时各有身份却不刺眼。
+    static let placeholderHueDegrees: [Double] = [348, 22, 45, 96, 158, 300, 330, 68]
+
+    /// 由身份哈希出渐变的两个色。
+    ///
+    /// 哈希刻意写成 **32 位 FNV-1a over UTF-16**，和 Windows 端 `hueOf()` 逐位一致：
+    /// 种子 0x811c9dc5（32 位 FNV 的 offset basis）、素数 0x01000193、每次乘完只留低 32 位
+    /// —— UInt32 的 `&*` 与 JS 的 `Math.imul(...) >>> 0` 是同一件事。
+    /// 两处都不能"顺手改"：迭代 UTF-8（中文三个字节）或换成 64 位 FNV，
+    /// 结论都会变成"同一张专辑在 iPhone 和 Windows 上是两个颜色"，而这类漂移没人会当 bug 报。
+    /// 色值取的是 styles.css 里 `hsl(var(--ph-hue) 82% 58%)` / `hsl(+46deg 78% 41%)`
+    /// 换成 HSB 的同一对颜色。
+    static func placeholderColors(for identity: String) -> [Color] {
+        var hash: UInt32 = 0x811c_9dc5
+        for unit in identity.utf16 {
+            hash ^= UInt32(unit)
+            hash = hash &* 0x0100_0193
+        }
+        let hues = placeholderHueDegrees
+        let index = Int(hash % UInt32(hues.count))
+        let startHue = hues[index] / 360.0
+        let endHue = (hues[index] + 46).truncatingRemainder(dividingBy: 360) / 360.0
+        return [
+            Color(hue: startHue, saturation: 0.745, brightness: 0.924),
+            Color(hue: endHue, saturation: 0.876, brightness: 0.730),
+        ]
+    }
+
+    private var placeholderColors: [Color] {
+        Self.placeholderColors(for: placeholderIdentity)
     }
 
     /// Composite cache key — different sized views share the underlying disk
