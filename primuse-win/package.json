@@ -1,8 +1,8 @@
 {
   "name": "primuse-win",
   "productName": "Primuse",
-  "version": "1.9.20",
-  "buildNumber": "82",
+  "version": "1.9.21",
+  "buildNumber": "83",
   "description": "Primuse 桌面版（Windows 11）— 与 iPhone/macOS 版同一套音乐源契约与歌单同步契约，App 内无账号体系",
   "main": "src/main/main.js",
   "author": "Welape (Primuse) · narci2018 fork",
