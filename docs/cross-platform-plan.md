@@ -1709,3 +1709,147 @@ iPhone 一直是这四格，只有 macOS 还是最早那套"自绘标题栏 + �
 静态看守钉得住判据文本钉不住类型检查）；macOS 真机（任务 #5）依旧挂着，四格外壳的手感——
 尤其是"再点一次本格回根页"和资料库分区钻进去之后返回键出不出——只有真机能判。
 
+## 28. 四格壳的收尾：Mac 上的页名、详情页的返回，和两道会误报的冒烟门（2026-10-15，v1.9.20 / build 82）
+
+v1.9.19 的三端 CI 全绿（macOS 38708382230 / iOS 38708382050 / Windows，Release 五个产物齐）。
+但四格壳换完之后，Mac 的资料库那一格其实是**半成品**：内容真的换成 iPhone 那份 `LibraryView` 了，
+可它的名字和它下面三层的返回都没跟过来。这一节写这两处补完，再写同轮里挖出来的两个冒烟根因 ——
+那两个都不是产品 bug，而是"断言方式本身会误报"，留着比产品 bug 更危险：一个每次都可能红的门，
+最后只会让人学着忽略它。
+
+### 28.1 资料库在 Mac 上没有页名：`.navigationTitle` 落不到地上
+
+四格壳把系统工具栏整条藏了（`.toolbar(.hidden, for: .windowToolbar)`，§27.4）。iPhone 那边
+`LibraryView` 的 `.navigationTitle("library_title")` 由系统导航栏渲染，Mac 这边导航栏根本没落脚处 ——
+于是那一格里 250 首歌、83 张专辑摆在屏上，头顶一个字都没有。Windows 用 `page-title` 那个 div 写死了标题，
+所以三端只有 Mac 缺一行字。
+
+不能在共享视图里加 `#if` 画一条 bar 完事：那条 bar 的字号、左对齐、下分割线都得跟 Mac 自己的
+`PMColor` / `PMSpace` 走，而这些常量只在 `PrimuseTheme.swift` 的 `#if os(macOS)` 分支里存在
+（整个文件从第 1 行到第 1822 行都在这个条件编译里）。做法是新加一个 Mac-only 的文件
+`Primuse/Views/Mac/MacLibraryPageTitle.swift`（1790 字节），整份包在 `#if os(macOS)` 里：
+28pt bold、`tracking(-0.4)`、`.padding(.horizontal, 16)`（对齐 `sectionHeader` 与分类行的水平内边距），
+底色 `PMColor.bg`，底部 0.5px `PMColor.divider`。
+
+`LibraryView` 侧用 `.safeAreaInset(edge: .top)` 挂它，两处：hub（`rootSection?.title ?? "library_title"`）
+和每个分区详情页（`section.title`）。`LibrarySection.title` 本来就是 `LocalizedStringKey`，
+所以标题继续走本地化，不引入新的 key。两处都单独包 `#if os(macOS)`，iPhone 一行代码都没多。
+
+**这里有一个只有静态看守能拦住的坑**：如果调用点忘了包 `#if os(macOS)`，Mac 编得过、iOS 编不过 ——
+而 `build-ipa.yml` 的 `on.push.paths` 是 `primuse/**`，所以每次 push 都会真跑一次 iOS 编译。
+看守第 15 组新增的那条，读的是**调用点上文**：对每个 `MacLibraryPageTitle(` 出现的位置，回找它前面最近的
+`#if os(macOS)` 和 `#endif`，要求"`#endif` 在更前面"（即那个 `#if` 不在任何 `#endif` 之前关闭过），
+两个调用点都得满足；外加新文件本身 `/^#if os\(macOS\)/`。另外专门有一个变异是"把新文件的
+`#if os(macOS)` 删掉"，看守确实红。
+
+### 28.2 从资料库点进专辑 / 艺术家 / 歌单，Mac 上没返回可点
+
+`LibraryView` 内部是 `NavigationStack` + `navigationPath`，而 Mac 主窗口的标题栏返回（§27.4 那支
+`chevron.left`）只看外层的 `MacRoute`，看不见这条内层栈。iPhone 有系统返回按钮，Mac 两边都没有 ——
+用户钻到专辑详情就只能靠"再点一次资料库那格回根页"，把浏览位置整个丢掉。
+
+修法是三个详情页本来就有的那个可选回调：`AlbumDetailView` / `ArtistDetailView` / `PlaylistDetailView`
+各收一个 `onMacInlineBack: (() -> Void)?`，非 nil 时 `MacLibraryHeader` 就画一条页内返回（这一条在
+§27 之前已经给"从歌单列表进详情"那条路用过了）。这次在 `LibraryView` 里补一个成员把它们串起来：
+
+```swift
+private var detailPop: (() -> Void)? {
+    #if os(macOS)
+    return { guard !navigationPath.isEmpty else { return }; navigationPath.removeLast() }
+    #else
+    return nil          // iPhone 用系统返回，这里必须是 nil，否则两条返回同时出现
+    #endif
+}
+```
+
+三处 push 统一传 `onMacInlineBack: detailPop`。看守钉的是"传了三处 + `detailPop` 是可选闭包 +
+`removeLast()` 在 + `#if/#else` 两分支各返回闭包与 nil"，并且做了一次模式匹配
+`/#if os\(macOS\)[\s\S]{0,180}?return \{[\s\S]{0,160}?#else[\s\S]{0,60}?return nil/` —— 只查 `detailPop`
+存在是不够的，iOS 侧漏了 `return nil` 会编译失败，而那是 CI 才报的错。
+
+顺带把 §27.8 那句"只有真机能判"收了一半：**进三层的返回现在在代码上是必需的**，真机要验的只剩手感。
+
+### 28.3 冒烟根因一：任务栏那条歌词时红时绿 —— 注射的 payload 会被下一次状态推送打回
+
+第 33 步「最小化后任务栏上方真长出单行歌词」在 v1.9.18/19 之间红过几次，§27.8 那条"没定论的 flake"
+大概率就是它（或下面那条门），本轮定了性。**产品逻辑没错，冒烟喂数据的方式错了**：
+
+主进程 `shouldShow()` 读的是 `lastPayload.playing`，而渲染层的 `pushTaskbarLyric()` 是拿
+`state.playing` 与 `state.lyricRows[state.lyricIndex]` **现算**的 —— 换歌、歌词行推进、暂停都会喊它一声。
+老冒烟写的是 `api.taskbarLyric.push({ playing: true, text: '第 7 行冒烟歌词', … })`，推完就走。可
+`<audio>` 并没真出声（`state.playing` 仍是 `false`），最小化那一秒里任意一次自动推送都把主进程那份
+打回 `playing:false, text:""`，窗口按判据就该收着 —— 冒烟看到的是"条根本没露出来"。
+
+现在改成喂**状态**：没有队列就放一个内存探针条目、没有歌词就现造 16 行 LRC，`state.playing = true`、
+`state.lyricIndex = 6`，然后 `pushTaskbarLyric(true)`（force 绕带去重）。回读时断言的不只是文本，
+而是"主进程手里那份是渲染层当前真实状态推出来的"：
+
+```js
+received: p.text === '第 7 行冒烟歌词' && p.playing === true && p.hasLyrics === true,
+```
+
+改过的 `state.playing` 由 `smokeStripBackup` 记下，`smokePlaylistCleanup()` 开头还原（`lyricIndex` 不还 ——
+下面几行本来就要把歌词整套清掉）。看守第 14 组新增一条，读的是**函数体**：
+`smokeTaskbarStripPush` 里必须有 `state.playing = true` 与 `pushTaskbarLyric(true)`、必须**没有**
+`api.taskbarLyric.push(`，且 `smokePlaylistCleanup` 开头 300 字符内出现 `smokeStripBackup.playing`。
+
+### 28.4 冒烟根因二：「渲染层自检」的封面门只认一种过法
+
+需求 4 之后那一步断言的是"至少一条结果带封面 URL，且那张真解出尺寸"。但上游给不给 URL 不由我们决定 ——
+公开线路经常一条都不给（酷狗 meting 的 `type=pic` 直接返回空 body），于是这一步红在
+"渲染层自检失败"上，报的却是没坏的东西。本轮那两次 FAIL 就是这个。
+
+现在的门两种过法都在，`main.js`：
+
+```js
+const coverLoadsOk = Object.values(ui.coverLoads || {}).some((v) => String(v).startsWith('ok:'));
+const noUpstreamArt = (ui.coverSamples || []).length === 0;
+const placeholderOk = noUpstreamArt && ui.coverTiles > 0
+  && (ui.placeholderHues || 0) >= 2 && ui.grayCoverTiles === 0;
+// …(ui.ready && ui.resultCount > 0 && (coverLoadsOk || placeholderOk))
+```
+
+B 侧验的是需求 4 本尊：满屏必须是彩色占位。渲染层为此多上报三项，量的是**结果不是属性**
+（§19 那条老规矩）：`coverTiles` 是 `.song-cover` 的个数，`placeholderHues` 是内联 `--ph-hue` 去重后的种数，
+`grayCoverTiles` 是 `getComputedStyle(n).backgroundImage` 为空或 `none` 的格子数 —— 灰块必须 0。
+
+本轮现网（三次冒烟全绿）：`{"coverSamples":["netease"],"coverLoads":{"netease":"ok:300x300"},
+"coverTiles":24,"placeholderHues":3,"grayCoverTiles":0}` —— 走的是 A 侧，而 B 侧的数字同时在看板上，
+无图批次来的时候不用改代码。
+
+### 28.5 看守 89 → 91 → 93，以及两次"变异不红"都是变异脚本自己的错
+
+`mac-shell-mutation-check.cjs` 从 11 个变异涨到 15 个（新增：新文件掉 `#if os(macOS)`、hub 的页名整条撤掉、
+分区页的页名换成 `EmptyView()`、`detailPop` 的 iOS 分支不再返回 nil），15/15 会红，`finally` 字节级还原后
+再跑一遍看守确认回绿。
+
+封面那道门单独做了一轮，五个变异里有一个**第一次不红**：`placeholderHues: phHues.size` 改成
+`placeholderHues: 0`。看守当时只写 `/placeholderHues:/.test(WIN_APP)` —— 键还在就过，而"恒等于 0"恰恰
+把 B 侧那条路焊死了（无图批次永远达不到 ≥2）。这不是断言太严，是断言没断到"数是量出来的"。
+改成 `/placeholderHues: phHues\.size/`，并把主进程那半边的 `>= 2` 也钉上，五个变异才全红：
+B 侧整个不看占位、灰块没人管、无图批次不再单独识别、渲染层不再数灰块、渲染层不再数色相种数。
+
+同一类错在这轮出现三次，都是**工具在骗人**而不是产品在骗人：
+- 注释掉 `state.playing = true`（前面加 `//`）时变异"不红" —— 子串还在，得整行删掉才是真变异。
+- 整文件 `String.replace('  pushTaskbarLyric(true);', …)` 命中了 2049/2055/4653 里的那一次，
+  目标函数根本没被改到 —— 必须先把函数体切出来（从声明到最近的 `\n}\n`）再在体内替换。
+- §26.7 与 §27.7 那两条（锚点抓错块 / 括号种类不匹配）是同一件事的更早版本。
+
+### 28.6 这轮验证到哪、没到哪
+
+本机绿：`npm run smoke` 连跑三次 `RESULT ok`（35 步，含第 33 步任务栏条与「渲染层自检」两道门），
+parity 93/0，改动文件严格 UTF-8 与行尾核对（无 CR、`Buffer.from(s,'utf8')` 与原字节相等）。
+发版四处同步照 §27.7 那条规矩：`project.yml` 的 `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`、
+`primuse-win/package.json` 的 `version`/`buildNumber`、`package-lock.json` 两处 → **v1.9.20 / build 82**。
+
+没验证的：Swift 这一轮又动了 2 个文件（1 新增 1 修改），仍是**只有 CI 能编译**，静态看守钉文本钉不住类型；
+iOS 侧能不能编过要看 `build-ipa.yml`（`primuse/**` 的 push 触发会跑，本轮的 Swift 改动随 `7709d19` 已 push，
+v1.9.20 的 tag 构建再确认一次）；macOS 真机（任务 #5）挂着，本轮把"进三层没有返回"从
+"真机才知道"变成"代码上已经补了"，剩下的是页名与返回的视觉对齐。
+
+还有一件已识别、本轮没做的：老存档里持久化下来的 Mac 路由 `"section:*"` 走 `route(for:)` 回到
+`MacDetailContainer` 那套 Mac-only 的 `.section(...)` 视图，而不是 iPhone 的 `LibraryView` —— 与新页名
+那条路是两套渲染。 candidate 修法是把它们映射成 `.library` + `libraryDeepLink = .section(section)`，
+让"资料库"在 Mac 上永远只有一个入口。
+
+
