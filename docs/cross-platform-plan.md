@@ -1605,3 +1605,107 @@ runner 解析、死源 409 都在），`check:live` 17 条里 14 条真出声、
 diff 一度虚涨到 89/44）。做法是从 `git show HEAD` 取回原始字节、只把这一处 hunk 贴回去，
 diff 回到 48/3。教训：**含 CJK 的文件不许按 latin1 读写**，行尾要用 `git ls-files --eol` 和字节数核对，
 不是看 `git diff --stat` 像不像话。
+
+## 27. macOS 的外壳换成 iPhone 那四格（2026-10-15，v1.9.19 / build 81）
+
+### 27.1 起因：问一句"三端界面一致吗"，答案是差三处
+
+用户问"当前 iPhone 和 macOS 版界面跟 win 版本一致吗"。三端逐屏比下来差的不是零碎样式，是三件结构性的事：
+歌词的字号与颜色、还有灰底封面的残留、以及 **macOS 主窗口压根不是四 tab 结构**。三项全选，
+前两项落在 §26 之后的那两个提交里（金色 20px 四边平权、Apple 侧剩余灰封面换成按身份取色的彩色），
+第三项就是这一节。
+
+第三项为什么最重：Windows 在 §21 已经按 iPhone 的 `TabView` 重建成"首页 / 资料库 / 搜索 / 设置"四格，
+iPhone 一直是这四格，只有 macOS 还是最早那套"自绘标题栏 + 左栏 + 详情"的三栏壳。
+用户从 Windows 或 iPhone 切到 Mac，看到的第一个东西就不是同一个东西。
+
+### 27.2 拆了什么、立了什么
+
+- 删：`Primuse/Views/Mac/MacSidebar.swift`（686 行）。它把资料库的十个分区、全部歌单、智能歌单、
+  音乐源列表、五个工具全摊在最外层导航里 —— 这些内容在另外两端都不在最外层。
+- 立：`Primuse/Views/Mac/MacTabBar.swift`（4637 字节 / 124 行，`#if os(macOS)`）。四格
+  `MacTab{home, library, search, settings}`，图标 `house.fill / books.vertical / magnifyingglass / gearshape`
+  与 iPhone `Tab(..., systemImage:)`、Windows `TABS` 同一组；`MacRoute.tab` 负责"当前页属于哪一格"，
+  `isTabRoot` 负责"这页是不是本格的根"。
+- 高：`PMSize.tabBar = 52`（iPhone 系统 tab bar 49，Windows `--tab-h: 56`；Mac 窗口没有底部安全区，
+  取中间值让"图标 17 + 间距 3 + 标题 10.5"这一列的比例跟 iPhone 对齐）。
+- `MacContentView` 117/207：正文那一块从"侧栏 + 详情"变成"tab 上方一整块"，迷你条与四格一起挂在
+  `.safeAreaInset(edge: .bottom)` 里，顺序仍是迷你条在上、tab 贴窗口底边。
+- `PrimuseApp` 的 `.commands` 里删掉 `SidebarCommands()` —— 没有侧栏了，那条"显示/隐藏侧栏"就是菜单里
+  一条点不动的 dead item。品牌标识（`BrandMonogram` + 产品名）原来画在侧栏顶部，侧栏没了就移到标题栏，
+  窗口按钮右边。
+
+### 27.3 目的地各回各位
+
+| 侧栏原来的东西 | 现在在哪儿 | 跟哪一端对齐 |
+| --- | --- | --- |
+| 十个分区（歌曲/专辑/艺术家/歌单/电台/统计…） | 「资料库」tab 内，iPhone 那份 `LibraryView` 的分类条 | iPhone / Windows |
+| 全部歌单、智能歌单入口 | `LibraryView` → 歌单分区，`PlaylistListView` 自己的 ＋ 菜单 | iPhone / Windows |
+| 音乐源管理 | 「设置」tab 页脚 `manage_sources` 行 → `MacRoute.sources` → `MacSourcesView`；标题栏 ＋ 号同一去处 | iPhone（设置→音乐源管理）/ Windows |
+| 聚合音乐源设置 | 「设置」tab 页脚 → `MacRoute.aggregatedSources` → 与 iPhone 同一个 `AggregatedSourcesSettingsView` | iPhone（Mac 以前**没有任何入口**能打开它） |
+| 五个工具（缓存同步 / 设备传输 / 歌词转换 / 重复清理 / Scrobble） | 「设置」tab 页脚，点击仍是 `.sheet` 面板 | iPhone / Windows（工具在设置里，用完即关） |
+| 首页那一格的云端文案 | `MacTabBar` 的 `@AppStorage(HomeTitle.defaultsKey)`（原来只有侧栏读它） | 三端同源 |
+
+### 27.4 macOS 独有的坑：窗口工具栏是隐藏的，返回必须外壳补
+
+`MacDetailContainer` 里有 `.toolbar(.hidden, for: .windowToolbar)`（不然子视图的 `.toolbar/.searchable`
+会在自绘标题栏之上再叠出第二条系统 bar）。代价是 **嵌套 `NavigationStack` 里钻进去就没有返回按钮**。
+四 tab 外壳又没有侧栏可以"退回去"，所以补了两手，都在外壳里：
+
+1. 标题栏左侧一支 `chevron.left`：`showsTitleBarBack = !selection.isTabRoot || (selection == .library && libraryActiveSection != nil)`。
+   后半截是给资料库 tab 用的 —— 它的分区切换发生在 `LibraryView` 自己的栈里，外壳看不见路由变化，
+   所以那条视图新增的反报通道 `onActiveSectionChange` 要接住（iPhone 的 `ContentView` 也接同一个通道，
+   看守钉这条两端都在）。
+2. **已经在这格上再点一次 = 回本 tab 根页**。`LibraryView` 恢复上次浏览位置时不回报分区，
+   万一第 1 手没跟上，这一记是把栈清干净的固定后手。
+
+另外，切走的 tab 要记住自己停在哪儿：`lastRouteIDPerTab: [MacTab: String]` + `route(for:)` 复原时校验
+歌单/来源还在不在（不在了退回该分区的总览）。iPhone 的 `TabView` 天然有这行为，Mac 得自己写。
+`MacRoute` 的 12 条路由现在必须逐条归到某一格（`var tab` 那个 switch），编译期是穷尽的，
+但看守仍然钉一遍：CI 之前先在本地红。
+
+### 27.5 设置页两个入口共用一份选中状态
+
+主窗口的「设置」tab 和 ⌘, 打开的独立设置窗口是同一个 `MacSettingsView` 的两份实例。以前各自
+`new MacSettingsNavigationModel()`，于是"按 settingID 选中某一项"的调用（`ScraperSourceGate`、
+搜索跳转）不知道自己该叫醒哪一个。现在 `MacSettingsNavigationModel.shared` 一份共用，
+`embedded: true` 只改三件事：不画自己的标题栏、不抢窗口 chrome（`PMWindowChromeConfigurator`
+与 `ignoresSafeArea(.top)` 会让正文钻到标题栏底下）、最小宽度从 940 收到 620（免得把主窗口最小宽度顶上去）。
+页脚那几行只在 `embedded` 时出现。
+
+### 27.6 看守第 15 组：11 条，78 → 89
+
+`primuse-win/scripts/criteria-parity-check.js` 新增组 15，全部是"读源码文本"级别的断言
+（这台机没有 Xcode/swiftc，Swift 只能这样钉）：四格名单与顺序三端相等、图标逐格同源、
+首页那一格仍念云端文案、三栏壳在文件/路由/菜单三处都不许留、Mac 的资料库就是 iPhone 那份 `LibraryView`、
+`MacRoute` 每条都归得到某一格、设置页页脚接住源 + 聚合源 + 五个工具、两条源路由真能渲染且聚合源用的是
+同一份视图、没有系统返回就有外壳级返回、那一排高度落在 49–56 这一档、迷你条与 tab 在同一个底部 VStack 里。
+
+变异验证 11 个（`primuse-win/scripts/mac-shell-mutation-check.cjs`，逐条改坏源码→跑看守→`finally`
+按原字节还原，还原后还会再跑一遍看守确认回绿）：11/11 会红。这个脚本留在仓库里，因为下面第一条教训
+说明"看守自己也需要看守"。
+
+### 27.7 三个自己先错的地方
+
+- **一条改坏不红的假断言**：第一版"迷你条在上、tab 贴窗口底边"写成
+  `/safeAreaInset[\s\S]{0,400}MacBottomBar\([\s\S]*?MacTabBar\(/`。变异（把 `MacTabBar` 挪出那个 VStack）
+  之后它仍然绿 —— 因为挪出去了文本顺序还是 bottom 在前。改成先取 `safeAreaInset` 里的 VStack 块，
+  再要求 `MacTabBar` 的索引大于 `MacBottomBar` 的索引，这才是在断言"同一叠、顺序对"。
+- **看守自己的解析错**：`braceBlock` 是给花括号用的，Windows 的 `const TABS = [` 是方括号，
+  于是抓到的块一路跑到很远的花括号，`winTabs` 解析成空 —— 表现是断言直接红但 detail 里 Windows 一侧是空串。
+  换成从 `const TABS = [` 切到 `];`。这跟 §26.7 那次是同一类错：**锚点抓错块比判据写错更难发现**。
+- **发版字段漂移**：`primuse-win/package.json` 的 `buildNumber` 还写着 80，关于页于是显示"#80"而版本已是 1.9.19。
+  冒烟的 `buildShown` 只校验"是不是两三位数字"，钉不住这种漂移 —— 改到 81 之后 `buildShown":"81"`。
+
+### 27.8 这轮验证到哪、没到哪
+
+本机绿：`npm run smoke` 35 步 `RESULT ok`（`smoke-report.json` 落在 `%TEMP%\primuse-smoke\`，
+关于页 `buildShown":"81"`），parity 89/0，22 个改动文件严格 UTF-8 与行尾核对过（无 CR、重编码等于原字节）。
+一次例外说在这儿：改完版本号但还没改 `buildNumber` 时，第一次冒烟报 `RESULT failed`，失败那一步的日志
+被 `tail -20` 截掉没看见，之后连续两次（含 `buildNumber` 修好之后）都是 35/35 ok —— 也就是说
+"那一步为什么红"没有定论，只能算没复现的 flake，不当成已通过。
+
+没验证的还是那两件：**Swift 这一大片只能等 CI 编译**（外壳重写动了 6 个 Mac 文件、删 1 个、新增 1 个，
+静态看守钉得住判据文本钉不住类型检查）；macOS 真机（任务 #5）依旧挂着，四格外壳的手感——
+尤其是"再点一次本格回根页"和资料库分区钻进去之后返回键出不出——只有真机能判。
+
